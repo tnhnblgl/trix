@@ -1,0 +1,6 @@
+/target
+
+# probe/recording artifacts
+*.mp4
+*.wav
+*.png
