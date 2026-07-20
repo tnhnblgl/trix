@@ -194,6 +194,13 @@ Each phase ends with a runnable binary and a verifiable exit criterion.
 - **Exit:** play a game for 5 minutes, hit the hotkey, get a correct last-30-seconds clip; process RAM stays flat the whole time.
 
 ### Phase 6 — Daemonization & robustness (1–2 days)
+- Configurable clip hotkey: `clip_hotkey` in config.toml (default `alt+f10`).
+  Real-world collision found in the field: NVIDIA App's overlay owns Alt+F10
+  ("Save Instant Replay") and its low-level hook consumes the key *before*
+  `RegisterHotKey` matching in games it has hooked (seen in ETS2 — the game
+  still takes its own F10 screenshot via raw input, Trix never fires), while
+  Roblox's anticheat blocks the overlay so the key falls through and works.
+  Users need a rebind path; no fixed key is safe from every overlay.
 - Detached background operation, single-instance guard, graceful Ctrl+C / hotkey shutdown that finalizes the MP4 (an unfinalized MP4 is corrupt — always flush the moov atom).
 - Handle device-lost (GPU driver reset, monitor unplug, resolution change) by rebuilding the capture session without exiting.
 - **Exit:** survives alt-tab, display mode changes, and a 2-hour soak run without leaks (working set flat) or crashes.
@@ -325,8 +332,98 @@ Each phase ends with a runnable binary and a verifiable exit criterion.
   508 frames encoded, ring held 251 packets (~18 s budget), 1 frame dropped
   (0.2 %), 0 audio gaps/trims.
 
-**Next up: Phase 6** — daemonization & robustness: graceful Ctrl+C, single
-instance, device-lost/monitor-change recovery, long soak.
+- **Phase 6a ✅** — configurable clip hotkey. Field finding: in ETS2 the clip
+  never fired while Roblox worked — NVIDIA App's overlay owns Alt+F10 ("Save
+  Instant Replay") and its low-level hook consumes the key before
+  `RegisterHotKey` matching in games it hooks (ETS2 still took its own F10
+  screenshot via raw input; Roblox's anticheat blocks the overlay, so the key
+  fell through to us). Fix: `clip_hotkey` in config.toml — `mods+key` parser
+  in `control.rs` (ctrl/alt/shift/win + a-z/0-9/f1-f24; bare letters/digits
+  rejected so a typo can't swallow a key system-wide), banner shows the
+  active combination, invalid values fail fast with the accepted format,
+  registration failure explains the another-app-owns-it case. 5 unit tests.
+- **Phase 6b ✅** — graceful shutdown. `SetConsoleCtrlHandler` routes
+  Ctrl+C/Ctrl+Break/console-close into a polled atomic; `record` finalizes
+  the MP4 early (verified: Ctrl+C at 6 s into a 30 s recording → valid file,
+  moov flushed, video 6.15 s / audio 6.25 s locked, exit < 1 s), `replay`
+  breaks into its normal diagnostics+close path. Console-close holds the
+  handler thread until finalize completes (Windows kills ~5 s after return).
+- **Phase 6c ✅** — single-instance guard: named mutex
+  (`Local\trix-capture-single-instance`) acquired before record/replay; a
+  second session exits with a friendly error (verified live), `probe` stays
+  allowed alongside.
+- **Phase 6d ✅** — display-change / device-lost robustness, two layers.
+  (1) Resolution changes don't interrupt anything: windows-capture recreates
+  its frame pool and keeps delivering at the new size, and our per-frame
+  VideoProcessor blit scales any input into the encoder's fixed resolution —
+  verified live by switching 1920x1200→1920x1080→back mid-replay: session
+  survived, both transitions logged ("capture input resized"), auto-clip
+  spanning the change is box-valid at constant 1920x1200, 0 drops.
+  (2) If the capture item actually dies (monitor unplug, topology change,
+  GPU driver reset), `replay` now rebuilds the whole session in a loop:
+  re-query monitor + audio, fresh encoder + ring (ring restarts empty —
+  logged), 2 s settle between attempts, Ctrl+C responsive during waits,
+  stale hotkey presses drained, failure budget of 30 consecutive
+  fast-failures before giving up. Real unplug/TDR still needs hands-on
+  verification. `record` on device loss finalizes early with a valid MP4
+  (same path as 6b).
+
+- **Phase 6e ✅** — soak test, and it earned its keep: the first 12-minute
+  idle-replay run leaked ~190 KB/s (working set 134 → 244 MB). Root cause:
+  audio was only pumped inside `on_frame_arrived`, and WGC delivers no
+  frames on a static screen — the unbounded loopback mpsc channel buffered
+  PCM at exactly the loopback rate (48 kHz × 4 B). Three-part fix:
+  (1) `idle_pump()` drains audio on the control thread's 250 ms tick in both
+  replay and record; (2) the audio ring is span-bounded on its own
+  (replay + 3 s measured from the newest sample) because the existing trim
+  rule keys off the *video* ring front, which stops moving during a stall;
+  (3) clip PCM assembly no longer splices silence in front when older audio
+  was trimmed — the snapshot carries `audio_offset_100ns` and the audio
+  track starts late (a 2-hour static stretch would otherwise have allocated
+  GBs of zeros at clip time). Re-run: working set 133.6 → 136.0 MB over
+  12 min — +2 MB settle while the audio ring fills to its bound, then flat
+  to the 0.1 MB for the entire back half; private bytes identical; clean
+  exit, 0 gaps. Static-screen clip verified box-valid (1 video packet +
+  13.9 s audio).
+
+- **Phase 7 ✅** — performance self-certification. `stats.rs`: a fixed-bucket
+  `LatencyHistogram` (no alloc, O(1) record, quantiles read as "≤ bound") on
+  the capture hot path, and a `StatsReporter` pairing OS process counters
+  (`K32GetProcessMemoryInfo`) with DXGI per-process video memory
+  (`IDXGIAdapter3::QueryVideoMemoryInfo`). Both `record` and `replay` measure
+  the *per-frame capture-callback time* — the wall time Trix occupies the WGC
+  thread, i.e. the gameplay-impact number — and emit a `perf` line every
+  `stats_seconds` (config, default 60; 0 silences) plus a final summary at
+  close. 6 unit tests; self-report validated against an external
+  `Get-Process WorkingSet64` probe (matched to 0.1 MB).
+
+  Certified numbers (1920×1200@60, 8 Mbps, this UMA iGPU):
+  - **Per-frame latency** — replay p50 ≤2 ms / p99 ≤4 ms / max 5.8 ms over
+    1472 frames, 0 dropped; record p50 ≤1 ms / p99 ≤2 ms / max 2.8 ms over
+    988 frames, 0 dropped. Both are a small fraction of the 16.7 ms frame
+    budget — the "zero-impact" claim holds.
+  - **Memory** — working set ~174 MB (replay) / ~170 MB (record). The
+    exactly-measured CPU-side ring is **13.2 MB** (`cpu_ring_mb`, video+audio),
+    within the §4.1 replay budget once the 8 Mbps + 3 s keyframe margin is
+    accounted for. Everything else is GPU/UMA surfaces.
+
+  Measurement finding worth remembering: on this integrated adapter DXGI's
+  *in-process* `QueryVideoMemoryInfo` reports only the ~67–70 MB **dedicated
+  (local)** segment; the **non-local (shared)** segment returns 0, so the
+  ~83 MB of GPU-accessible *shared system memory* (WGC frame pool, NV12
+  staging, encoder surfaces) that Phase 5c's external perfmon "GPU Process
+  Memory" counters caught is invisible from inside the process. Consequently
+  `ws_minus_gpu_mb` (WS − DXGI-dedicated ≈ 103 MB) is only an *upper bound* on
+  CPU-side RAM, not the heap — the honest CPU-side figure is the exact ring
+  (`cpu_ring_mb`), reconciling with 5c's ~8 MB CPU-side conclusion. On a
+  discrete GPU the same field would instead undercount (local VRAM never
+  enters WS); it is a bound either way.
+
+**MVP core complete (Phases 0–7).** User-verifiable leftovers: rebind
+`clip_hotkey` (already set to bare `f10`) and confirm ETS2 clips fire;
+unplug/replug an external monitor during `trix replay` to exercise the
+rebuild loop with real hardware events. Post-MVP candidates: software-encoder
+fallback when no HW encoder is present, AMD/AMF validation on other hardware.
 
 ## 6. First Concrete Step
 

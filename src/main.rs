@@ -5,6 +5,7 @@ mod encode;
 mod probe;
 mod record;
 mod replay;
+mod stats;
 
 use std::path::PathBuf;
 
@@ -48,7 +49,7 @@ enum Command {
         #[arg(long)]
         no_audio: bool,
     },
-    /// Run the replay buffer; Alt+F10 saves the last N seconds as a clip
+    /// Run the replay buffer; the clip hotkey (default Alt+F10) saves the last N seconds
     Replay {
         /// Testing: save a clip automatically after N seconds
         #[arg(long, value_name = "SECONDS", hide = true)]
@@ -75,6 +76,8 @@ fn main() -> Result<()> {
     let config = config::Config::load();
     tracing::debug!(?config, "loaded configuration");
 
+    control::install_shutdown_handler()?;
+
     match cli.command {
         Command::Probe { snapshot, capture, audio } => match (snapshot, capture, audio) {
             (Some(path), _, _) => capture::video::snapshot(config.monitor_index, path),
@@ -84,13 +87,19 @@ fn main() -> Result<()> {
             }
             (None, None, None) => probe::run(),
         },
-        Command::Record { duration, output, no_audio } => record::run(
-            &config,
-            record::RecordOptions { duration_secs: duration, output, no_audio },
-        ),
-        Command::Replay { auto_clip, exit_after } => replay::run(
-            &config,
-            replay::ReplayOptions { auto_clip_secs: auto_clip, exit_after_secs: exit_after },
-        ),
+        Command::Record { duration, output, no_audio } => {
+            control::acquire_single_instance()?;
+            record::run(
+                &config,
+                record::RecordOptions { duration_secs: duration, output, no_audio },
+            )
+        }
+        Command::Replay { auto_clip, exit_after } => {
+            control::acquire_single_instance()?;
+            replay::run(
+                &config,
+                replay::ReplayOptions { auto_clip_secs: auto_clip, exit_after_secs: exit_after },
+            )
+        }
     }
 }

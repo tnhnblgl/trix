@@ -1,8 +1,9 @@
 //! `trix replay` (Phase 5b) — the Medal-style replay buffer.
 //!
 //! Continuously encodes the screen into an in-RAM ring of *compressed* H.264
-//! packets (GOP-aligned) plus a PCM audio ring on the same timeline. On
-//! Alt+F10 the last `replay_seconds` are muxed to `clip_<timestamp>.mp4` —
+//! packets (GOP-aligned) plus a PCM audio ring on the same timeline. On the
+//! clip hotkey (`clip_hotkey` in config.toml, default Alt+F10) the last
+//! `replay_seconds` are muxed to `clip_<timestamp>.mp4` —
 //! video in passthrough (no re-encode), audio AAC-encoded at flush time.
 //! Only compressed video and a few seconds of PCM ever touch system RAM.
 
@@ -13,7 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context as _, Result, anyhow};
 use windows_capture::{
     capture::{CaptureControl, Context, GraphicsCaptureApiHandler},
     frame::Frame,
@@ -37,6 +38,7 @@ use crate::{
         h264::{EncodedPacket, H264Encoder},
         mf::{ClipMuxer, RecorderSettings, create_device_manager},
     },
+    stats::{LatencyHistogram, StatsReporter, mb},
 };
 
 /// Extra ring depth beyond the clip length so a clip can always start on the
@@ -54,6 +56,7 @@ struct ReplayFlags {
     settings: RecorderSettings,
     replay_100ns: i64,
     audio_rx: Option<Receiver<AudioPacket>>,
+    stats_seconds: u32,
 }
 
 struct AudioChunk {
@@ -70,8 +73,12 @@ struct ClipSnapshot {
     video_type: windows::Win32::Media::MediaFoundation::IMFMediaType,
     video: Vec<EncodedPacket>,
     base_pts: i64,
-    /// Continuous PCM starting exactly at `base_pts`.
+    /// Continuous PCM starting at `base_pts + audio_offset_100ns`.
     audio_pcm: Vec<u8>,
+    /// Non-zero when audio older than the ring's span bound was trimmed
+    /// (long static stretch): the track starts late instead of carrying an
+    /// unbounded run of spliced silence.
+    audio_offset_100ns: i64,
 }
 
 struct ReplaySession {
@@ -92,6 +99,15 @@ struct ReplaySession {
 
     frames: u64,
     frames_dropped: u64,
+    /// Last seen capture frame size — WGC keeps delivering after a display
+    /// mode change at the new size; the blit scales it into the encoder's
+    /// fixed resolution, and this only exists to log the transition once.
+    input_size: (u32, u32),
+
+    /// Wall time spent inside the capture callback per frame (convert +
+    /// encode submit + drain) — the gameplay-impact number.
+    frame_latency: LatencyHistogram,
+    stats: StatsReporter,
 
     // Keeps GPU access for the encoder MFT alive.
     _manager: windows::Win32::Media::MediaFoundation::IMFDXGIDeviceManager,
@@ -110,6 +126,73 @@ impl ReplaySession {
             *bytes += packet.data.len();
             ring.push_back(packet);
         })
+    }
+
+    /// Drains loopback PCM into the audio ring up to `target_100ns` and
+    /// bounds the ring's span. Must also run when no frames arrive: WGC goes
+    /// quiet on a static screen while loopback keeps producing (~190 KB/s),
+    /// and an undrained channel grows without limit (found by the Phase 6
+    /// soak: +110 MB working set over 12 idle minutes).
+    fn pump_audio_to(&mut self, target_100ns: i64) {
+        if let Some(rx) = &self.audio_rx {
+            let ring = &mut self.audio_ring;
+            self.timeline.pump(rx, target_100ns, &mut |start_frame, pcm| {
+                ring.push_back(AudioChunk { start_frame, data: pcm.to_vec() });
+            });
+        }
+        // evict() trims audio against the *video* front, which stops moving
+        // the moment the screen goes static — bound the span directly too.
+        if let Some(back) = self.audio_ring.back() {
+            let newest_end = back.start_frame + (back.data.len() / ENCODER_BLOCK_ALIGN) as u64;
+            let budget = dur_100ns_to_frames(self.replay_100ns + KEYFRAME_MARGIN_100NS);
+            let horizon = newest_end.saturating_sub(budget);
+            while let Some(front) = self.audio_ring.front() {
+                let front_end = front.start_frame + (front.data.len() / ENCODER_BLOCK_ALIGN) as u64;
+                if front_end <= horizon {
+                    self.audio_ring.pop_front();
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Control-thread tick while the screen is static (no frame callbacks).
+    fn idle_pump(&mut self) {
+        if self.t0_qpc.is_none() {
+            return; // timeline anchors to the first video frame
+        }
+        let now = unsafe { windows::Win32::Media::MediaFoundation::MFGetSystemTime() };
+        self.pump_audio_to(now - SILENCE_GRACE_100NS);
+    }
+
+    /// Control-thread tick: emit a periodic performance line when the stats
+    /// interval elapses. Cheap enough to poll every loop iteration.
+    fn report_if_due(&mut self) {
+        if self.stats.due() {
+            self.log_perf("perf");
+        }
+    }
+
+    fn log_perf(&self, tag: &str) {
+        let m = self.stats.memory();
+        let audio_ring_bytes: usize = self.audio_ring.iter().map(|c| c.data.len()).sum();
+        // The exact CPU-side allocation we own and that scales with config —
+        // the number the <30 MB budget is really about (working set is
+        // UMA-inflated by GPU surfaces).
+        let cpu_ring_mb = mb((self.ring_bytes + audio_ring_bytes) as u64);
+        tracing::info!(
+            ws_mb = mb(m.working_set),
+            gpu_dedicated_mb = mb(m.gpu_local),
+            gpu_shared_mb = mb(m.gpu_shared),
+            ws_minus_gpu_mb = mb(m.ws_minus_gpu()),
+            cpu_ring_mb,
+            frames = self.frames,
+            dropped = self.frames_dropped,
+            ring_packets = self.video_ring.len(),
+            latency = %self.frame_latency.summary(),
+            "{tag}"
+        );
     }
 
     fn evict(&mut self) {
@@ -145,16 +228,12 @@ impl ReplaySession {
     fn snapshot_clip(&mut self) -> Result<Option<ClipSnapshot>> {
         self.pump_encoder()?;
 
-        // Audio keeps flowing while the screen is static (no frames, so
-        // on_frame_arrived stops pumping); drain everything captured up to
-        // this instant or the clip loses its trailing audio.
-        if let Some(rx) = &self.audio_rx {
+        // Drain audio up to this instant so the clip keeps its trailing
+        // audio even when the screen has been static.
+        if self.t0_qpc.is_some() {
             let now_100ns =
                 unsafe { windows::Win32::Media::MediaFoundation::MFGetSystemTime() };
-            let ring = &mut self.audio_ring;
-            self.timeline.pump(rx, now_100ns - SILENCE_GRACE_100NS, &mut |start_frame, pcm| {
-                ring.push_back(AudioChunk { start_frame, data: pcm.to_vec() });
-            });
+            self.pump_audio_to(now_100ns - SILENCE_GRACE_100NS);
         }
 
         let Some(back) = self.video_ring.back() else { return Ok(None) };
@@ -184,6 +263,7 @@ impl ReplaySession {
         // Assemble continuous PCM aligned to base_pts. Chunks are gapless and
         // consecutive by construction (AudioTimeline emits one stream).
         let mut audio_pcm = Vec::new();
+        let mut audio_offset_100ns = 0i64;
         if self.settings.with_audio {
             let base_frame = dur_100ns_to_frames(base_pts);
             let mut first_chunk_frame = None;
@@ -196,13 +276,19 @@ impl ReplaySession {
                     let skip = (base_frame - start_frame) as usize * ENCODER_BLOCK_ALIGN;
                     audio_pcm.drain(..skip.min(audio_pcm.len()));
                 } else if start_frame > base_frame {
-                    let pad = (start_frame - base_frame) as usize * ENCODER_BLOCK_ALIGN;
-                    audio_pcm.splice(..0, std::iter::repeat_n(0u8, pad));
+                    audio_offset_100ns = frames_to_100ns(start_frame - base_frame);
                 }
             }
         }
 
-        Ok(Some(ClipSnapshot { settings: self.settings, video_type, video, base_pts, audio_pcm }))
+        Ok(Some(ClipSnapshot {
+            settings: self.settings,
+            video_type,
+            video,
+            base_pts,
+            audio_pcm,
+            audio_offset_100ns,
+        }))
     }
 }
 
@@ -221,6 +307,7 @@ impl GraphicsCaptureApiHandler for ReplaySession {
             4,
         )?;
         let encoder = H264Encoder::new(&ctx.device, &manager, &flags.settings)?;
+        let stats = StatsReporter::new(&ctx.device, flags.stats_seconds);
 
         tracing::info!(
             width = flags.settings.width,
@@ -246,6 +333,9 @@ impl GraphicsCaptureApiHandler for ReplaySession {
             last_frame_qpc: 0,
             frames: 0,
             frames_dropped: 0,
+            input_size: (flags.settings.width, flags.settings.height),
+            frame_latency: LatencyHistogram::new(),
+            stats,
             _manager: manager,
         })
     }
@@ -262,8 +352,18 @@ impl GraphicsCaptureApiHandler for ReplaySession {
                 return Ok(());
             }
         };
+        let callback_start = Instant::now();
         let t0 = *self.t0_qpc.get_or_insert(frame_qpc);
         self.timeline.start(t0);
+
+        if (frame.width(), frame.height()) != self.input_size {
+            tracing::info!(
+                from = ?self.input_size,
+                to = ?(frame.width(), frame.height()),
+                "capture input resized — scaling into fixed encoder resolution"
+            );
+            self.input_size = (frame.width(), frame.height());
+        }
 
         self.pump_encoder()?;
 
@@ -279,14 +379,10 @@ impl GraphicsCaptureApiHandler for ReplaySession {
         }
         self.last_frame_qpc = frame_qpc;
 
-        if let Some(rx) = &self.audio_rx {
-            let ring = &mut self.audio_ring;
-            self.timeline.pump(rx, frame_qpc - SILENCE_GRACE_100NS, &mut |start_frame, pcm| {
-                ring.push_back(AudioChunk { start_frame, data: pcm.to_vec() });
-            });
-        }
+        self.pump_audio_to(frame_qpc - SILENCE_GRACE_100NS);
 
         self.evict();
+        self.frame_latency.record(callback_start.elapsed());
         Ok(())
     }
 
@@ -316,7 +412,10 @@ fn write_clip(snapshot: &ClipSnapshot, path: &PathBuf) -> Result<()> {
     // 1-second PCM buffers; the muxer's AAC encoder eats them at flush speed.
     let second = SAMPLE_RATE * ENCODER_BLOCK_ALIGN;
     for (i, chunk) in snapshot.audio_pcm.chunks(second).enumerate() {
-        muxer.write_audio(frames_to_100ns((i * SAMPLE_RATE) as u64), chunk)?;
+        muxer.write_audio(
+            snapshot.audio_offset_100ns + frames_to_100ns((i * SAMPLE_RATE) as u64),
+            chunk,
+        )?;
     }
     muxer.finish()
 }
@@ -349,7 +448,79 @@ fn save_clip(capture: &CaptureControl<ReplaySession, anyhow::Error>) -> Result<(
     Ok(())
 }
 
+/// Why a capture session ended.
+enum SessionEnd {
+    /// Ctrl+C or `--exit-after`: leave the process.
+    Shutdown,
+    /// The capture item closed or the pipeline errored (monitor unplug,
+    /// display topology change, GPU driver reset): eligible for rebuild.
+    Died,
+}
+
 pub fn run(config: &Config, options: ReplayOptions) -> Result<()> {
+    let result = run_rebuild_loop(config, &options);
+    control::mark_finalized();
+    result
+}
+
+fn run_rebuild_loop(config: &Config, options: &ReplayOptions) -> Result<()> {
+    let hotkey = control::Hotkey::parse(&config.clip_hotkey)
+        .context("invalid clip_hotkey in config.toml")?;
+    let hotkey_rx = control::start_hotkey(&hotkey)?;
+
+    let run_started = Instant::now();
+    let mut auto_clip_fired = false;
+    let mut ever_ran = false;
+    let mut failures = 0u32;
+    loop {
+        let session_started = Instant::now();
+        match run_session(config, options, &hotkey, &hotkey_rx, run_started, &mut auto_clip_fired)
+        {
+            Ok(SessionEnd::Shutdown) => return Ok(()),
+            Ok(SessionEnd::Died) => {
+                ever_ran = true;
+                // A session that held for a while earns its failure budget
+                // back; one dying right after a rebuild burns it.
+                if session_started.elapsed() >= Duration::from_secs(10) {
+                    failures = 0;
+                } else {
+                    failures += 1;
+                }
+                println!(
+                    "capture session lost (display change / device reset?) — \
+                     rebuilding, replay ring restarts empty"
+                );
+            }
+            Err(e) if !ever_ran => return Err(e),
+            Err(e) => {
+                failures += 1;
+                tracing::warn!("rebuild attempt failed: {e:#}");
+                if failures >= 30 {
+                    return Err(e.context("capture could not be rebuilt after repeated attempts"));
+                }
+            }
+        }
+        // Let the display settle before rebuilding; stay Ctrl+C-responsive
+        // and drop hotkey presses queued while there was no buffer to clip.
+        let wait_until = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < wait_until {
+            if control::shutdown_requested() {
+                return Ok(());
+            }
+            while hotkey_rx.try_recv().is_ok() {}
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+fn run_session(
+    config: &Config,
+    options: &ReplayOptions,
+    hotkey: &control::Hotkey,
+    hotkey_rx: &Receiver<()>,
+    run_started: Instant,
+    auto_clip_fired: &mut bool,
+) -> Result<SessionEnd> {
     let monitor = Monitor::from_index(config.monitor_index as usize + 1)
         .map_err(|e| anyhow!("monitor {} not available: {e}", config.monitor_index))?;
     let width = monitor.width().map_err(|e| anyhow!("monitor width: {e}"))?;
@@ -364,8 +535,6 @@ pub fn run(config: &Config, options: ReplayOptions) -> Result<()> {
             }
         };
 
-    let hotkey_rx = control::start_hotkey()?;
-
     let flags = ReplayFlags {
         settings: RecorderSettings {
             width,
@@ -376,11 +545,12 @@ pub fn run(config: &Config, options: ReplayOptions) -> Result<()> {
         },
         replay_100ns: i64::from(config.replay_seconds) * 10_000_000,
         audio_rx,
+        stats_seconds: config.stats_seconds,
     };
 
     println!(
-        "replay buffer running: {}x{} at {} fps, {} kbps, last {} s kept — Alt+F10 to clip, Ctrl+C to quit",
-        width, height, config.fps, config.bitrate_kbps, config.replay_seconds,
+        "replay buffer running: {}x{} at {} fps, {} kbps, last {} s kept — {} to clip, Ctrl+C to quit",
+        width, height, config.fps, config.bitrate_kbps, config.replay_seconds, hotkey,
     );
 
     let settings = Settings::new(
@@ -396,8 +566,6 @@ pub fn run(config: &Config, options: ReplayOptions) -> Result<()> {
     let capture = ReplaySession::start_free_threaded(settings)
         .map_err(|e| anyhow!("failed to start capture: {e}"))?;
 
-    let started = Instant::now();
-    let mut auto_clip_fired = false;
     let mut session_died = false;
     loop {
         match hotkey_rx.recv_timeout(Duration::from_millis(250)) {
@@ -408,18 +576,28 @@ pub fn run(config: &Config, options: ReplayOptions) -> Result<()> {
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
+                if control::shutdown_requested() {
+                    println!("stop requested — closing replay buffer");
+                    break;
+                }
                 if capture.is_finished() {
                     session_died = true;
                     break;
                 }
+                {
+                    let handler = capture.callback();
+                    let mut session = handler.lock();
+                    session.idle_pump();
+                    session.report_if_due();
+                }
                 if let Some(secs) = options.auto_clip_secs {
-                    if !auto_clip_fired && started.elapsed() >= Duration::from_secs(secs) {
-                        auto_clip_fired = true;
+                    if !*auto_clip_fired && run_started.elapsed() >= Duration::from_secs(secs) {
+                        *auto_clip_fired = true;
                         save_clip(&capture)?;
                     }
                 }
                 if let Some(secs) = options.exit_after_secs {
-                    if started.elapsed() >= Duration::from_secs(secs) {
+                    if run_started.elapsed() >= Duration::from_secs(secs) {
                         break;
                     }
                 }
@@ -431,24 +609,20 @@ pub fn run(config: &Config, options: ReplayOptions) -> Result<()> {
     if !session_died {
         let session = capture.callback();
         let session = session.lock();
-        tracing::info!(
-            frames = session.frames,
-            dropped = session.frames_dropped,
-            ring_bytes = session.ring_bytes,
-            ring_packets = session.video_ring.len(),
-            "replay session closing"
-        );
+        session.log_perf("replay session closing");
         session.timeline.log_diagnostics();
     }
-    let capture_result = if session_died {
-        capture.wait().map_err(|e| anyhow!("capture session failed: {e}"))
-    } else {
-        capture.stop().map_err(|e| anyhow!("failed to stop capture: {e}"))
-    };
+    if session_died {
+        if let Err(e) = capture.wait() {
+            tracing::warn!("capture session failed: {e:#}");
+        }
+    } else if let Err(e) = capture.stop() {
+        tracing::warn!("failed to stop capture: {e:#}");
+    }
     if let Some(handle) = audio_handle {
         if let Err(e) = handle.stop() {
             tracing::warn!("audio capture thread: {e}");
         }
     }
-    capture_result
+    Ok(if session_died { SessionEnd::Died } else { SessionEnd::Shutdown })
 }

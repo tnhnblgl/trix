@@ -19,7 +19,7 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use windows_capture::{
-    capture::{Context, GraphicsCaptureApiHandler},
+    capture::{CaptureControl, Context, GraphicsCaptureApiHandler},
     frame::Frame,
     graphics_capture_api::InternalCaptureControl,
     monitor::Monitor,
@@ -36,6 +36,7 @@ use crate::{
     },
     config::Config,
     encode::mf::{MfRecorder, RecorderSettings},
+    stats::{LatencyHistogram, StatsReporter, mb},
 };
 
 pub struct RecordOptions {
@@ -53,6 +54,7 @@ struct RecordFlags {
     deadline: Duration,
     done: Sender<Result<Summary>>,
     audio_rx: Option<Receiver<AudioPacket>>,
+    stats_seconds: u32,
 }
 
 struct Summary {
@@ -74,6 +76,14 @@ struct RecordSession {
     timeline: AudioTimeline,
     t0_qpc: Option<i64>,
     last_frame_qpc: i64,
+    /// Last seen capture frame size — display mode changes mid-recording are
+    /// scaled into the negotiated resolution by the blit; logged once.
+    input_size: (u32, u32),
+
+    /// Wall time spent inside the capture callback per frame (convert +
+    /// WriteSample submit + audio drain) — the gameplay-impact number.
+    frame_latency: LatencyHistogram,
+    stats: StatsReporter,
 }
 
 impl RecordSession {
@@ -87,6 +97,40 @@ impl RecordSession {
         });
     }
 
+    /// Control-thread tick while the screen is static: WGC stops calling
+    /// `on_frame_arrived`, but loopback keeps producing — the channel must
+    /// not buffer PCM unboundedly (same starvation the replay soak found).
+    fn idle_pump(&mut self) {
+        if self.t0_qpc.is_none() {
+            return; // timeline anchors to the first video frame
+        }
+        let now = unsafe { windows::Win32::Media::MediaFoundation::MFGetSystemTime() };
+        self.pump_audio(now - SILENCE_GRACE_100NS);
+    }
+
+    /// Control-thread tick: emit a periodic performance line when the stats
+    /// interval elapses.
+    fn report_if_due(&mut self) {
+        if self.stats.due() {
+            self.log_perf("perf");
+        }
+    }
+
+    fn log_perf(&self, tag: &str) {
+        let dropped = self.recorder.as_ref().map_or(0, |r| r.frames_dropped);
+        let m = self.stats.memory();
+        tracing::info!(
+            ws_mb = mb(m.working_set),
+            gpu_dedicated_mb = mb(m.gpu_local),
+            gpu_shared_mb = mb(m.gpu_shared),
+            ws_minus_gpu_mb = mb(m.ws_minus_gpu()),
+            frames = self.frames,
+            dropped,
+            latency = %self.frame_latency.summary(),
+            "{tag}"
+        );
+    }
+
     /// Closes the audio timeline at the last video frame, finalizes the MP4
     /// (flushes the moov atom), and reports the outcome.
     fn finish(&mut self) {
@@ -94,6 +138,7 @@ impl RecordSession {
             self.pump_audio(self.last_frame_qpc);
         }
         self.timeline.log_diagnostics();
+        self.log_perf("recording finalizing");
         if let Some(recorder) = self.recorder.take() {
             let frames_dropped = recorder.frames_dropped;
             let result = recorder
@@ -129,6 +174,7 @@ impl GraphicsCaptureApiHandler for RecordSession {
             },
         )
         .map_err(|e| anyhow!("failed to create encoder: {e}"))?;
+        let stats = StatsReporter::new(&ctx.device, flags.stats_seconds);
 
         tracing::info!(
             width = flags.width,
@@ -150,6 +196,9 @@ impl GraphicsCaptureApiHandler for RecordSession {
             timeline: AudioTimeline::new(),
             t0_qpc: None,
             last_frame_qpc: 0,
+            input_size: (flags.width, flags.height),
+            frame_latency: LatencyHistogram::new(),
+            stats,
         })
     }
 
@@ -172,6 +221,16 @@ impl GraphicsCaptureApiHandler for RecordSession {
             }
         };
 
+        if (frame.width(), frame.height()) != self.input_size {
+            tracing::info!(
+                from = ?self.input_size,
+                to = ?(frame.width(), frame.height()),
+                "capture input resized — scaling into fixed encoder resolution"
+            );
+            self.input_size = (frame.width(), frame.height());
+        }
+
+        let callback_start = Instant::now();
         if let Some(recorder) = &mut self.recorder {
             // Timeline zero = first frame's QPC (so the first sample lands at 0).
             let t0 = *self.t0_qpc.get_or_insert(frame_qpc);
@@ -187,6 +246,7 @@ impl GraphicsCaptureApiHandler for RecordSession {
             }
             self.last_frame_qpc = frame_qpc;
             self.pump_audio(frame_qpc - SILENCE_GRACE_100NS);
+            self.frame_latency.record(callback_start.elapsed());
         }
         Ok(())
     }
@@ -235,6 +295,7 @@ pub fn run(config: &Config, options: RecordOptions) -> Result<()> {
         deadline: Duration::from_secs(options.duration_secs),
         done,
         audio_rx,
+        stats_seconds: config.stats_seconds,
     };
 
     let settings = Settings::new(
@@ -251,25 +312,53 @@ pub fn run(config: &Config, options: RecordOptions) -> Result<()> {
     let control = RecordSession::start_free_threaded(settings)
         .map_err(|e| anyhow!("failed to start capture: {e}"))?;
 
-    // Normal path: the handler finishes itself when the deadline passes. The
-    // timeout only fires if the screen goes fully static (WGC stops delivering
+    // Normal path: the handler finishes itself when the deadline passes;
+    // Ctrl+C finalizes early with what was captured so the MP4 stays valid
+    // (an unflushed moov atom means an unplayable file). The grace timeout
+    // only fires if the screen goes fully static (WGC stops delivering
     // frames), in which case we stop the session and finalize from here.
     let grace = Duration::from_secs(options.duration_secs) + Duration::from_secs(5);
-    let outcome = match outcome.recv_timeout(grace) {
-        Ok(result) => {
-            control.stop().map_err(|e| anyhow!("failed to stop capture: {e}"))?;
-            result
-        }
-        Err(_) => {
-            let handler = control.callback();
-            control.stop().map_err(|e| anyhow!("failed to stop capture: {e}"))?;
-            handler.lock().finish();
-            Err(anyhow!(
-                "no frames arrived near the deadline (static screen?) — \
-                 recording finalized with what was captured"
-            ))
+    let wait_started = Instant::now();
+    let stop_and_finish = |control: CaptureControl<RecordSession, anyhow::Error>| -> Result<()> {
+        let handler = control.callback();
+        control.stop().map_err(|e| anyhow!("failed to stop capture: {e}"))?;
+        handler.lock().finish();
+        Ok(())
+    };
+    let outcome = loop {
+        match outcome.recv_timeout(Duration::from_millis(200)) {
+            Ok(result) => {
+                control.stop().map_err(|e| anyhow!("failed to stop capture: {e}"))?;
+                break result;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                {
+                    let handler = control.callback();
+                    let mut session = handler.lock();
+                    session.idle_pump();
+                    session.report_if_due();
+                }
+                if crate::control::shutdown_requested() {
+                    println!("stop requested — finalizing recording");
+                    stop_and_finish(control)?;
+                    break outcome
+                        .try_recv()
+                        .unwrap_or_else(|_| Err(anyhow!("finalize produced no summary")));
+                }
+                if wait_started.elapsed() >= grace {
+                    stop_and_finish(control)?;
+                    break Err(anyhow!(
+                        "no frames arrived near the deadline (static screen?) — \
+                         recording finalized with what was captured"
+                    ));
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                break Err(anyhow!("capture session ended unexpectedly"));
+            }
         }
     };
+    crate::control::mark_finalized();
 
     if let Some(handle) = audio_handle {
         if let Err(e) = handle.stop() {

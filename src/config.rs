@@ -16,6 +16,14 @@ pub struct Config {
     pub replay_seconds: u32,
     /// Zero-based index of the monitor to capture.
     pub monitor_index: u32,
+    /// Clip hotkey for `trix replay`: `mods+key`, e.g. "alt+f10" or
+    /// "ctrl+shift+c". Modifiers: ctrl, alt, shift, win; keys: a-z, 0-9,
+    /// f1-f24. Rebind when another overlay owns the default.
+    pub clip_hotkey: String,
+    /// Seconds between performance self-reports (working set, CPU-vs-GPU
+    /// memory split, per-frame latency). 0 disables the periodic line;
+    /// a final summary is always logged at shutdown.
+    pub stats_seconds: u32,
 }
 
 impl Default for Config {
@@ -25,6 +33,8 @@ impl Default for Config {
             bitrate_kbps: 8000,
             replay_seconds: 15,
             monitor_index: 0,
+            clip_hotkey: "alt+f10".into(),
+            stats_seconds: 60,
         }
     }
 }
