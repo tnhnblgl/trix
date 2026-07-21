@@ -249,7 +249,7 @@ Each phase ends with a runnable binary and a verifiable exit criterion.
 |---|---|
 | SinkWriter's opaque buffering complicates the replay ring | Phase 5 fallback: drive encoder MFT manually, mux only on clip flush |
 | Fullscreen-exclusive games bypass WGC | Most modern titles use borderless/flip-model (capturable); document limitation; DXGI DD fallback later |
-| WGC yellow capture border (pre-Win11) | `IsBorderRequired = false` on Win10 2104+ / Win11; document for older builds |
+| WGC yellow capture border (pre-Win11) | Runtime-gated: `capture::border_settings()` sets `IsBorderRequired = false` where the property exists (Win11 / build 20348+), else falls back to `Default` (border shown) so capture still starts on Win10 ≤19045 — the property is absent there and a non-`Default` setting aborts capture with `BorderConfigUnsupported`. Verified on AMD RX 6650 XT & RX 550, both Win10 19045. |
 | Low-end iGPU encoder quality (old QuickSync) | Expose bitrate/preset in config; quality is tunable, stutter is not |
 | A/V drift on long recordings | Single QPC clock domain for both streams; verified in Phase 4 exit test |
 

@@ -21,7 +21,7 @@ use windows_capture::{
     graphics_capture_api::InternalCaptureControl,
     monitor::Monitor,
     settings::{
-        ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
+        ColorFormat, CursorCaptureSettings, DirtyRegionSettings,
         MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
     },
 };
@@ -556,7 +556,7 @@ fn run_session(
     let settings = Settings::new(
         monitor,
         CursorCaptureSettings::WithCursor,
-        DrawBorderSettings::WithoutBorder,
+        crate::capture::border_settings(),
         SecondaryWindowSettings::Default,
         MinimumUpdateIntervalSettings::Default,
         DirtyRegionSettings::Default,
