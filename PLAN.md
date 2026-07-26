@@ -460,6 +460,46 @@ fallback when no HW encoder is present, AMD/AMF validation on other hardware.
   at ~4/3 of target fps (¾ frame period, avoiding compositor-cadence beating).
   Observed 165→80/s delivery on the dev laptop.
 
+### Workspace split (2026-07-26) — Stage 1 of the desktop UI spec ✅
+
+Single binary crate → Cargo workspace: `crates/trix-core` (the engine, as a
+library) + `crates/trix-cli` (`trix.exe`, unchanged surface). Groundwork for
+`trix-proto` / `trix-daemon` / `trix-ui` per
+`docs/superpowers/specs/2026-07-26-trix-desktop-ui-design.md`.
+
+Zero behavioural change was the binding constraint, and it holds. All 13 engine
+files moved as **pure renames** — `git diff --numstat -M` reports 0 added / 0
+removed on every one. Release profile carried verbatim; feature resolution,
+dependency graph, edition/resolver and lint levels confirmed unchanged; nothing
+in the engine keys off the crate name (the single-instance mutex string and the
+`%APPDATA%\trix` config path are literals).
+
+Equivalence gate, pre-split (`presplit-baseline` tag) vs post-split, back to
+back on the same machine:
+
+| | pre-split | post-split |
+|---|---|---|
+| `dropped` | 0 | 0 |
+| callback latency p50 / p99 / max | ≤1.0 / ≤2.0 / 4.4 ms | ≤1.0 / ≤2.0 / 4.5 ms |
+| encoder | Intel QSV H.264 MFT | Intel QSV H.264 MFT |
+| rate control | PeakVbr 8 / 12 Mbps | PeakVbr 8 / 12 Mbps |
+| GPU dedicated | 70.3 MB | 70.3 MB |
+| clip | 7.9 s, 192 pkt, 1.4 MB | 7.7 s, 173 pkt, 1.2 MB |
+| release binary | 1,566,720 B | 1,565,696 B (−0.07%) |
+
+Delivered-frame counts differ (338 vs 247) purely because WGC composes only on
+screen change and the two 12 s windows saw different activity; per-frame
+behaviour is identical. Tests went 11 → 20 — `trix-core/tests/public_api.rs` is
+an integration test that sees only genuinely public items, so it guards the
+surface the daemon will consume (proven: flipping `pub mod stats;` to
+`mod stats;` breaks the build).
+
+**Gotcha for future work:** engine tracing targets moved from `trix::record` to
+`trix_core::record`. The default `"trix=info"` filter still matches only because
+`tracing-subscriber` does raw string-prefix matching — so `RUST_LOG=trix::record=debug`
+now matches nothing, and any future crate must be named `trix*` for default
+logging to reach it.
+
 ## 6. First Concrete Step
 
 Phase 0: `cargo new trix`, add `windows`, `clap`, `tracing`; write `trix probe`
