@@ -1,11 +1,4 @@
-mod capture;
-mod config;
-mod control;
-mod encode;
-mod probe;
-mod record;
-mod replay;
-mod stats;
+use trix_core::{capture, config, control, probe, record, replay};
 
 use std::path::PathBuf;
 
@@ -101,5 +94,44 @@ fn main() -> Result<()> {
                 replay::ReplayOptions { auto_clip_secs: auto_clip, exit_after_secs: exit_after },
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every subcommand and flag the verification workflow depends on.
+    /// If the split drops one, this fails instead of a test script failing
+    /// three phases later.
+    #[test]
+    fn cli_surface_is_unchanged() {
+        assert!(Cli::try_parse_from(["trix", "probe"]).is_ok());
+        assert!(Cli::try_parse_from(["trix", "probe", "--snapshot"]).is_ok());
+        assert!(Cli::try_parse_from(["trix", "probe", "--snapshot", "s.png"]).is_ok());
+        assert!(Cli::try_parse_from(["trix", "probe", "--capture", "5"]).is_ok());
+        assert!(Cli::try_parse_from(["trix", "probe", "--audio", "5"]).is_ok());
+        assert!(Cli::try_parse_from(["trix", "record"]).is_ok());
+        assert!(Cli::try_parse_from(["trix", "record", "-d", "10", "-o", "o.mp4"]).is_ok());
+        assert!(Cli::try_parse_from(["trix", "record", "--no-audio"]).is_ok());
+        assert!(Cli::try_parse_from(["trix", "replay"]).is_ok());
+        assert!(Cli::try_parse_from(["trix", "-v", "replay"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["trix", "replay", "--auto-clip", "8", "--exit-after", "12"])
+                .is_ok(),
+            "the hidden test flags are how every phase gets verified"
+        );
+        assert!(Cli::try_parse_from(["trix", "bogus"]).is_err());
+    }
+
+    #[test]
+    fn record_defaults_match_the_pre_split_binary() {
+        let cli = Cli::try_parse_from(["trix", "record"]).unwrap();
+        let Command::Record { duration, output, no_audio } = cli.command else {
+            panic!("expected Record");
+        };
+        assert_eq!(duration, 10);
+        assert_eq!(output, std::path::PathBuf::from("output.mp4"));
+        assert!(!no_audio);
     }
 }
