@@ -103,25 +103,26 @@ A single background CLI process (daemon-style). Two operating modes:
    `QueryPerformanceCounter` at capture time. A/V sync is done arithmetically from
    these stamps (converted to 100 ns MF units) — never by "arrival order".
 
-### 1.4 Module layout (single binary, workspace-ready)
+### 1.4 Module layout (workspace)
 
 ```
-trix/
-├── Cargo.toml
-└── src/
-    ├── main.rs          // CLI parsing, mode dispatch, thread supervision
-    ├── config.rs        // Encoder/bitrate/fps/buffer settings (TOML + CLI overrides)
-    ├── capture/
-    │   ├── video.rs     // Windows.Graphics.Capture session + D3D11 texture pool
-    │   └── audio.rs     // WASAPI loopback client (+ optional mic input later)
-    ├── encode/
-    │   ├── mf.rs        // Media Foundation SinkWriter setup, HW MFT selection
-    │   └── types.rs     // EncodedPacket, stream descriptions, QPC↔MF time math
-    ├── pipeline.rs      // Thread spawning, channels, backpressure policy
-    ├── replay.rs        // Encoded-packet ring buffer + clip flush (GOP-aligned)
-    ├── control.rs       // Hotkey registration, stdin commands, shutdown signal
-    └── stats.rs         // Dropped frames, working set, encode latency (--verbose)
+Cargo.toml                    virtual workspace: members, shared deps, release profile
+crates/trix-core/             the engine — no CLI, no argument parsing, no subscriber
+  src/lib.rs                    public surface: the eight modules below
+  src/capture/{mod,audio,video}.rs
+  src/encode/{mod,convert,h264,mf}.rs
+  src/{config,control,probe,record,replay,stats}.rs
+  tests/public_api.rs           guards the surface the daemon consumes
+crates/trix-cli/              produces trix.exe
+  src/main.rs                   clap surface + subscriber; depends on trix-core directly
 ```
+
+The CLI depends on `trix-core` directly rather than routing through the daemon: it is the
+ground-truth verification harness for every phase, and putting it behind the daemon would put the
+thing under test behind the thing under test.
+
+Planned additions (see `docs/superpowers/specs/2026-07-26-trix-desktop-ui-design.md`):
+`trix-proto` (wire types), `trix-daemon` (tray + control socket), `trix-ui` (Tauri app).
 
 ---
 
