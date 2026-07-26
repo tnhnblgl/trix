@@ -46,13 +46,13 @@ happens to be dramatically lighter than its competitor.
 Today's single binary becomes a five-crate Cargo workspace:
 
 ```
-trix-proto/     Wire types only. serde structs, no windows-rs, no unsafe. ~200 lines.
-trix-core/      The engine: capture, encode, ring, mux, config, stats.
-                Today's src/ minus main.rs. mod -> pub mod. Otherwise untouched.
-trix-cli/       probe / record / replay. Depends on trix-core directly.
-trix-daemon/    Tray icon, hotkey, control-socket server, library manager.
-                Depends on trix-core + trix-proto.
-trix-ui/        Tauri app. Depends on trix-proto ONLY.
+crates/trix-proto/    Wire types only. serde structs, no windows-rs, no unsafe. ~200 lines.
+crates/trix-core/     The engine: capture, encode, ring, mux, config, stats.
+                      Today's src/ minus main.rs. mod -> pub mod. Otherwise untouched.
+crates/trix-cli/      probe / record / replay. Depends on trix-core directly.
+crates/trix-daemon/   Tray icon, hotkey, control-socket server, library manager.
+                      Depends on trix-core + trix-proto.
+crates/trix-ui/       Tauri app. Depends on trix-proto ONLY.
 ```
 
 ### 3.2 The one hard rule
