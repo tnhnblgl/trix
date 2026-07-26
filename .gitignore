@@ -1,5 +1,8 @@
 /target
 
+# brainstorming mockups (superpowers visual companion)
+/.superpowers
+
 # probe/recording artifacts
 *.mp4
 *.wav
