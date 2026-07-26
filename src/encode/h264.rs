@@ -24,7 +24,7 @@ use windows::Win32::Media::MediaFoundation::{
 };
 use windows::core::Interface;
 
-use crate::encode::mf::{RecorderSettings, allocated_string, video_type};
+use crate::encode::mf::{RecorderSettings, allocated_string, apply_rate_control, video_type};
 use windows::Win32::Media::MediaFoundation::MFT_FRIENDLY_NAME_Attribute;
 
 /// One encoded H.264 access unit, CPU-resident (the only pixels-derived bytes
@@ -76,6 +76,11 @@ impl H264Encoder {
             transform.SetOutputType(0, &out_type, 0).context("SetOutputType(H264)")?;
             let in_type = video_type(settings, &MFVideoFormat_NV12, false)?;
             transform.SetInputType(0, &in_type, 0).context("SetInputType(NV12)")?;
+
+            // Force the rate-control mode + bitrate ceiling now, before
+            // streaming — the media-type hint alone lets AMF overshoot ~4×,
+            // which would also blow the replay ring's RAM budget.
+            apply_rate_control(&transform, settings);
 
             let info = transform.GetOutputStreamInfo(0)?;
             if info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 == 0 {

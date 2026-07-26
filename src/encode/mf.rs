@@ -14,7 +14,11 @@ use std::sync::OnceLock;
 use anyhow::{Context as _, Result, anyhow};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Multithread, ID3D11Texture2D};
 use windows::Win32::Media::MediaFoundation::{
-    IMF2DBuffer, IMFAttributes, IMFDXGIDeviceManager, IMFMediaType, IMFSinkWriter, IMFTransform,
+    ICodecAPI, IMF2DBuffer, IMFAttributes, IMFDXGIDeviceManager, IMFMediaType, IMFSinkWriter,
+    IMFTransform,
+    CODECAPI_AVEncCommonMaxBitRate, CODECAPI_AVEncCommonMeanBitRate,
+    CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_CBR,
+    eAVEncCommonRateControlMode_PeakConstrainedVBR,
     MF_API_VERSION, MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
     MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS,
     MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
@@ -29,9 +33,11 @@ use windows::Win32::Media::MediaFoundation::{
     MFVideoInterlace_Progressive,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::System::Variant::{VARIANT, VT_UI4};
 use windows::core::{GUID, HSTRING, Interface, PWSTR};
 
 use crate::capture::audio::{CHANNELS, ENCODER_BLOCK_ALIGN, SAMPLE_RATE};
+use crate::config::RateControl;
 use crate::encode::convert::VideoConverter;
 
 const MF_VERSION: u32 = ((MF_SDK_VERSION as u32) << 16) | MF_API_VERSION as u32;
@@ -53,8 +59,66 @@ pub struct RecorderSettings {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    /// Target (average) bitrate in bit/s.
     pub bitrate_bps: u32,
+    /// VBR peak cap in bit/s (used only in `PeakVbr` mode).
+    pub max_bitrate_bps: u32,
+    pub rate_control: RateControl,
     pub with_audio: bool,
+}
+
+/// Builds a `VT_UI4` VARIANT by hand — windows-rs exposes only the raw union,
+/// with no `From<u32>`. Used to feed integer values to `ICodecAPI::SetValue`.
+fn variant_u32(value: u32) -> VARIANT {
+    unsafe {
+        let mut v: VARIANT = core::mem::zeroed();
+        // Explicit deref: the `Anonymous` field is a `ManuallyDrop` union
+        // member, which the compiler won't auto-`DerefMut` for a write.
+        let inner = &mut *v.Anonymous.Anonymous;
+        inner.vt = VT_UI4;
+        inner.Anonymous.ulVal = value;
+        v
+    }
+}
+
+/// Forces the encoder's rate-control mode + bitrate through `ICodecAPI` rather
+/// than relying on the advisory `MF_MT_AVG_BITRATE` hint alone. The hint is
+/// honored by Intel QuickSync but ignored by AMD AMF (which defaults to a
+/// quality mode and overshoots ~4×), so this is what actually bounds file size
+/// — and, for the replay ring, RAM. Best-effort: an encoder that rejects a
+/// property keeps running on the media-type hint rather than failing capture.
+pub(crate) fn apply_rate_control(transform: &IMFTransform, settings: &RecorderSettings) {
+    let codec = match transform.cast::<ICodecAPI>() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(%e, "encoder exposes no ICodecAPI; bitrate stays best-effort");
+            return;
+        }
+    };
+    let mode = match settings.rate_control {
+        RateControl::Cbr => eAVEncCommonRateControlMode_CBR,
+        RateControl::PeakVbr => eAVEncCommonRateControlMode_PeakConstrainedVBR,
+    };
+    unsafe {
+        set_codec_u32(&codec, &CODECAPI_AVEncCommonRateControlMode, mode.0 as u32, "rate control mode");
+        set_codec_u32(&codec, &CODECAPI_AVEncCommonMeanBitRate, settings.bitrate_bps, "mean bitrate");
+        if settings.rate_control == RateControl::PeakVbr {
+            set_codec_u32(&codec, &CODECAPI_AVEncCommonMaxBitRate, settings.max_bitrate_bps, "max bitrate");
+        }
+    }
+    tracing::info!(
+        mode = ?settings.rate_control,
+        mean_bps = settings.bitrate_bps,
+        max_bps = settings.max_bitrate_bps,
+        "encoder rate control configured",
+    );
+}
+
+unsafe fn set_codec_u32(codec: &ICodecAPI, key: &GUID, value: u32, what: &str) {
+    let var = variant_u32(value);
+    if let Err(e) = unsafe { codec.SetValue(key, &var) } {
+        tracing::warn!(%e, what, "ICodecAPI SetValue failed");
+    }
 }
 
 /// Creates the DXGI device manager the MF pipeline uses to reach the GPU,
@@ -158,7 +222,7 @@ impl MfRecorder {
             };
 
             writer.BeginWriting().context("BeginWriting")?;
-            log_video_transform(&writer, video_stream);
+            configure_video_transform(&writer, video_stream, settings);
 
             // 3 NV12 targets ≈ 50 ms of pipeline depth at 60 fps; measured
             // drain is fast enough that even 2 never dropped a frame.
@@ -388,9 +452,11 @@ fn audio_type(subtype: &GUID) -> Result<IMFMediaType> {
     }
 }
 
-/// Best-effort: name the encoder MFT the sink writer picked, so the log
-/// proves the hardware path is active.
-fn log_video_transform(writer: &IMFSinkWriter, video_stream: u32) {
+/// Reaches the encoder MFT the sink writer picked to (a) force rate control
+/// through `ICodecAPI` and (b) name it in the log so the hardware path is
+/// proven active. Best-effort throughout — a writer that won't surface its
+/// transform still records, just on the media-type bitrate hint.
+fn configure_video_transform(writer: &IMFSinkWriter, video_stream: u32, settings: &RecorderSettings) {
     unsafe {
         let mut raw: *mut core::ffi::c_void = std::ptr::null_mut();
         if writer
@@ -398,9 +464,11 @@ fn log_video_transform(writer: &IMFSinkWriter, video_stream: u32) {
             .is_err()
             || raw.is_null()
         {
+            tracing::warn!("could not reach encoder MFT; bitrate stays best-effort");
             return;
         }
         let transform = IMFTransform::from_raw(raw);
+        apply_rate_control(&transform, settings);
         let Ok(attrs) = transform.GetAttributes() else {
             tracing::info!("video encoder MFT active (no attributes exposed)");
             return;

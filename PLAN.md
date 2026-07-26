@@ -425,6 +425,40 @@ unplug/replug an external monitor during `trix replay` to exercise the
 rebuild loop with real hardware events. Post-MVP candidates: software-encoder
 fallback when no HW encoder is present, AMD/AMF validation on other hardware.
 
+**Post-MVP AMD field fixes (2026-07-21, friends' RX 6650 XT & RX 550, Win10 19045):**
+- *Capture wouldn't start* — WGC `IsBorderRequired` absent pre-Win11; hardcoded
+  `WithoutBorder` aborted with `BorderConfigUnsupported`. Fixed by
+  `capture::border_settings()` (runtime-gated). The yellow border that remains
+  is Windows' live on-screen capture indicator only — NOT in the output files
+  (confirmed: recordings/snapshots are clean).
+- *Clips 4× oversized (64 MB / 15 s)* — `MF_MT_AVG_BITRATE` is advisory; AMD AMF
+  ignored it and ran ~34 Mbps (also blew the replay ring's RAM). Fixed by forcing
+  rate control via `ICodecAPI` (`encode::mf::apply_rate_control`) on both encoder
+  paths, plus config knobs `rate_control` (vbr default / cbr) and
+  `max_bitrate_kbps` (0=auto 1.5×). Verified on Intel; AMD size-drop pending
+  friend re-test. CQP/quality mode deferred as a `record`-only future option
+  (unbounded bitrate is unsafe for the RAM ring).
+
+**Game-fps optimization (2026-07-24, "Trix slightly reduces fps in games"):**
+- *Root cause 1 — no fps pacing*: WGC delivers a frame per DWM composition, so a
+  144/165 Hz monitor made Trix convert + encode up to 165 fps while configured
+  for 60 (~3× the intended GPU load, all competing with the game). Fixed by a
+  QPC pacer in both capture callbacks: frames arriving more than half a frame
+  early are skipped before any GPU work; skips are logged as `paced` (distinct
+  from backpressure `dropped`). Verified: 165 Hz panel now encodes 59.9 fps at
+  fps=60, exactly 30 fps at fps=30, dropped=0, callback p99 ≤2 ms unchanged.
+- *Root cause 2 — GPU priority parity*: the BGRA→NV12 `VideoProcessorBlt` ran
+  at the same GPU scheduling priority as the game. Fixed by
+  `capture::lower_gpu_priority()` — `D3DKMTSetProcessSchedulingPriorityClass`
+  BELOW_NORMAL (feature `Wdk_Graphics_Direct3D`), so contention now costs
+  (rare) capture drops instead of game fps. Config `gpu_priority = "low"`
+  (default) / `"normal"` escape hatch.
+- *Root cause 3 — DWM frame-pool copies at full refresh*: where the OS has
+  `GraphicsCaptureSession.MinUpdateInterval` (runtime-gated like the border;
+  present on the user's Win11, absent on Win10 19045), WGC delivery is capped
+  at ~4/3 of target fps (¾ frame period, avoiding compositor-cadence beating).
+  Observed 165→80/s delivery on the dev laptop.
+
 ## 6. First Concrete Step
 
 Phase 0: `cargo new trix`, add `windows`, `clap`, `tracing`; write `trix probe`

@@ -24,8 +24,8 @@ use windows_capture::{
     graphics_capture_api::InternalCaptureControl,
     monitor::Monitor,
     settings::{
-        ColorFormat, CursorCaptureSettings, DirtyRegionSettings,
-        MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
+        ColorFormat, CursorCaptureSettings, DirtyRegionSettings, SecondaryWindowSettings,
+        Settings,
     },
 };
 
@@ -34,7 +34,7 @@ use crate::{
         AudioPacket, AudioTimeline, LoopbackCapture, SAMPLE_RATE, SILENCE_GRACE_100NS,
         frames_to_100ns,
     },
-    config::Config,
+    config::{Config, RateControl},
     encode::mf::{MfRecorder, RecorderSettings},
     stats::{LatencyHistogram, StatsReporter, mb},
 };
@@ -51,6 +51,8 @@ struct RecordFlags {
     height: u32,
     fps: u32,
     bitrate_bps: u32,
+    max_bitrate_bps: u32,
+    rate_control: RateControl,
     deadline: Duration,
     done: Sender<Result<Summary>>,
     audio_rx: Option<Receiver<AudioPacket>>,
@@ -60,6 +62,7 @@ struct RecordFlags {
 struct Summary {
     frames: u64,
     frames_dropped: u64,
+    frames_paced: u64,
     audio_frames: u64,
     silence_frames: u64,
     elapsed: Duration,
@@ -71,11 +74,18 @@ struct RecordSession {
     done: Sender<Result<Summary>>,
     started: Instant,
     frames: u64,
+    /// Frames intentionally skipped by the fps pacer (monitor refreshing
+    /// faster than the target fps) — encoded output is unaffected.
+    frames_paced: u64,
+    frame_duration_100ns: i64,
 
     audio_rx: Option<Receiver<AudioPacket>>,
     timeline: AudioTimeline,
     t0_qpc: Option<i64>,
     last_frame_qpc: i64,
+    /// QPC time the next frame is due; arrivals more than half a frame early
+    /// are skipped before any GPU work is issued.
+    next_encode_qpc: i64,
     /// Last seen capture frame size — display mode changes mid-recording are
     /// scaled into the negotiated resolution by the blit; logged once.
     input_size: (u32, u32),
@@ -126,6 +136,7 @@ impl RecordSession {
             ws_minus_gpu_mb = mb(m.ws_minus_gpu()),
             frames = self.frames,
             dropped,
+            paced = self.frames_paced,
             latency = %self.frame_latency.summary(),
             "{tag}"
         );
@@ -146,6 +157,7 @@ impl RecordSession {
                 .map(|()| Summary {
                     frames: self.frames,
                     frames_dropped,
+                    frames_paced: self.frames_paced,
                     audio_frames: self.timeline.frames_emitted(),
                     silence_frames: self.timeline.silence_frames_emitted(),
                     elapsed: self.started.elapsed(),
@@ -170,6 +182,8 @@ impl GraphicsCaptureApiHandler for RecordSession {
                 height: flags.height,
                 fps: flags.fps,
                 bitrate_bps: flags.bitrate_bps,
+                max_bitrate_bps: flags.max_bitrate_bps,
+                rate_control: flags.rate_control,
                 with_audio: flags.audio_rx.is_some(),
             },
         )
@@ -192,10 +206,13 @@ impl GraphicsCaptureApiHandler for RecordSession {
             done: flags.done,
             started: Instant::now(),
             frames: 0,
+            frames_paced: 0,
+            frame_duration_100ns: 10_000_000 / i64::from(flags.fps.max(1)),
             audio_rx: flags.audio_rx,
             timeline: AudioTimeline::new(),
             t0_qpc: None,
             last_frame_qpc: 0,
+            next_encode_qpc: 0,
             input_size: (flags.width, flags.height),
             frame_latency: LatencyHistogram::new(),
             stats,
@@ -221,6 +238,14 @@ impl GraphicsCaptureApiHandler for RecordSession {
             }
         };
 
+        // Pace to the configured fps: half-frame tolerance absorbs vsync
+        // jitter at matching rates while skipping the surplus frames a
+        // high-refresh monitor delivers — before any GPU work is issued.
+        if frame_qpc + self.frame_duration_100ns / 2 < self.next_encode_qpc {
+            self.frames_paced += 1;
+            return Ok(());
+        }
+
         if (frame.width(), frame.height()) != self.input_size {
             tracing::info!(
                 from = ?self.input_size,
@@ -236,7 +261,14 @@ impl GraphicsCaptureApiHandler for RecordSession {
             let t0 = *self.t0_qpc.get_or_insert(frame_qpc);
             self.timeline.start(t0);
             match recorder.write_frame(frame.as_raw_texture(), frame_qpc - t0) {
-                Ok(true) => self.frames += 1,
+                Ok(true) => {
+                    self.frames += 1;
+                    // Advance one nominal period; the clamp resnaps the
+                    // schedule after a delivery gap instead of accepting
+                    // a burst.
+                    self.next_encode_qpc = (self.next_encode_qpc + self.frame_duration_100ns)
+                        .max(frame_qpc + self.frame_duration_100ns / 2);
+                }
                 Ok(false) => {} // pool exhausted — dropped, counted by the recorder
                 Err(e) => {
                     let _ = self.done.send(Err(anyhow!("encoder rejected frame: {e}")));
@@ -258,6 +290,9 @@ impl GraphicsCaptureApiHandler for RecordSession {
 }
 
 pub fn run(config: &Config, options: RecordOptions) -> Result<()> {
+    if config.gpu_priority_low() {
+        crate::capture::lower_gpu_priority();
+    }
     let monitor = Monitor::from_index(config.monitor_index as usize + 1)
         .map_err(|e| anyhow!("monitor {} not available: {e}", config.monitor_index))?;
     // Physical pixels — WGC frames come in native resolution, not DPI-scaled.
@@ -291,7 +326,9 @@ pub fn run(config: &Config, options: RecordOptions) -> Result<()> {
         width,
         height,
         fps: config.fps,
-        bitrate_bps: config.bitrate_kbps.saturating_mul(1000),
+        bitrate_bps: config.bitrate_bps(),
+        max_bitrate_bps: config.max_bitrate_bps(),
+        rate_control: config.rate_control(),
         deadline: Duration::from_secs(options.duration_secs),
         done,
         audio_rx,
@@ -303,7 +340,7 @@ pub fn run(config: &Config, options: RecordOptions) -> Result<()> {
         CursorCaptureSettings::WithCursor,
         crate::capture::border_settings(),
         SecondaryWindowSettings::Default,
-        MinimumUpdateIntervalSettings::Default,
+        crate::capture::min_update_interval(config.fps),
         DirtyRegionSettings::Default,
         ColorFormat::Bgra8,
         flags,
@@ -371,9 +408,10 @@ pub fn run(config: &Config, options: RecordOptions) -> Result<()> {
     let audio_secs = summary.audio_frames as f64 / SAMPLE_RATE as f64;
     let silence_secs = summary.silence_frames as f64 / SAMPLE_RATE as f64;
     println!(
-        "done: {} frames ({} dropped) in {:.1} s ({:.1} fps effective), audio {:.1} s ({:.1} s synthesized silence), {:.1} MB → {}",
+        "done: {} frames ({} dropped, {} paced off) in {:.1} s ({:.1} fps effective), audio {:.1} s ({:.1} s synthesized silence), {:.1} MB → {}",
         summary.frames,
         summary.frames_dropped,
+        summary.frames_paced,
         summary.elapsed.as_secs_f64(),
         summary.frames as f64 / summary.elapsed.as_secs_f64().max(0.001),
         audio_secs,

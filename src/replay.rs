@@ -21,8 +21,8 @@ use windows_capture::{
     graphics_capture_api::InternalCaptureControl,
     monitor::Monitor,
     settings::{
-        ColorFormat, CursorCaptureSettings, DirtyRegionSettings,
-        MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
+        ColorFormat, CursorCaptureSettings, DirtyRegionSettings, SecondaryWindowSettings,
+        Settings,
     },
 };
 
@@ -96,9 +96,16 @@ struct ReplaySession {
     timeline: AudioTimeline,
     t0_qpc: Option<i64>,
     last_frame_qpc: i64,
+    /// QPC time the next frame is due; arrivals more than half a frame early
+    /// are skipped untouched, pacing convert+encode to the configured fps
+    /// even when WGC delivers at a 144/165 Hz monitor's full refresh rate.
+    next_encode_qpc: i64,
 
     frames: u64,
     frames_dropped: u64,
+    /// Frames intentionally skipped by the fps pacer (not a problem signal —
+    /// it just means the monitor refreshes faster than the target fps).
+    frames_paced: u64,
     /// Last seen capture frame size — WGC keeps delivering after a display
     /// mode change at the new size; the blit scales it into the encoder's
     /// fixed resolution, and this only exists to log the transition once.
@@ -189,6 +196,7 @@ impl ReplaySession {
             cpu_ring_mb,
             frames = self.frames,
             dropped = self.frames_dropped,
+            paced = self.frames_paced,
             ring_packets = self.video_ring.len(),
             latency = %self.frame_latency.summary(),
             "{tag}"
@@ -331,8 +339,10 @@ impl GraphicsCaptureApiHandler for ReplaySession {
             timeline: AudioTimeline::new(),
             t0_qpc: None,
             last_frame_qpc: 0,
+            next_encode_qpc: 0,
             frames: 0,
             frames_dropped: 0,
+            frames_paced: 0,
             input_size: (flags.settings.width, flags.settings.height),
             frame_latency: LatencyHistogram::new(),
             stats,
@@ -352,6 +362,14 @@ impl GraphicsCaptureApiHandler for ReplaySession {
                 return Ok(());
             }
         };
+        // Pace to the configured fps: half-frame tolerance absorbs vsync
+        // jitter at matching rates while skipping the surplus frames a
+        // high-refresh monitor delivers — before any GPU work is issued.
+        if frame_qpc + self.frame_duration_100ns / 2 < self.next_encode_qpc {
+            self.frames_paced += 1;
+            return Ok(());
+        }
+
         let callback_start = Instant::now();
         let t0 = *self.t0_qpc.get_or_insert(frame_qpc);
         self.timeline.start(t0);
@@ -374,6 +392,10 @@ impl GraphicsCaptureApiHandler for ReplaySession {
             let nv12 = self.converter.convert(frame.as_raw_texture())?;
             self.encoder.encode(nv12, frame_qpc - t0, self.frame_duration_100ns)?;
             self.frames += 1;
+            // Advance one nominal period; the clamp resnaps the schedule after
+            // a delivery gap (static screen) instead of accepting a burst.
+            self.next_encode_qpc = (self.next_encode_qpc + self.frame_duration_100ns)
+                .max(frame_qpc + self.frame_duration_100ns / 2);
         } else {
             self.frames_dropped += 1;
         }
@@ -458,6 +480,9 @@ enum SessionEnd {
 }
 
 pub fn run(config: &Config, options: ReplayOptions) -> Result<()> {
+    if config.gpu_priority_low() {
+        crate::capture::lower_gpu_priority();
+    }
     let result = run_rebuild_loop(config, &options);
     control::mark_finalized();
     result
@@ -540,7 +565,9 @@ fn run_session(
             width,
             height,
             fps: config.fps,
-            bitrate_bps: config.bitrate_kbps.saturating_mul(1000),
+            bitrate_bps: config.bitrate_bps(),
+            max_bitrate_bps: config.max_bitrate_bps(),
+            rate_control: config.rate_control(),
             with_audio: audio_rx.is_some(),
         },
         replay_100ns: i64::from(config.replay_seconds) * 10_000_000,
@@ -558,7 +585,7 @@ fn run_session(
         CursorCaptureSettings::WithCursor,
         crate::capture::border_settings(),
         SecondaryWindowSettings::Default,
-        MinimumUpdateIntervalSettings::Default,
+        crate::capture::min_update_interval(config.fps),
         DirtyRegionSettings::Default,
         ColorFormat::Bgra8,
         flags,
