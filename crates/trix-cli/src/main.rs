@@ -113,15 +113,28 @@ mod tests {
         assert!(Cli::try_parse_from(["trix", "probe", "--audio", "5"]).is_ok());
         assert!(Cli::try_parse_from(["trix", "record"]).is_ok());
         assert!(Cli::try_parse_from(["trix", "record", "-d", "10", "-o", "o.mp4"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["trix", "record", "--duration", "10", "--output", "o.mp4"])
+                .is_ok(),
+            "long forms must keep working, not just the short flags"
+        );
         assert!(Cli::try_parse_from(["trix", "record", "--no-audio"]).is_ok());
         assert!(Cli::try_parse_from(["trix", "replay"]).is_ok());
         assert!(Cli::try_parse_from(["trix", "-v", "replay"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["trix", "--verbose", "replay"]).is_ok(),
+            "long form of -v must keep working"
+        );
         assert!(
             Cli::try_parse_from(["trix", "replay", "--auto-clip", "8", "--exit-after", "12"])
                 .is_ok(),
             "the hidden test flags are how every phase gets verified"
         );
         assert!(Cli::try_parse_from(["trix", "bogus"]).is_err());
+        assert!(
+            Cli::try_parse_from(["trix"]).is_err(),
+            "a subcommand must be required — trix with no arguments should not parse"
+        );
     }
 
     #[test]
@@ -133,5 +146,40 @@ mod tests {
         assert_eq!(duration, 10);
         assert_eq!(output, std::path::PathBuf::from("output.mp4"));
         assert!(!no_audio);
+    }
+
+    /// `--snapshot` with no argument must still resolve to a path — deleting
+    /// `default_missing_value` from the `probe` command's `snapshot` arg
+    /// would silently turn this into `None` and this must catch it.
+    #[test]
+    fn snapshot_flag_defaults_to_snapshot_png_when_bare() {
+        let cli = Cli::try_parse_from(["trix", "probe", "--snapshot"]).unwrap();
+        let Command::Probe { snapshot, .. } = cli.command else {
+            panic!("expected Probe");
+        };
+        assert_eq!(snapshot, Some(PathBuf::from("snapshot.png")));
+    }
+
+    /// The hidden `--auto-clip` / `--exit-after` flags are how every replay
+    /// phase gets verified end-to-end; asserting `is_ok()` alone would not
+    /// notice the parsed values silently going wrong.
+    #[test]
+    fn replay_test_hooks_parse_to_expected_values() {
+        let cli =
+            Cli::try_parse_from(["trix", "replay", "--auto-clip", "8", "--exit-after", "12"])
+                .unwrap();
+        let Command::Replay { auto_clip, exit_after } = cli.command else {
+            panic!("expected Replay");
+        };
+        assert_eq!(auto_clip, Some(8));
+        assert_eq!(exit_after, Some(12));
+    }
+
+    /// Guards `crates/trix-cli/Cargo.toml`'s `[[bin]] name = "trix"` — nothing
+    /// else in the test suite would notice if it were renamed, but scripts
+    /// and muscle memory depend on `trix.exe` staying `trix.exe`.
+    #[test]
+    fn binary_name_is_trix() {
+        assert_eq!(env!("CARGO_BIN_NAME"), "trix");
     }
 }
