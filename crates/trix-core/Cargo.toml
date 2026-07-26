@@ -1,0 +1,15 @@
+[package]
+name = "trix-core"
+version.workspace = true
+edition.workspace = true
+description = "Trix capture engine — hardware-accelerated screen capture, encode, replay ring, and mux"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+tracing.workspace = true
+wasapi.workspace = true
+windows-capture.workspace = true
+windows.workspace = true

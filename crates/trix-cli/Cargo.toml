@@ -1,0 +1,16 @@
+[package]
+name = "trix-cli"
+version.workspace = true
+edition.workspace = true
+description = "Trix command-line interface"
+
+[[bin]]
+name = "trix"
+path = "src/main.rs"
+
+[dependencies]
+trix-core = { path = "../trix-core" }
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

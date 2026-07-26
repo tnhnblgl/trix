@@ -579,16 +579,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "trix"
+name = "trix-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "tracing",
+ "tracing-subscriber",
+ "trix-core",
+]
+
+[[package]]
+name = "trix-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "serde",
  "thiserror",
  "toml",
  "tracing",
- "tracing-subscriber",
  "wasapi",
  "windows",
  "windows-capture",

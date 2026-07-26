@@ -1,10 +1,12 @@
-[package]
-name = "trix"
+[workspace]
+resolver = "3"
+members = ["crates/trix-core", "crates/trix-cli"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-description = "Trix core engine — ultra-lightweight, hardware-accelerated screen/clip recorder"
 
-[dependencies]
+[workspace.dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -15,7 +17,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wasapi = "0.23.0"
 windows-capture = "2.0.0"
 
-[dependencies.windows]
+[workspace.dependencies.windows]
 version = "0.62"
 features = [
     "Wdk_Graphics_Direct3D",
