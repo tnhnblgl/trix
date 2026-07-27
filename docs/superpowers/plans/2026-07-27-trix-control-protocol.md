@@ -29,6 +29,10 @@ Every task's requirements implicitly include this section.
 - **Framing is newline-delimited JSON**, UTF-8, one message per line, `\n`-terminated. No length prefix, no schema compiler.
 - **Malformed input never drops a connection.** A bad line, an unknown `cmd`, or a missing argument gets an error *response*; the socket stays open. Only EOF closes a client.
 - **Clip ids arriving from the socket are untrusted.** Any command that turns an `id` into a filesystem path validates it first. This is the plan's one genuine security boundary.
+- **`panic = "abort"` stays.** Decided 2026-07-27 with measurements: `unwind` costs 685 KB on a 1.49 MB binary (+44%), and buys less than it appears to — a panic in the capture callback aborts either way, because `windows-capture` invokes the handler across an `extern "system"` boundary that Rust refuses to unwind through. The one thing it would protect is socket-facing code, which this plan handles by construction instead:
+  - **No `unwrap`, `expect`, or indexing panic is permitted on any path reachable from a socket message.** Parsing, id handling, path building, library mutation, and serialization all return `Result` and become an error response. `encode_line` returns `Result` for exactly this reason.
+  - `catch_unwind` does not catch under `abort` — there is no recovery net. Not panicking is the whole strategy.
+  - A reviewer should treat a panicking call on a socket-reachable path as a Critical finding.
 - **Out of scope, deliberately** — do not build these, they are plans 3 and 4: thumbnails / `.jpg` sidecars, `max_library_gb` enforcement, GOP pinning, `library.export`, the tray icon, daemon-side hotkey registration, autostart, `trim_mode`, first-run setup.
 
 ---
@@ -2167,7 +2171,7 @@ impl Clients {
 }
 ```
 
-The mutex is recovered from poisoning rather than propagating the panic: with `panic = "abort"` a poisoned lock cannot actually occur, and if that profile setting changes in plan 3, one panicking client thread must not take the event bus down with it.
+The mutex is recovered from poisoning rather than unwrapping. Under `panic = "abort"` a poisoned lock cannot occur at all, so this costs nothing today — but `inner.lock().unwrap()` is a panicking call on a socket-reachable path, and the Global Constraints forbid those outright. Write it this way and the code stays correct if the profile ever changes.
 
 Tests in the same file: a registered client receives a broadcast; an unregistered one does not; `broadcast_stats` reaches only subscribers; and a client whose receiver has been dropped is evicted from the registry after one failed broadcast.
 
@@ -2681,7 +2685,9 @@ Expected: every check PASS, and a clip path printed.
 
 - [ ] **Step 3: Update PLAN.md**
 
-§1.4's module layout gains `trix-proto` and `trix-daemon` with one line each. §5's progress log gains a "Control protocol (2026-07-27) — Stage 2 of the desktop UI spec" entry recording: the gate result with the real numbers, the `clip_dir` behaviour change for the CLI, and the `panic = "abort"` exposure — a panic on any daemon thread now aborts the process and takes an armed ring with it. That is a real consequence of a workspace-wide profile setting meeting a long-lived process, and plan 3 has to decide it deliberately.
+§1.4's module layout gains `trix-proto` and `trix-daemon` with one line each. §5's progress log gains a "Control protocol (2026-07-27) — Stage 2 of the desktop UI spec" entry recording the gate result with the real numbers, the `clip_dir` behaviour change for the CLI, and the panic decision:
+
+> `panic = "abort"` kept for the daemon, decided with measurements rather than by default. `unwind` costs 685 KB against a 1,565,696-byte binary (+44%) and cannot protect the capture path anyway — `windows-capture` calls the frame handler across an `extern "system"` boundary, and Rust aborts rather than unwinding through foreign frames regardless of the profile setting. The exposure it would have covered is socket-facing code, which is instead required to be panic-free by construction.
 
 - [ ] **Step 4: Amend the spec**
 
