@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/trix-core", "crates/trix-cli"]
+members = ["crates/trix-core", "crates/trix-cli", "crates/trix-proto"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,7 @@ edition = "2024"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
 toml = "0.8"
 tracing = "0.1"
