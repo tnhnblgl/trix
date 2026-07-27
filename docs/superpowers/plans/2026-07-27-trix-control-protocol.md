@@ -341,6 +341,29 @@ mod tests {
         );
     }
 
+    /// A wrong-type page argument must be refused, not quietly replaced by the
+    /// default — otherwise a UI's paging bug looks like an empty library
+    /// rather than a mistake it can see and fix.
+    #[test]
+    fn a_wrong_type_page_argument_is_an_error_not_a_silent_default() {
+        for line in [
+            r#"{"id":1,"cmd":"library.list","offset":-5}"#,
+            r#"{"id":1,"cmd":"library.list","offset":1.5}"#,
+            r#"{"id":1,"cmd":"library.list","limit":"ten"}"#,
+            r#"{"id":1,"cmd":"library.list","limit":null}"#,
+        ] {
+            let (_, cmd) = parse(line);
+            let err = cmd.expect_err(&format!("{line} should be refused"));
+            assert!(err.contains("library.list"), "error should name the command: {err}");
+        }
+
+        let (_, cmd) = parse(r#"{"id":1,"cmd":"library.list","offset":-5}"#);
+        assert!(
+            cmd.unwrap_err().contains("offset"),
+            "the error should name which argument was wrong"
+        );
+    }
+
     #[test]
     fn missing_arguments_are_named_in_the_error() {
         let (_, cmd) = parse(r#"{"id":1,"cmd":"library.rename","id_":"x"}"#);
@@ -429,8 +452,8 @@ impl Command {
                 Self::ConfigSet(values)
             }
             "library.list" => Self::LibraryList {
-                offset: usize_arg(req, "offset").unwrap_or(0),
-                limit: usize_arg(req, "limit").unwrap_or(DEFAULT_LIST_LIMIT).min(MAX_LIST_LIMIT),
+                offset: usize_arg(req, "offset", 0)?,
+                limit: usize_arg(req, "limit", DEFAULT_LIST_LIMIT)?.min(MAX_LIST_LIMIT),
             },
             "library.delete" => Self::LibraryDelete { clip_id: str_arg(req, "clip_id")? },
             "library.rename" => Self::LibraryRename {
@@ -465,8 +488,23 @@ fn bool_arg(req: &Request, key: &str) -> Result<bool, String> {
         .ok_or_else(|| format!("{} requires a boolean {key:?}", req.cmd))
 }
 
-fn usize_arg(req: &Request, key: &str) -> Option<usize> {
-    req.args.get(key).and_then(Value::as_u64).map(|n| n as usize)
+/// An absent argument means `default`; a present one that is not a
+/// non-negative whole number is an error, matching [`str_arg`] and
+/// [`bool_arg`]. Silently defaulting a bad page number would let a UI's paging
+/// bug read as an empty library instead of a mistake.
+///
+/// `try_from` rather than `as`: on a 32-bit target `as` would wrap a huge
+/// value into a small one instead of rejecting it.
+fn usize_arg(req: &Request, key: &str, default: usize) -> Result<usize, String> {
+    match req.args.get(key) {
+        None => Ok(default),
+        Some(value) => value
+            .as_u64()
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or_else(|| {
+                format!("{} requires {key:?} to be a non-negative whole number", req.cmd)
+            }),
+    }
 }
 ```
 
