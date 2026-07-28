@@ -2388,12 +2388,85 @@ Events broadcast here, not inside `Daemon`, so the state type stays free of tran
 
 `clip` on a disarmed daemon is an error response: `"not armed — send arm first"`.
 
-- [ ] **Step 5: Build and run the suite**
+- [ ] **Step 5: Make the client loop able to deliver an event to an idle UI**
+
+**Modify:** `crates/trix-daemon/src/pipe.rs` (`serve_one`).
+
+Task 4 discovered that this plan's original per-client design — a read thread plus a writer thread fed by a channel — deadlocks on the first request. A named pipe opened in synchronous mode serializes every operation on the file object, so a write issued from one thread cannot complete while a read is pending on another, even through a `try_clone`d handle. Task 4 therefore reads, dispatches, and writes in sequence on one thread, and drains the outbound channel with `try_recv` before each blocking read.
+
+That is correct for Task 4, where nothing broadcasts. It is not sufficient here: a UI sitting idle is parked inside `read_line_capped`, so a `clip_saved` or `stats` event queued on its channel is not delivered until that UI happens to send its next command. Spec §4.4 requires unsolicited events, so the loop must stop blocking indefinitely.
+
+**Decision (user, 2026-07-28): poll for a pending request instead of blocking on one.** Replace the unconditional blocking read with a wait that wakes every `EVENT_POLL_MS = 25`:
+
+```rust
+/// How often an idle connection wakes to flush queued events. A UI blocked in
+/// `read_line_capped` cannot be written to — a synchronous pipe serializes I/O
+/// on the file object — so the loop must never park indefinitely.
+///
+/// 25 ms is below the threshold where a person perceives a UI as lagging, and
+/// costs one `PeekNamedPipe` per connection per interval: a few dozen cheap
+/// syscalls a second against a 60 fps hardware encode. The alternative,
+/// overlapped I/O, buys latency nobody can perceive for a few hundred lines of
+/// unsafe FFI in the one place where a bug is a hang or an abort.
+const EVENT_POLL_MS: u64 = 25;
+
+/// True when the client has sent at least one byte, so a read will not block.
+/// `Err` means the pipe is gone — the caller ends the session.
+fn request_pending(instance: &std::fs::File) -> Result<bool, windows::core::Error> {
+    let mut available = 0u32;
+    unsafe {
+        PeekNamedPipe(
+            HANDLE(handle_of(instance)),
+            None,
+            0,
+            None,
+            Some(&mut available),
+            None,
+        )?;
+    }
+    Ok(available > 0)
+}
+```
+
+`PeekNamedPipe` comes from `windows::Win32::System::Pipes` — already an enabled feature, so no manifest change.
+
+The session loop becomes: drain the channel, then wait for a request rather than read straight away.
+
+```rust
+'session: loop {
+    // Anything a broadcast queued while this client was idle.
+    while let Ok(text) = out_rx.try_recv() {
+        if !send(&text) {
+            break 'session;
+        }
+    }
+
+    match request_pending(&instance) {
+        Ok(true) => {}
+        Ok(false) => {
+            std::thread::sleep(std::time::Duration::from_millis(EVENT_POLL_MS));
+            continue;
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "peek failed; client is gone");
+            break;
+        }
+    }
+
+    // …unchanged from here: read_line_capped, dispatch, send the response.
+}
+```
+
+`read_line_capped` is only ever entered with at least one byte available, so it still blocks — but only mid-line, between bytes the client has already committed to sending. That is bounded by the client's own write, not by its idleness.
+
+Test it: a client connects, sends nothing, and must still receive a broadcast. Because that needs a real pipe, put it in `crates/trix-daemon/tests/events.rs` as an integration test that starts `serve` on a background thread with a stub `ClientHandler`, connects a `std::fs::File` to `PIPE_NAME`, broadcasts an event without ever writing a request, and asserts the event line arrives within 2 s. Assert on the decoded `event` field, not the raw bytes.
+
+- [ ] **Step 6: Build and run the suite**
 
 Run: `cargo test`
 Expected: PASS, all crates.
 
-- [ ] **Step 6: Verify by hand**
+- [ ] **Step 7: Verify by hand**
 
 Start the daemon, then in PowerShell (reusing the connection block from Task 4):
 
@@ -2414,7 +2487,18 @@ Expected:
 
 Keep the clip. It is the stage-2 gate artifact and Task 8 references it.
 
-- [ ] **Step 7: Commit**
+Then prove unsolicited delivery, which is the point of Step 5. Before the `clip` above, open a **second** PowerShell window, connect to the pipe, and send nothing at all:
+
+```powershell
+$pipe2 = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'trix-control', 'InOut')
+$pipe2.Connect(5000)
+$reader2 = New-Object System.IO.StreamReader($pipe2)
+$reader2.ReadLine()   # blocks until the first window's clip fires
+```
+
+Expected: the moment the first window's `clip` succeeds, this idle connection prints `{"event":"clip_saved","data":{…}}` — without ever having sent a byte. A blocked `ReadLine()` here is the failure this step exists to prevent.
+
+- [ ] **Step 8: Commit**
 
 ```bash
 git add crates/trix-daemon
