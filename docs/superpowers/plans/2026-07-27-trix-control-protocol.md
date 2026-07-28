@@ -1526,6 +1526,14 @@ pub fn run(config: &Config, options: ReplayOptions) -> Result<()> {
 ```rust
 /// Runs the replay engine driven by a command channel rather than a hotkey.
 /// The daemon's engine thread body.
+///
+/// **The caller owns [`control::mark_finalized`], not this function.** That
+/// flag is process-global and one-way: it tells a blocked console-close
+/// handler that on-disk state is consistent and it may stop stalling. A
+/// one-shot CLI run sets it as it exits, which is correct. An engine session
+/// is not a process — calling it here would latch the flag on the first
+/// disarm, and every later armed ring would lose its flush grace period on
+/// logoff or console close. The daemon calls it when the daemon exits.
 pub fn run_driven(
     config: &Config,
     commands: Receiver<EngineCommand>,
@@ -1541,11 +1549,11 @@ pub fn run_driven(
         exit_after_secs: None,
         print_clips: false,
     };
-    let result = run_driven_inner(config, &commands, &status, &mut ready, None, options);
-    control::mark_finalized();
-    result
+    run_driven_inner(config, &commands, &status, &mut ready, None, options)
 }
 ```
+
+**`run` keeps its `control::mark_finalized()` call** — a CLI run *is* a process, so latching the flag as it exits is correct there.
 
 `run_rebuild_loop` is renamed `run_driven_inner` and changes only in its parameters:
 
@@ -2221,6 +2229,8 @@ Tests in the same file: a registered client receives a broadcast; an unregistere
 - [ ] **Step 8: Write `main.rs`**
 
 `crates/trix-daemon/src/main.rs` initializes `tracing_subscriber` exactly as the CLI does (`trix=info` default, `-v`/`RUST_LOG` honoured), loads the config, installs the shutdown handler, builds the handler, logs `listening on \\.\pipe\trix-control`, and calls `pipe::serve`. For this task the handler answers only `status`:
+
+**`control::mark_finalized()` is the daemon's responsibility, called once as the daemon process exits — never per engine session.** The flag is process-global and one-way: it releases a blocked console-close handler that is stalling Windows so an in-flight MP4 can flush. `run_driven` deliberately does not call it (see Task 3), because latching it on the first disarm would strip every later armed ring of that grace period.
 
 ```json
 {"armed":false,"encoder":null,"monitor_index":0,"ring_seconds_used":0.0,

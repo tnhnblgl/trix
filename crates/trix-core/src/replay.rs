@@ -570,6 +570,14 @@ pub fn run(config: &Config, options: ReplayOptions) -> Result<()> {
 
 /// Runs the replay engine driven by a command channel rather than a hotkey.
 /// The daemon's engine thread body.
+///
+/// **The caller owns [`control::mark_finalized`], not this function.** That
+/// flag is process-global and one-way: it tells a blocked console-close
+/// handler that on-disk state is consistent and it may stop stalling. A
+/// one-shot CLI run sets it as it exits, which is correct. An engine session
+/// is not a process — calling it here would latch the flag on the first
+/// disarm, and every later armed ring would lose its flush grace period on
+/// logoff or console close. The daemon calls it when the daemon exits.
 pub fn run_driven(
     config: &Config,
     commands: Receiver<EngineCommand>,
@@ -582,9 +590,7 @@ pub fn run_driven(
     let mut ready = ready;
     let options =
         ReplayOptions { auto_clip_secs: None, exit_after_secs: None, print_clips: false };
-    let result = run_driven_inner(config, &commands, &status, &mut ready, None, options);
-    control::mark_finalized();
-    result
+    run_driven_inner(config, &commands, &status, &mut ready, None, options)
 }
 
 /// The rebuild loop: one capture session at a time, restarted when the display
