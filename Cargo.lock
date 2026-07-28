@@ -625,6 +625,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "trix-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+ "trix-core",
+ "trix-proto",
+ "windows",
+]
+
+[[package]]
 name = "trix-proto"
 version = "0.1.0"
 dependencies = [

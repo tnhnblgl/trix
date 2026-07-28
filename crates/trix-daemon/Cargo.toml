@@ -1,0 +1,17 @@
+[package]
+name = "trix-daemon"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "trix-daemon"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+trix-core = { path = "../trix-core" }
+trix-proto = { path = "../trix-proto" }
+windows.workspace = true
