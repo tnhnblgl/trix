@@ -667,8 +667,13 @@ fn run_session(
                 if let Some(secs) = options.auto_clip_secs {
                     if !*auto_clip_fired && run_started.elapsed() >= Duration::from_secs(secs) {
                         *auto_clip_fired = true;
-                        if let Some(saved) = save_clip(&capture, &clip_dir, &encoder_name)? {
-                            print_clip_line(&saved);
+                        // Same two outcomes the hotkey arm reports. An
+                        // --auto-clip that fires before the ring has buffered
+                        // anything must say so: a verification run that
+                        // silently produces no clip looks like a pass.
+                        match save_clip(&capture, &clip_dir, &encoder_name)? {
+                            Some(saved) => print_clip_line(&saved),
+                            None => println!("nothing buffered yet — try again in a moment"),
                         }
                     }
                 }

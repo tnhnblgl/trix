@@ -1183,11 +1183,16 @@ Each call site becomes:
                 }
 ```
 
-The `--auto-clip` path currently uses `save_clip(&capture)?` and must keep propagating its error (that is how a failed verification run fails loudly):
+The `--auto-clip` path currently uses `save_clip(&capture)?` and must keep propagating its error (that is how a failed verification run fails loudly). It must also keep reporting an empty ring — before the refactor the message came from inside `save_clip`, so every caller got it for free; afterwards each call site has to say it:
 
 ```rust
-                        if let Some(saved) = save_clip(&capture, &clip_dir, &encoder_name)? {
-                            print_clip_line(&saved);
+                        // Same two outcomes the hotkey arm reports. An
+                        // --auto-clip that fires before the ring has buffered
+                        // anything must say so: a verification run that
+                        // silently produces no clip looks like a pass.
+                        match save_clip(&capture, &clip_dir, &encoder_name)? {
+                            Some(saved) => print_clip_line(&saved),
+                            None => println!("nothing buffered yet — try again in a moment"),
                         }
 ```
 
