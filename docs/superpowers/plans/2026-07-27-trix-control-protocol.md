@@ -2461,6 +2461,12 @@ The session loop becomes: drain the channel, then wait for a request rather than
 
 Test it: a client connects, sends nothing, and must still receive a broadcast. Because that needs a real pipe, put it in `crates/trix-daemon/tests/events.rs` as an integration test that starts `serve` on a background thread with a stub `ClientHandler`, connects a `std::fs::File` to `PIPE_NAME`, broadcasts an event without ever writing a request, and asserts the event line arrives within 2 s. Assert on the decoded `event` field, not the raw bytes.
 
+Two hazards inherited from Task 4 go live in this step, both harmless while nothing broadcasts and neither harmless afterwards. Fix both here.
+
+**Bound the outbound queue.** `Clients::broadcast` pushes onto an unbounded `mpsc`. A client that connects and then stops reading — its pipe buffer full, its process wedged — accumulates every event in daemon memory forever. That is the mirror image of the problem `MAX_LINE_BYTES` prevents on the read side, and a replay daemon is exactly the process that must not grow without bound. Give each client a bounded queue: on overflow, drop the client rather than the daemon's memory. A UI that has stopped reading its socket has already failed; evicting it is the honest outcome, and it will see the disconnect and reconnect. Log one `warn!` naming the client id when it happens.
+
+**Stop a transient accept failure from killing an armed capture.** `serve`'s loop currently does `let instance = create_instance(&security, first)?;`, so a non-first-instance failure — handle exhaustion, nonpaged pool pressure — propagates out of `serve`, out of `main`, and terminates the process. Today that costs nothing. Once this task can be armed, it destroys a live ring buffer mid-capture and loses the user's clip. Change the non-first case to log and retry after a short sleep; only the `first` failure (another daemon owns the name) still aborts startup. The same sleep closes Task 4's other gap: a persistently failing `ConnectNamedPipe` currently spins the accept loop at full CPU emitting one `warn!` per iteration.
+
 - [ ] **Step 6: Build and run the suite**
 
 Run: `cargo test`
