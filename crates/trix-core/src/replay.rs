@@ -10,7 +10,10 @@
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
-    sync::mpsc::{Receiver, RecvTimeoutError},
+    sync::{
+        Arc, Mutex,
+        mpsc::{Receiver, RecvTimeoutError, Sender, channel},
+    },
     time::{Duration, Instant},
 };
 
@@ -34,6 +37,7 @@ use crate::{
     },
     config::Config,
     control,
+    engine::{EngineCommand, EngineStatus},
     encode::{
         convert::VideoConverter,
         h264::{EncodedPacket, H264Encoder},
@@ -52,6 +56,9 @@ pub struct ReplayOptions {
     pub auto_clip_secs: Option<u64>,
     /// Testing hook: exit after N seconds instead of running forever.
     pub exit_after_secs: Option<u64>,
+    /// Print the `clip saved:` console line. True for the CLI; false for the
+    /// daemon, which reports clips as `clip_saved` events instead.
+    pub print_clips: bool,
 }
 
 struct ReplayFlags {
@@ -173,6 +180,16 @@ impl ReplaySession {
         }
         let now = unsafe { windows::Win32::Media::MediaFoundation::MFGetSystemTime() };
         self.pump_audio_to(now - SILENCE_GRACE_100NS);
+    }
+
+    /// Seconds of footage the ring currently holds.
+    fn ring_span_secs(&self) -> f64 {
+        match (self.video_ring.front(), self.video_ring.back()) {
+            (Some(front), Some(back)) => {
+                (back.pts_100ns - front.pts_100ns) as f64 / 10_000_000.0
+            }
+            _ => 0.0,
+        }
     }
 
     /// Control-thread tick: emit a periodic performance line when the stats
@@ -524,24 +541,79 @@ pub fn run(config: &Config, options: ReplayOptions) -> Result<()> {
     if config.gpu_priority_low() {
         crate::capture::lower_gpu_priority();
     }
-    let result = run_rebuild_loop(config, &options);
-    control::mark_finalized();
-    result
-}
-
-fn run_rebuild_loop(config: &Config, options: &ReplayOptions) -> Result<()> {
     let hotkey = control::Hotkey::parse(&config.clip_hotkey)
         .context("invalid clip_hotkey in config.toml")?;
     let hotkey_rx = control::start_hotkey(&hotkey)?;
 
+    let (tx, rx) = channel();
+    // The hotkey thread speaks `()`; the control loop speaks commands. One
+    // forwarder bridges them. It discards each reply — the loop itself prints
+    // the console line for the CLI.
+    std::thread::Builder::new()
+        .name("trix-hotkey-forward".into())
+        .spawn(move || {
+            while hotkey_rx.recv().is_ok() {
+                let (reply, _discard) = channel();
+                if tx.send(EngineCommand::Clip { reply }).is_err() {
+                    return; // control loop is gone — session over
+                }
+            }
+        })
+        .context("failed to spawn the hotkey forwarder")?;
+
+    let status = Arc::new(Mutex::new(EngineStatus::default()));
+    let mut ready = None;
+    let result = run_driven_inner(config, &rx, &status, &mut ready, Some(&hotkey), options);
+    control::mark_finalized();
+    result
+}
+
+/// Runs the replay engine driven by a command channel rather than a hotkey.
+/// The daemon's engine thread body.
+pub fn run_driven(
+    config: &Config,
+    commands: Receiver<EngineCommand>,
+    status: Arc<Mutex<EngineStatus>>,
+    ready: Option<Sender<Result<()>>>,
+) -> Result<()> {
+    if config.gpu_priority_low() {
+        crate::capture::lower_gpu_priority();
+    }
+    let mut ready = ready;
+    let options =
+        ReplayOptions { auto_clip_secs: None, exit_after_secs: None, print_clips: false };
+    let result = run_driven_inner(config, &commands, &status, &mut ready, None, options);
+    control::mark_finalized();
+    result
+}
+
+/// The rebuild loop: one capture session at a time, restarted when the display
+/// topology changes under it. Unchanged policy — only its input channel and
+/// the status/readiness it threads through are new.
+fn run_driven_inner(
+    config: &Config,
+    commands: &Receiver<EngineCommand>,
+    status: &Arc<Mutex<EngineStatus>>,
+    ready: &mut Option<Sender<Result<()>>>,
+    hotkey: Option<&control::Hotkey>,
+    options: ReplayOptions,
+) -> Result<()> {
     let run_started = Instant::now();
     let mut auto_clip_fired = false;
     let mut ever_ran = false;
     let mut failures = 0u32;
     loop {
         let session_started = Instant::now();
-        match run_session(config, options, &hotkey, &hotkey_rx, run_started, &mut auto_clip_fired)
-        {
+        match run_session(
+            config,
+            &options,
+            hotkey,
+            commands,
+            status,
+            ready,
+            run_started,
+            &mut auto_clip_fired,
+        ) {
             Ok(SessionEnd::Shutdown) => return Ok(()),
             Ok(SessionEnd::Died) => {
                 ever_ran = true;
@@ -567,26 +639,40 @@ fn run_rebuild_loop(config: &Config, options: &ReplayOptions) -> Result<()> {
             }
         }
         // Let the display settle before rebuilding; stay Ctrl+C-responsive
-        // and drop hotkey presses queued while there was no buffer to clip.
+        // and drop clip requests queued while there was no buffer to clip
+        // (their reply channels close, which `EngineHandle::clip` reports as
+        // "capture is rebuilding"). A `Stop` still has to be honoured — the
+        // caller that sent it is blocked waiting for this thread to end.
         let wait_until = Instant::now() + Duration::from_secs(2);
         while Instant::now() < wait_until {
             if control::shutdown_requested() {
                 return Ok(());
             }
-            while hotkey_rx.try_recv().is_ok() {}
+            while let Ok(command) = commands.try_recv() {
+                if matches!(command, EngineCommand::Stop) {
+                    return Ok(());
+                }
+            }
             std::thread::sleep(Duration::from_millis(100));
         }
     }
 }
 
-fn run_session(
-    config: &Config,
-    options: &ReplayOptions,
-    hotkey: &control::Hotkey,
-    hotkey_rx: &Receiver<()>,
-    run_started: Instant,
-    auto_clip_fired: &mut bool,
-) -> Result<SessionEnd> {
+/// A live capture session and everything the control loop needs to drive it.
+/// Split out of `run_session` so every way starting up can fail funnels
+/// through one place, which is where readiness is reported.
+struct LiveSession {
+    capture: CaptureControl<ReplaySession, anyhow::Error>,
+    encoder_name: String,
+    audio_handle: Option<LoopbackCapture>,
+    clip_dir: PathBuf,
+    width: u32,
+    height: u32,
+}
+
+/// Brings up one capture session — monitor, audio, encoder, ring. Byte for
+/// byte the setup `run_session` has always done, including the banner.
+fn start_session(config: &Config, hotkey: Option<&control::Hotkey>) -> Result<LiveSession> {
     let monitor = Monitor::from_index(config.monitor_index as usize + 1)
         .map_err(|e| anyhow!("monitor {} not available: {e}", config.monitor_index))?;
     let width = monitor.width().map_err(|e| anyhow!("monitor width: {e}"))?;
@@ -617,10 +703,20 @@ fn run_session(
         stats_seconds: config.stats_seconds,
     };
 
-    println!(
-        "replay buffer running: {}x{} at {} fps, {} kbps, last {} s kept — {} to clip, Ctrl+C to quit",
-        width, height, config.fps, config.bitrate_kbps, config.replay_seconds, hotkey,
-    );
+    match hotkey {
+        Some(hotkey) => println!(
+            "replay buffer running: {}x{} at {} fps, {} kbps, last {} s kept — {} to clip, Ctrl+C to quit",
+            width, height, config.fps, config.bitrate_kbps, config.replay_seconds, hotkey,
+        ),
+        None => tracing::info!(
+            width,
+            height,
+            fps = config.fps,
+            kbps = config.bitrate_kbps,
+            replay_secs = config.replay_seconds,
+            "replay buffer running"
+        ),
+    }
 
     let settings = Settings::new(
         monitor,
@@ -636,19 +732,60 @@ fn run_session(
         .map_err(|e| anyhow!("failed to start capture: {e}"))?;
     let encoder_name = capture.callback().lock().encoder.name().to_string();
 
+    Ok(LiveSession { capture, encoder_name, audio_handle, clip_dir, width, height })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_session(
+    config: &Config,
+    options: &ReplayOptions,
+    hotkey: Option<&control::Hotkey>,
+    commands: &Receiver<EngineCommand>,
+    status: &Arc<Mutex<EngineStatus>>,
+    ready: &mut Option<Sender<Result<()>>>,
+    run_started: Instant,
+    auto_clip_fired: &mut bool,
+) -> Result<SessionEnd> {
+    // Exactly one message goes out on the ready channel, from exactly these
+    // two places: the setup error below, or the success just after it. Every
+    // way `start_session` can fail returns through this arm.
+    let live = match start_session(config, hotkey) {
+        Ok(live) => live,
+        Err(e) => {
+            if let Some(tx) = ready.take() {
+                // The waiting caller gets the real error; this thread's own
+                // Result keeps its message.
+                let message = format!("{e:#}");
+                let _ = tx.send(Err(e));
+                return Err(anyhow!(message));
+            }
+            return Err(e);
+        }
+    };
+    let LiveSession { capture, encoder_name, audio_handle, clip_dir, width, height } = live;
+    if let Some(tx) = ready.take() {
+        let _ = tx.send(Ok(()));
+    }
+
     let mut session_died = false;
     loop {
-        match hotkey_rx.recv_timeout(Duration::from_millis(250)) {
-            Ok(()) => {
-                match save_clip(&capture, &clip_dir, &encoder_name) {
-                    Ok(Some(saved)) => print_clip_line(&saved),
-                    Ok(None) => println!("nothing buffered yet — try again in a moment"),
-                    Err(e) => {
-                        tracing::error!("clip failed: {e:#}");
-                        println!("clip failed: {e}");
+        match commands.recv_timeout(Duration::from_millis(250)) {
+            Ok(EngineCommand::Clip { reply }) => {
+                let result = save_clip(&capture, &clip_dir, &encoder_name);
+                if options.print_clips {
+                    match &result {
+                        Ok(Some(saved)) => print_clip_line(saved),
+                        Ok(None) => println!("nothing buffered yet — try again in a moment"),
+                        Err(e) => {
+                            tracing::error!("clip failed: {e:#}");
+                            println!("clip failed: {e}");
+                        }
                     }
                 }
+                // The hotkey forwarder drops its receiver; the daemon reads it.
+                let _ = reply.send(result.map(|opt| opt.map(|saved| saved.meta)));
             }
+            Ok(EngineCommand::Stop) => break,
             Err(RecvTimeoutError::Timeout) => {
                 if control::shutdown_requested() {
                     println!("stop requested — closing replay buffer");
@@ -663,6 +800,20 @@ fn run_session(
                     let mut session = handler.lock();
                     session.idle_pump();
                     session.report_if_due();
+                    // The handler lock is already held, so publishing the
+                    // status snapshot here costs nothing extra.
+                    if let Ok(mut status) = status.lock() {
+                        status.encoder = encoder_name.clone();
+                        status.monitor_index = config.monitor_index;
+                        status.width = width;
+                        status.height = height;
+                        status.fps = config.fps;
+                        status.ring_seconds_total = config.replay_seconds;
+                        status.ring_seconds_used = session.ring_span_secs();
+                        status.frames = session.frames;
+                        status.dropped = session.frames_dropped;
+                        status.paced = session.frames_paced;
+                    }
                 }
                 if let Some(secs) = options.auto_clip_secs {
                     if !*auto_clip_fired && run_started.elapsed() >= Duration::from_secs(secs) {

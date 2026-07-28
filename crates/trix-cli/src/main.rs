@@ -81,17 +81,21 @@ fn main() -> Result<()> {
             (None, None, None) => probe::run(),
         },
         Command::Record { duration, output, no_audio } => {
-            control::acquire_single_instance()?;
+            let _single = control::acquire_single_instance()?;
             record::run(
                 &config,
                 record::RecordOptions { duration_secs: duration, output, no_audio },
             )
         }
         Command::Replay { auto_clip, exit_after } => {
-            control::acquire_single_instance()?;
+            let _single = control::acquire_single_instance()?;
             replay::run(
                 &config,
-                replay::ReplayOptions { auto_clip_secs: auto_clip, exit_after_secs: exit_after },
+                replay::ReplayOptions {
+                    auto_clip_secs: auto_clip,
+                    exit_after_secs: exit_after,
+                    print_clips: true,
+                },
             )
         }
     }

@@ -24,7 +24,11 @@ fn session_option_structs_are_publicly_constructible() {
         output: PathBuf::from("out.mp4"),
         no_audio: false,
     };
-    let _replay = ReplayOptions { auto_clip_secs: Some(8), exit_after_secs: Some(12) };
+    let _replay = ReplayOptions {
+        auto_clip_secs: Some(8),
+        exit_after_secs: Some(12),
+        print_clips: true,
+    };
 }
 
 #[test]
@@ -75,7 +79,8 @@ fn engine_entry_points_are_public() {
     let _: fn(&Config, RecordOptions) -> anyhow::Result<()> = trix_core::record::run;
     let _: fn(&Config, ReplayOptions) -> anyhow::Result<()> = trix_core::replay::run;
     let _: fn() -> anyhow::Result<()> = trix_core::probe::run;
-    let _: fn() -> anyhow::Result<()> = trix_core::control::acquire_single_instance;
+    let _: fn() -> anyhow::Result<trix_core::control::SingleInstance> =
+        trix_core::control::acquire_single_instance;
 
     // Plain CPU-side data structure — safe to actually construct.
     let _ = trix_core::stats::LatencyHistogram::new();
@@ -87,4 +92,34 @@ fn engine_entry_points_are_public() {
     // `capture`: bound, not called — calling this would start a real WGC
     // capture session.
     let _: fn(u32, std::path::PathBuf) -> anyhow::Result<()> = trix_core::capture::video::snapshot;
+}
+
+/// Guards the command-driven engine the daemon (plan 3) arms, polls, clips
+/// from, and disarms. Every entry point is bound rather than called: `spawn`
+/// and `run_driven` start a real capture session, and the rest need one.
+#[test]
+#[allow(clippy::type_complexity)] // a bound signature is the point of this test
+fn engine_handle_is_public() {
+    use std::sync::{
+        Arc, Mutex,
+        mpsc::{Receiver, Sender},
+    };
+
+    use trix_core::engine::{EngineCommand, EngineHandle, EngineStatus};
+
+    let _: fn(Config) -> anyhow::Result<EngineHandle> = EngineHandle::spawn;
+    let _: fn(&EngineHandle) -> EngineStatus = EngineHandle::status;
+    let _: fn(&EngineHandle) -> anyhow::Result<Option<trix_proto::ClipMeta>> = EngineHandle::clip;
+    let _: fn(EngineHandle) -> anyhow::Result<()> = EngineHandle::stop;
+    let _: fn(
+        &Config,
+        Receiver<EngineCommand>,
+        Arc<Mutex<EngineStatus>>,
+        Option<Sender<anyhow::Result<()>>>,
+    ) -> anyhow::Result<()> = trix_core::replay::run_driven;
+
+    // Plain CPU-side data — safe to actually construct.
+    let status = EngineStatus::default();
+    assert_eq!(status.ring_seconds_used, 0.0);
+    let _stop = EngineCommand::Stop;
 }

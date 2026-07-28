@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
 use windows::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -58,23 +58,41 @@ pub fn mark_finalized() {
     FINALIZED.store(true, Ordering::Release);
 }
 
+/// Holds the single-instance mutex. Dropping it releases the slot — which is
+/// what lets the daemon take the encoder on `arm` and give it back on
+/// `disarm`, instead of blocking the CLI for the daemon's whole lifetime.
+#[must_use = "dropping the guard immediately releases the single-instance slot"]
+pub struct SingleInstance(HANDLE);
+
+impl Drop for SingleInstance {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
+// SAFETY: a mutex HANDLE is process-wide and has no thread affinity; the guard
+// is moved onto the daemon's state and dropped from whichever thread disarms.
+unsafe impl Send for SingleInstance {}
+unsafe impl Sync for SingleInstance {}
+
 /// Refuses a second concurrent capture session: two would fight over the
 /// hardware encoder and the clip hotkey. Session-local (`Local\`) so each
-/// logged-in user gets their own slot. The mutex handle is deliberately not
-/// closed — it must live for the whole process, and the OS reclaims it at
-/// exit.
-pub fn acquire_single_instance() -> Result<()> {
+/// logged-in user gets their own slot.
+pub fn acquire_single_instance() -> Result<SingleInstance> {
     let name = windows::core::HSTRING::from("Local\\trix-capture-single-instance");
     unsafe {
-        let _handle = CreateMutexW(None, false, &name).context("CreateMutexW")?;
+        let handle = CreateMutexW(None, false, &name).context("CreateMutexW")?;
         if GetLastError() == ERROR_ALREADY_EXISTS {
+            let _ = CloseHandle(handle);
             bail!(
                 "another trix capture session (record or replay) is already \
                  running — stop it before starting a new one"
             );
         }
+        Ok(SingleInstance(handle))
     }
-    Ok(())
 }
 
 /// A parsed `mods+key` combination such as `alt+f10` or `ctrl+shift+c`.
