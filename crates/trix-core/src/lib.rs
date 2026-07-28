@@ -8,6 +8,7 @@ pub mod capture;
 pub mod config;
 pub mod control;
 pub mod encode;
+pub mod library;
 pub mod probe;
 pub mod record;
 pub mod replay;

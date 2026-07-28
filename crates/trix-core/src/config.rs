@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use serde::Deserialize;
+use anyhow::{Context as _, Result};
+use serde::{Deserialize, Serialize};
 
 /// Encoder rate-control strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,7 +16,7 @@ pub enum RateControl {
 /// Engine configuration, loaded from `%APPDATA%\trix\config.toml`.
 /// Missing file or missing keys fall back to defaults; a malformed file is
 /// reported and ignored rather than aborting the daemon.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Target capture/encode frame rate.
@@ -45,6 +46,9 @@ pub struct Config {
     /// memory split, per-frame latency). 0 (the default) disables the
     /// periodic line; a final summary is always logged at shutdown.
     pub stats_seconds: u32,
+    /// Directory clips are written to. Empty (the default) resolves to
+    /// `%USERPROFILE%\Videos\Trix`.
+    pub clip_dir: String,
 }
 
 impl Default for Config {
@@ -59,6 +63,7 @@ impl Default for Config {
             clip_hotkey: "alt+f10".into(),
             gpu_priority: "low".into(),
             stats_seconds: 0,
+            clip_dir: String::new(),
         }
     }
 }
@@ -123,5 +128,68 @@ impl Config {
             },
             Err(_) => Self::default(),
         }
+    }
+
+    /// Resolved clip directory (spec §5.1). A flat, timestamped folder —
+    /// manual arming means there is no game name to fold on, and a flat
+    /// directory sorts correctly in Explorer for people who never open the UI.
+    pub fn clip_dir_path(&self) -> PathBuf {
+        let configured = self.clip_dir.trim();
+        if !configured.is_empty() {
+            return PathBuf::from(configured);
+        }
+        std::env::var_os("USERPROFILE")
+            .map(|home| PathBuf::from(home).join("Videos").join("Trix"))
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    /// Writes the config back to `%APPDATA%\trix\config.toml`, creating the
+    /// directory. Used by `config.set`.
+    pub fn save(&self) -> Result<()> {
+        let path = Self::path().context("APPDATA is not set")?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        let text = toml::to_string_pretty(self).context("serializing config")?;
+        std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clip_dir_defaults_under_the_user_profile() {
+        let config = Config::default();
+        let path = config.clip_dir_path();
+        assert!(path.ends_with(r"Videos\Trix"), "unexpected default: {}", path.display());
+    }
+
+    #[test]
+    fn an_explicit_clip_dir_wins() {
+        let config = Config { clip_dir: r"D:\Clips".into(), ..Config::default() };
+        assert_eq!(config.clip_dir_path(), PathBuf::from(r"D:\Clips"));
+    }
+
+    /// `deny_unknown_fields` means a config written by a newer build must not
+    /// be silently ignored — and a config from before `clip_dir` existed must
+    /// still load.
+    #[test]
+    fn a_config_without_clip_dir_still_loads() {
+        let config: Config = toml::from_str("fps = 30\nreplay_seconds = 20\n").unwrap();
+        assert_eq!(config.fps, 30);
+        assert_eq!(config.replay_seconds, 20);
+        assert_eq!(config.clip_dir, "");
+    }
+
+    #[test]
+    fn config_round_trips_through_toml() {
+        let original = Config { clip_dir: r"D:\Clips".into(), fps: 30, ..Config::default() };
+        let text = toml::to_string_pretty(&original).unwrap();
+        let parsed: Config = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.fps, 30);
+        assert_eq!(parsed.clip_dir, r"D:\Clips");
     }
 }

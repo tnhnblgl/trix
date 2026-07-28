@@ -34,6 +34,34 @@ fn bitrate_helpers_are_public() {
     assert_eq!(config.max_bitrate_bps(), 12_000_000, "0 means auto = 1.5x target");
 }
 
+/// Guards the clip-library module the daemon (plan 3) reads and writes clips
+/// through. `allocate_clip_id`, `write_sidecar`, `read_sidecar`, and `scan`
+/// touch the filesystem, so — like `capture`/`encode` above — they're bound
+/// as function pointers rather than called; the rest are pure and cheap
+/// enough to call for real, like `stats` above.
+#[test]
+fn library_module_is_public() {
+    use std::path::{Path, PathBuf};
+
+    let _: fn(&Path) -> anyhow::Result<String> = trix_core::library::allocate_clip_id;
+    let _: fn(&Path, &trix_proto::ClipMeta) -> anyhow::Result<()> =
+        trix_core::library::write_sidecar;
+    let _: fn(&Path) -> anyhow::Result<trix_proto::ClipMeta> = trix_core::library::read_sidecar;
+    let _: fn(&Path) -> anyhow::Result<Vec<trix_proto::ClipMeta>> = trix_core::library::scan;
+
+    let dir = PathBuf::from("clips");
+    assert_eq!(trix_core::library::mp4_path(&dir, "id"), dir.join("id.mp4"));
+    assert_eq!(trix_core::library::sidecar_path(&dir, "id"), dir.join("id.json"));
+    assert_eq!(trix_core::library::thumb_path(&dir, "id"), dir.join("id.jpg"));
+    assert!(trix_core::library::is_valid_id("20260726_143012"));
+    assert!(!trix_core::library::is_valid_id(".."));
+    assert_eq!(
+        trix_core::library::format_rfc3339(2026, 1, 1, 0, 0, 0, 0),
+        "2026-01-01T00:00:00+00:00"
+    );
+    let _: fn() -> String = trix_core::library::now_rfc3339_local;
+}
+
 /// Binds every engine entry point the daemon (plan 3) will call as a function
 /// pointer. This type-checks each signature at compile time and fails the
 /// build the moment a module the daemon needs (e.g. `stats`, `encode`,

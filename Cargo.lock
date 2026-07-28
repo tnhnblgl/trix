@@ -614,9 +614,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "serde",
+ "serde_json",
  "thiserror",
  "toml",
  "tracing",
+ "trix-proto",
  "wasapi",
  "windows",
  "windows-capture",

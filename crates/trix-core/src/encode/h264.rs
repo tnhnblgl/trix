@@ -42,6 +42,9 @@ pub struct H264Encoder {
     events: IMFMediaEventGenerator,
     /// NeedInput credits granted by the MFT that we haven't spent yet.
     input_credits: u32,
+    /// The MFT's friendly name, e.g. "Intel® Quick Sync Video H.264 Encoder MFT".
+    /// Reported in `status` and stamped into every clip's metadata.
+    name: String,
     pub frames_in: u64,
     pub packets_out: u64,
 }
@@ -59,7 +62,7 @@ impl H264Encoder {
     ) -> Result<Self> {
         crate::encode::mf::ensure_mf_started()?;
         unsafe {
-            let transform = activate_hardware_encoder(device)?;
+            let (transform, name) = activate_hardware_encoder(device)?;
 
             // Async MFTs refuse ProcessInput/Output until unlocked.
             let attrs = transform.GetAttributes().context("MFT attributes")?;
@@ -93,8 +96,12 @@ impl H264Encoder {
             let events: IMFMediaEventGenerator =
                 transform.cast().context("encoder MFT is not async")?;
 
-            Ok(Self { transform, events, input_credits: 0, frames_in: 0, packets_out: 0 })
+            Ok(Self { transform, events, input_credits: 0, name, frames_in: 0, packets_out: 0 })
         }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// Pumps the MFT event queue: collects NeedInput credits and drains every
@@ -254,7 +261,7 @@ fn extract_sps_pps(au: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-fn activate_hardware_encoder(device: &ID3D11Device) -> Result<IMFTransform> {
+fn activate_hardware_encoder(device: &ID3D11Device) -> Result<(IMFTransform, String)> {
     unsafe {
         // Pin enumeration to the capture adapter so hybrid-GPU machines
         // encode on the GPU that already holds the frames (no PCIe copies).
@@ -316,6 +323,7 @@ fn activate_hardware_encoder(device: &ID3D11Device) -> Result<IMFTransform> {
         .unwrap_or_else(|| "<unnamed>".into());
         tracing::info!(encoder = %name, "hardware H.264 MFT activated");
 
-        activate.ActivateObject::<IMFTransform>().context("ActivateObject")
+        let transform = activate.ActivateObject::<IMFTransform>().context("ActivateObject")?;
+        Ok((transform, name))
     }
 }

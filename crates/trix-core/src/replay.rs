@@ -9,12 +9,13 @@
 
 use std::{
     collections::VecDeque,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::mpsc::{Receiver, RecvTimeoutError},
     time::{Duration, Instant},
 };
 
 use anyhow::{Context as _, Result, anyhow};
+use trix_proto::ClipMeta;
 use windows_capture::{
     capture::{CaptureControl, Context, GraphicsCaptureApiHandler},
     frame::Frame,
@@ -38,6 +39,7 @@ use crate::{
         h264::{EncodedPacket, H264Encoder},
         mf::{ClipMuxer, RecorderSettings, create_device_manager},
     },
+    library,
     stats::{LatencyHistogram, StatsReporter, mb},
 };
 
@@ -413,14 +415,6 @@ impl GraphicsCaptureApiHandler for ReplaySession {
     }
 }
 
-fn clip_path() -> PathBuf {
-    let now = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
-    PathBuf::from(format!(
-        "clip_{:04}{:02}{:02}_{:02}{:02}{:02}.mp4",
-        now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond
-    ))
-}
-
 fn write_clip(snapshot: &ClipSnapshot, path: &PathBuf) -> Result<()> {
     let muxer = ClipMuxer::new(path, &snapshot.settings, &snapshot.video_type)?;
     for packet in &snapshot.video {
@@ -442,32 +436,79 @@ fn write_clip(snapshot: &ClipSnapshot, path: &PathBuf) -> Result<()> {
     muxer.finish()
 }
 
-fn save_clip(capture: &CaptureControl<ReplaySession, anyhow::Error>) -> Result<()> {
+/// What one save produced: the metadata that goes on the wire and on disk,
+/// plus the numbers only the console line cares about.
+pub(crate) struct SavedClip {
+    pub meta: ClipMeta,
+    pub path: PathBuf,
+    pub audio_secs: f64,
+    pub packets: usize,
+    pub mux_ms: u128,
+}
+
+/// Saves a clip and its sidecar. `None` means nothing is buffered yet — a
+/// legitimate outcome moments after arming, not an error.
+fn save_clip(
+    capture: &CaptureControl<ReplaySession, anyhow::Error>,
+    clip_dir: &Path,
+    encoder_name: &str,
+) -> Result<Option<SavedClip>> {
     let started = Instant::now();
     let snapshot = capture.callback().lock().snapshot_clip()?;
-    let Some(snapshot) = snapshot else {
-        println!("nothing buffered yet — try again in a moment");
-        return Ok(());
-    };
-    let path = clip_path();
+    let Some(snapshot) = snapshot else { return Ok(None) };
+
+    let id = library::allocate_clip_id(clip_dir)?;
+    let path = library::mp4_path(clip_dir, &id);
     write_clip(&snapshot, &path)?;
 
     let last = &snapshot.video[snapshot.video.len() - 1];
-    let video_secs =
-        (last.pts_100ns + last.duration_100ns - snapshot.base_pts) as f64 / 10_000_000.0;
+    let video_100ns = last.pts_100ns + last.duration_100ns - snapshot.base_pts;
     let audio_secs =
         snapshot.audio_pcm.len() as f64 / (SAMPLE_RATE * ENCODER_BLOCK_ALIGN) as f64;
     let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+
+    let meta = ClipMeta {
+        id: id.clone(),
+        title: format!("clip_{id}"),
+        created: library::now_rfc3339_local(),
+        duration_ms: (video_100ns / 10_000).max(0) as u64,
+        bytes,
+        width: snapshot.settings.width,
+        height: snapshot.settings.height,
+        fps: snapshot.settings.fps,
+        encoder: encoder_name.to_string(),
+        has_audio: snapshot.settings.with_audio,
+        favorite: false,
+    };
+    // A clip with no sidecar is still a clip — the next scan adopts it — so a
+    // sidecar failure is logged, not propagated over the freshly written MP4.
+    if let Err(e) = library::write_sidecar(clip_dir, &meta) {
+        tracing::warn!(clip = %id, error = %format!("{e:#}"), "clip saved without a sidecar");
+    }
+
+    tracing::debug!(clip = %id, bytes, "clip written");
+
+    Ok(Some(SavedClip {
+        meta,
+        path,
+        audio_secs,
+        packets: snapshot.video.len(),
+        mux_ms: started.elapsed().as_millis(),
+    }))
+}
+
+/// The console line `trix replay` has printed since Phase 5b. Kept in exactly
+/// this shape — the verification workflow greps for it.
+fn print_clip_line(saved: &SavedClip) {
     println!(
         "clip saved: {} ({:.1} s video / {:.1} s audio, {} packets, {:.1} MB, muxed in {} ms)",
-        path.display(),
-        video_secs,
-        audio_secs,
-        snapshot.video.len(),
-        bytes as f64 / (1024.0 * 1024.0),
-        started.elapsed().as_millis(),
+        saved.path.display(),
+        saved.meta.duration_ms as f64 / 1000.0,
+        saved.audio_secs,
+        saved.packets,
+        saved.meta.bytes as f64 / (1024.0 * 1024.0),
+        saved.mux_ms,
     );
-    Ok(())
 }
 
 /// Why a capture session ended.
@@ -550,6 +591,7 @@ fn run_session(
         .map_err(|e| anyhow!("monitor {} not available: {e}", config.monitor_index))?;
     let width = monitor.width().map_err(|e| anyhow!("monitor width: {e}"))?;
     let height = monitor.height().map_err(|e| anyhow!("monitor height: {e}"))?;
+    let clip_dir = config.clip_dir_path();
 
     let (audio_handle, audio_rx) =
         match LoopbackCapture::start() {
@@ -592,14 +634,19 @@ fn run_session(
     );
     let capture = ReplaySession::start_free_threaded(settings)
         .map_err(|e| anyhow!("failed to start capture: {e}"))?;
+    let encoder_name = capture.callback().lock().encoder.name().to_string();
 
     let mut session_died = false;
     loop {
         match hotkey_rx.recv_timeout(Duration::from_millis(250)) {
             Ok(()) => {
-                if let Err(e) = save_clip(&capture) {
-                    tracing::error!("clip failed: {e:#}");
-                    println!("clip failed: {e}");
+                match save_clip(&capture, &clip_dir, &encoder_name) {
+                    Ok(Some(saved)) => print_clip_line(&saved),
+                    Ok(None) => println!("nothing buffered yet — try again in a moment"),
+                    Err(e) => {
+                        tracing::error!("clip failed: {e:#}");
+                        println!("clip failed: {e}");
+                    }
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
@@ -620,7 +667,9 @@ fn run_session(
                 if let Some(secs) = options.auto_clip_secs {
                     if !*auto_clip_fired && run_started.elapsed() >= Duration::from_secs(secs) {
                         *auto_clip_fired = true;
-                        save_clip(&capture)?;
+                        if let Some(saved) = save_clip(&capture, &clip_dir, &encoder_name)? {
+                            print_clip_line(&saved);
+                        }
                     }
                 }
                 if let Some(secs) = options.exit_after_secs {
