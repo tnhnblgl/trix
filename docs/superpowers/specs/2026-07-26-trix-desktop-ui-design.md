@@ -370,3 +370,12 @@ artifacts, never a claim of success:
 Automatic game detection · in-game overlay · cloud upload and share links · accounts and social feed ·
 frame-accurate trimming beyond `precise` mode · multi-clip timeline editing · mouse-button hotkey
 binding via `WH_MOUSE_LL` · software-encoder fallback · CQP quality mode for `record`.
+
+**Microphone capture** (deferred 2026-07-28). Capturing a second WASAPI stream is straightforward;
+mixing it is the work — the mic and render devices run on independent hardware clocks that drift
+against each other, mic formats are frequently 44.1 kHz mono against loopback's 48 kHz stereo, and
+summing two streams needs per-source gain and limiting to avoid clipping. Writing two separate MP4
+audio tracks would dodge all of that, but most players only play the first track, so a shared clip
+would be missing either the voice or the game. Mixing is the right answer and it is a phase of its
+own. The capture side is independent of the daemon and UI work, so the natural slot is after both
+land — doing it mid-plan would mean verifying audio sync twice.
