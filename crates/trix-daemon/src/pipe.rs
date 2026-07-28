@@ -118,7 +118,7 @@ fn user_only_security_descriptor() -> Result<LocalSecurityDescriptor> {
 /// Creates one pipe instance. `first` adds `FILE_FLAG_FIRST_PIPE_INSTANCE`,
 /// which is how a second daemon is refused: the flag fails if the name already
 /// has an instance.
-fn create_instance(security: &LocalSecurityDescriptor, first: bool) -> Result<std::fs::File> {
+fn create_instance(name: &str, security: &LocalSecurityDescriptor, first: bool) -> Result<std::fs::File> {
     // `CreateNamedPipeW`'s last parameter is `Option<*const SECURITY_ATTRIBUTES>`
     // (a borrow, not an out-param), so `attributes` is never mutated after
     // construction — no `mut` binding, matching the project's zero-warnings bar.
@@ -132,7 +132,7 @@ fn create_instance(security: &LocalSecurityDescriptor, first: bool) -> Result<st
 
     let handle = unsafe {
         CreateNamedPipeW(
-            &HSTRING::from(PIPE_NAME),
+            &HSTRING::from(name),
             open_mode,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             PIPE_UNLIMITED_INSTANCES,
@@ -150,7 +150,7 @@ fn create_instance(security: &LocalSecurityDescriptor, first: bool) -> Result<st
         let error = windows::core::Error::from_thread();
         if first {
             bail!(
-                "could not create {PIPE_NAME} ({error}) — another trix daemon is \
+                "could not create {name} ({error}) — another trix daemon is \
                  probably already running"
             );
         }
@@ -207,14 +207,16 @@ pub fn read_line_capped<R: Read>(source: &mut R, line: &mut String) -> Result<bo
 
 /// One raw HANDLE value, viewed from a `&File` for the duration of one call.
 /// `File` owns and closes the underlying handle; this just borrows its value
-/// for Win32 calls (`ConnectNamedPipe`, `DisconnectNamedPipe`) that take a
-/// bare `HANDLE` rather than a `File`.
+/// for Win32 calls (`ConnectNamedPipe`) that take a bare `HANDLE` rather than
+/// a `File`.
 fn handle_of(file: &std::fs::File) -> *mut std::ffi::c_void {
     use std::os::windows::io::AsRawHandle;
     file.as_raw_handle().cast()
 }
 
-/// Accepts clients forever, handing each to `handle` on its own thread.
+/// Accepts clients forever on the published [`PIPE_NAME`], handing each to
+/// `handler` on its own thread. Thin delegation to [`serve_at`] — production
+/// callers want this one.
 ///
 /// One thread per client, blocking IO: a control socket sees a handful of
 /// connections, and overlapped IO would be a large amount of unsafe code
@@ -223,16 +225,29 @@ pub fn serve<H>(handler: Arc<H>) -> Result<()>
 where
     H: ClientHandler + Send + Sync + 'static,
 {
+    serve_at(PIPE_NAME, handler)
+}
+
+/// Accepts clients forever on `name`, handing each to `handler` on its own
+/// thread.
+///
+/// Exists as a separate entry point so tests can bind a private pipe name
+/// instead of claiming the live [`PIPE_NAME`] — production callers want
+/// [`serve`].
+pub fn serve_at<H>(name: &str, handler: Arc<H>) -> Result<()>
+where
+    H: ClientHandler + Send + Sync + 'static,
+{
     let security = user_only_security_descriptor()?;
     let mut first = true;
     loop {
-        let instance = create_instance(&security, first)?;
+        let instance = create_instance(name, &security, first)?;
         // Logged here, after the first instance is actually bound, rather
         // than by the caller before calling `serve` — `FILE_FLAG_FIRST_PIPE_INSTANCE`
         // makes that first `create_instance` the single-instance check, and a
         // second daemon must not claim to be listening right before failing it.
         if first {
-            tracing::info!("listening on {PIPE_NAME}");
+            tracing::info!("listening on {name}");
         }
         first = false;
 
