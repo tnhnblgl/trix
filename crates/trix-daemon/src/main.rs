@@ -53,8 +53,8 @@ impl pipe::ClientHandler for StatusOnlyHandler {
 /// every arm of that macro other than its `true`/`false`/`null`/array/object
 /// literals expands to `serde_json::to_value(&x).unwrap()` — an `unwrap` this
 /// function's caller (`dispatch`) reaches straight from a socket message. The
-/// `From` impls used here (integers, `f64`, `Cow<str>`, `Option`) cannot fail,
-/// so there is nothing to unwrap.
+/// `From` impls used here (integers, `f64`, `Cow<str>`) cannot fail, so there
+/// is nothing to unwrap.
 fn status_json(config: &Config) -> serde_json::Value {
     use serde_json::{Map, Value};
     let mut fields = Map::new();

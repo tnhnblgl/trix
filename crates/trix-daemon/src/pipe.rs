@@ -22,8 +22,8 @@ use windows::Win32::Security::{
 };
 use windows::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
 use windows::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
-    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
+    PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::core::{HSTRING, PWSTR};
@@ -67,9 +67,12 @@ fn current_user_sid_string() -> Result<String> {
         let user = &*(buffer.as_ptr() as *const TOKEN_USER);
         let mut sid_string = PWSTR::null();
         ConvertSidToStringSidW(user.User.Sid, &mut sid_string).context("ConvertSidToStringSidW")?;
-        let owned = sid_string.to_string().context("SID string was not valid UTF-16")?;
+        // Freed unconditionally, before the `?` below propagates any error —
+        // otherwise a `to_string` failure would return without ever freeing
+        // the string `ConvertSidToStringSidW` allocated.
+        let owned = sid_string.to_string().context("SID string was not valid UTF-16");
         let _ = LocalFree(Some(windows::Win32::Foundation::HLOCAL(sid_string.0.cast())));
-        Ok(owned)
+        owned
     }
 }
 
@@ -84,8 +87,8 @@ impl Drop for LocalSecurityDescriptor {
     }
 }
 
-/// A `HANDLE` closed on drop. Used for the token and for pipe instances that
-/// fail before ownership moves into a `File`.
+/// A `HANDLE` closed on drop. Used for the process token handle obtained in
+/// `current_user_sid_string`.
 struct OwnedHandle(HANDLE);
 
 impl Drop for OwnedHandle {
@@ -297,12 +300,20 @@ pub trait ClientHandler {
 /// Documented here so Task 5 does not have to rediscover it.
 fn serve_one<H: ClientHandler>(instance: std::fs::File, handler: Arc<H>) -> Result<()> {
     let (out_tx, out_rx) = std::sync::mpsc::channel::<String>();
-    let client = handler.client_connected(out_tx.clone());
+    // Cloned before `client_connected` registers this connection: if either
+    // `try_clone` fails, the `?` below must return without ever having
+    // registered a client, or the registry would keep a live entry for a
+    // connection that never actually started (nothing would call
+    // `client_disconnected` to remove it).
     let mut writer = instance.try_clone().context("cloning the pipe handle")?;
     let mut reader = BufReader::new(instance.try_clone().context("cloning the pipe handle")?);
+    let client = handler.client_connected(out_tx.clone());
     let mut line = String::new();
 
-    // Writes `text` and flushes; `false` means the client hung up.
+    // Writes `text` to the pipe. `flush()` is unconditionally `Ok(())` for a
+    // `File` on Windows (std never calls `FlushFileBuffers`), so it cannot by
+    // itself report anything; it stays in the chain only so a failure from
+    // either call is what makes `send` return `false`.
     let mut send = |text: &str| -> bool { writer.write_all(text.as_bytes()).is_ok() && writer.flush().is_ok() };
 
     'session: loop {
@@ -354,9 +365,17 @@ fn serve_one<H: ClientHandler>(instance: std::fs::File, handler: Arc<H>) -> Resu
 
     handler.client_disconnected(client);
     drop(out_tx);
-    unsafe {
-        let _ = DisconnectNamedPipe(HANDLE(handle_of(&instance)));
-    }
+    // Deliberately no `DisconnectNamedPipe` call here. `write_all` only
+    // copies bytes into the pipe's output buffer, and `File::flush` is a
+    // no-op on Windows (std does not call `FlushFileBuffers`), so bytes
+    // written by `send` just above — including the one response this design
+    // most wants a client to receive before the connection ends, the
+    // `LineError::TooLong` diagnostic — can still be sitting unread.
+    // `DisconnectNamedPipe` is documented to discard exactly that: data the
+    // client has not yet read. Letting `instance` (and its clones `writer`/
+    // `reader`) close on drop instead leaves those bytes in the pipe for the
+    // client to read; the client then sees a clean end-of-stream once it has
+    // drained them, rather than a broken-pipe error in place of the message.
     Ok(())
 }
 

@@ -63,8 +63,9 @@ impl Clients {
             tracing::error!(event = %event.event, "could not serialize an event");
             return;
         };
-        // A failed send means that client's writer thread has exited; drop it
-        // here rather than letting the registry accumulate dead entries.
+        // A failed send means that client's session thread has returned and
+        // dropped its receiver; drop the registry entry here rather than
+        // letting the registry accumulate dead entries.
         self.lock()
             .retain(|client| !want(client) || client.out.send(line.clone()).is_ok());
     }
