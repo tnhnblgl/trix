@@ -2441,15 +2441,19 @@ The session loop becomes: drain the channel, then wait for a request rather than
         }
     }
 
-    match request_pending(&instance) {
-        Ok(true) => {}
-        Ok(false) => {
-            std::thread::sleep(std::time::Duration::from_millis(EVENT_POLL_MS));
-            continue;
-        }
-        Err(e) => {
-            tracing::debug!(error = %e, "peek failed; client is gone");
-            break;
+    // The OS is asked only when the reader has nothing of its own. Peeking
+    // unconditionally is a hang: see below.
+    if reader.buffer().is_empty() {
+        match request_pending(&instance) {
+            Ok(true) => {}
+            Ok(false) => {
+                std::thread::sleep(std::time::Duration::from_millis(EVENT_POLL_MS));
+                continue 'session;
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "peek failed; client is gone");
+                break 'session;
+            }
         }
     }
 
@@ -2457,9 +2461,17 @@ The session loop becomes: drain the channel, then wait for a request rather than
 }
 ```
 
-`read_line_capped` is only ever entered with at least one byte available, so it still blocks — but only mid-line, between bytes the client has already committed to sending. That is bounded by the client's own write, not by its idleness.
+**The `reader.buffer().is_empty()` guard is load-bearing — do not drop it.** `request_pending` peeks the *OS pipe buffer*, but reads go through a `BufReader`, which drains everything currently in the pipe — up to 8 KB — on its first read. So when a client writes two request lines in a single `write_all`, line 1 is dispatched and line 2 is sitting in the `BufReader` where `PeekNamedPipe` — correctly — reports zero bytes available. Without the guard the loop parks in its 25 ms sleep forever while holding a request it had already been given, and the client blocks on a response that never comes. The protocol carries an `id` precisely so requests can be in flight concurrently, so this is not an exotic client. It was found in review, reproduced, and fixed; a lock-step client (PowerShell's `WriteLine`/`ReadLine`) cannot detect it, so it needs the round-trip test below.
 
-Test it: a client connects, sends nothing, and must still receive a broadcast. Because that needs a real pipe, put it in `crates/trix-daemon/tests/events.rs` as an integration test that starts `serve` on a background thread with a stub `ClientHandler`, connects a `std::fs::File` to `PIPE_NAME`, broadcasts an event without ever writing a request, and asserts the event line arrives within 2 s. Assert on the decoded `event` field, not the raw bytes.
+`read_line_capped` is entered only when a line is already available in one buffer or the other, so it no longer parks on an idle client. It is *not*, however, bounded by anything once entered: a client that sends one byte and no newline parks that session thread indefinitely. `MAX_LINE_BYTES` bounds the memory; nothing bounds the time. The damage is confined to that one connection.
+
+Test it twice, because the two halves fail independently.
+
+`crates/trix-daemon/tests/events.rs` covers idle delivery: a client connects, sends nothing, and must still receive a broadcast within 2 s. Assert on the decoded `event` field, not the raw bytes.
+
+`crates/trix-daemon/tests/request_round_trip.rs` covers the guard above: write **two complete request lines in one `write_all`** and require **both** responses, correlated by `id`. Without this, the hang described above ships green.
+
+**Neither test may bind `PIPE_NAME`.** Task 4 established `pipe::serve_at(name, handler)` for exactly this: binding the production name means that when a real `trix-daemon.exe` is running, the bind fails and the test silently grades that already-built binary instead of the code under test — passing either way. Use a private pid-qualified name (`format!(r"\\.\pipe\trix-…-test-{}", std::process::id())`, a distinct prefix per test binary so they cannot collide under a parallel runner), and send `serve_at`'s `Err` over a channel so a bind failure panics loudly instead of falling through to whatever else holds the name.
 
 Two hazards inherited from Task 4 go live in this step, both harmless while nothing broadcasts and neither harmless afterwards. Fix both here.
 

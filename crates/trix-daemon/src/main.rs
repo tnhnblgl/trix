@@ -39,10 +39,20 @@ fn init_tracing() {
 /// Ctrl+C do *nothing at all*: `on_console_ctrl` returns `TRUE` for
 /// `CTRL_C_EVENT` with no OS deadline behind it, so this `process::exit` is the
 /// only thing that ends the process, and `taskkill` would be the user's only
-/// way out. Four seconds is long enough for an honest finalize — the mux of a
+/// way out. Three seconds is long enough for an honest finalize — the mux of a
 /// ring already in memory — and short enough that a user who pressed Ctrl+C
 /// does not conclude the daemon is hung.
-const SHUTDOWN_DISARM_BUDGET: std::time::Duration = std::time::Duration::from_secs(4);
+///
+/// It must also stay *under* the console handler's own wait, or the disarm it
+/// exists to protect is pointless on the paths that need it most. For a console
+/// close, logoff, or OS shutdown, `on_console_ctrl`
+/// (`trix-core/src/control.rs`) parks its thread in `for _ in 0..80` at 50 ms —
+/// exactly 4000 ms — waiting for `mark_finalized()`, and Windows kills the
+/// process the moment that handler returns. A 4 s budget plus this watcher's
+/// 100 ms poll would signal at ~4100 ms: the handler has already given up and
+/// the mux dies mid-write, which is the exact loss the disarm was added to
+/// prevent. Three seconds leaves roughly 900 ms of margin.
+const SHUTDOWN_DISARM_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Polls `control::shutdown_requested()`, disarms within a budget, and exits
 /// the process once it fires.
