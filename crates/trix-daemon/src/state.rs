@@ -5,7 +5,7 @@
 //! what to broadcast — which is also what keeps the lock ordering below
 //! trivially true.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{Context as _, Result, bail};
@@ -88,6 +88,84 @@ pub struct LibraryPage {
     pub total: usize,
     pub offset: usize,
 }
+
+/// A sealed home for [`ClipPaths`], so the guarantee below is enforced by the
+/// compiler against *this whole file*, not just against callers outside it.
+///
+/// A plain `struct ClipPaths { .. }` sitting directly in `state.rs` would not
+/// be enough: private fields are visible to every function in the module that
+/// declares them, so a fifth `impl Daemon` method added later — in this same
+/// file — could still write a `ClipPaths { mp4: .., .. }` struct literal by
+/// hand and skip validation entirely, and the compiler would not object. Only
+/// a *child* module's private items are hidden from its parent, so nesting
+/// the struct one level down and keeping its fields private to that nested
+/// module is what actually closes the loophole: `state.rs` can call
+/// [`ClipPaths::for_id`] and read the accessors, but it cannot see the fields
+/// to construct one itself.
+mod clip_paths {
+    use std::path::{Path, PathBuf};
+
+    use anyhow::{Result, bail};
+    use trix_core::library;
+
+    /// Already-built, already-validated paths for one clip id.
+    ///
+    /// The only way anywhere in this crate to end up holding one of these is
+    /// [`ClipPaths::for_id`], which calls `library::is_valid_id` before it
+    /// builds a single path. So holding a `ClipPaths` *is* the proof that the
+    /// id it came from passed validation — a method that wants a clip's
+    /// `.mp4`, sidecar, or thumbnail path has to call `for_id` and use the
+    /// accessors below, and cannot get there by calling `library::mp4_path`
+    /// (or its siblings) directly, because there is no other route to a path
+    /// this type will hand out. Those `library` functions are still `pub` and
+    /// still validate nothing on their own — that has not changed, and could
+    /// not without touching `trix-core`, which is out of scope here — but a
+    /// caller now has to go out of its way to reach them instead of through
+    /// this door.
+    pub struct ClipPaths {
+        dir: PathBuf,
+        mp4: PathBuf,
+        sidecar: PathBuf,
+        thumb: PathBuf,
+    }
+
+    impl ClipPaths {
+        /// The one and only constructor. Validates `id` first; builds nothing
+        /// if it is not a valid clip id, so a rejected id has caused no I/O
+        /// and produced no path at all.
+        pub(super) fn for_id(dir: PathBuf, id: &str) -> Result<Self> {
+            if !library::is_valid_id(id) {
+                bail!("{id:?} is not a valid clip id");
+            }
+            Ok(Self {
+                mp4: library::mp4_path(&dir, id),
+                sidecar: library::sidecar_path(&dir, id),
+                thumb: library::thumb_path(&dir, id),
+                dir,
+            })
+        }
+
+        /// The clip directory itself — needed by `edit_meta`, which hands it
+        /// to `library::write_sidecar` (that function derives the sidecar
+        /// path internally, so it wants the directory, not a pre-built path).
+        pub(super) fn dir(&self) -> &Path {
+            &self.dir
+        }
+
+        pub(super) fn mp4(&self) -> &Path {
+            &self.mp4
+        }
+
+        pub(super) fn sidecar(&self) -> &Path {
+            &self.sidecar
+        }
+
+        pub(super) fn thumb(&self) -> &Path {
+            &self.thumb
+        }
+    }
+}
+use clip_paths::ClipPaths;
 
 /// What [`Daemon::arm`] did.
 pub struct ArmOutcome {
@@ -346,11 +424,24 @@ impl Daemon {
     /// nothing writes a `.jpg` yet, and a sidecar can legitimately be missing
     /// on an adopted clip — so their absence is not.
     pub fn delete(&self, id: &str) -> Result<()> {
-        let dir = self.clip_dir_for(id)?;
+        let paths = self.paths_for(id)?;
 
-        match std::fs::remove_file(library::mp4_path(&dir, id)) {
+        match std::fs::remove_file(paths.mp4()) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // The cache can be stale — the user may have deleted this clip
+                // in Explorer while the daemon kept running. `library.list`
+                // still shows it (cache-only reads are by design, spec §5.2),
+                // so without evicting it here the row would be stuck forever:
+                // there is no `library.refresh` in this build, `total` would
+                // stay wrong until the daemon restarts, and a `rename` on the
+                // ghost row would happily write an orphan `.json` next to an
+                // `.mp4` that no longer exists. The brief only requires that a
+                // missing `.mp4` be an error, not that the cache entry survive
+                // it, so evicting here does not contradict the plan — and
+                // `an_unknown_but_wellformed_id_is_a_clean_error` still holds:
+                // that id was never in the cache, so this is a no-op for it.
+                self.lock_library().retain(|clip| clip.id != id);
                 bail!("no clip {id} in the library")
             }
             Err(e) => return Err(e).with_context(|| format!("could not delete clip {id}")),
@@ -360,8 +451,8 @@ impl Daemon {
         // sidecar or thumbnail is logged rather than propagated: reporting a
         // failed delete for a clip that no longer exists would leave a UI
         // showing a row whose file it cannot open.
-        for path in [library::sidecar_path(&dir, id), library::thumb_path(&dir, id)] {
-            match std::fs::remove_file(&path) {
+        for path in [paths.sidecar(), paths.thumb()] {
+            match std::fs::remove_file(path) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => tracing::warn!(
@@ -397,7 +488,7 @@ impl Daemon {
     /// Opens Explorer with the clip selected.
     ///
     /// Built argument by argument, never as a formatted command line: the id is
-    /// whitelisted by [`Self::clip_dir_for`] but the clip *directory* comes
+    /// whitelisted by [`Self::paths_for`] but the clip *directory* comes
     /// from user config and can hold spaces, quotes, or an `&`, and handing
     /// that to a shell would be an injection with the user's own token.
     /// `std::process::Command` passes the path as one argument.
@@ -409,35 +500,45 @@ impl Daemon {
     /// distinguishes "the user is looking at their clip" from "nothing
     /// happened", so that is what is reported.
     pub fn reveal(&self, id: &str) -> Result<()> {
-        let dir = self.clip_dir_for(id)?;
-        let path = library::mp4_path(&dir, id);
-        if !path.exists() {
+        let paths = self.paths_for(id)?;
+        if !paths.mp4().exists() {
             bail!("no clip {id} in the library");
         }
         std::process::Command::new("explorer.exe")
             .arg("/select,")
-            .arg(&path)
+            .arg(paths.mp4())
             .spawn()
             .with_context(|| format!("could not open Explorer for clip {id}"))?;
         Ok(())
     }
 
-    /// The choke point every id-taking command goes through, and the reason
-    /// there is no other way to get at the clip directory from an id.
+    /// The choke point every id-taking command goes through, and — because
+    /// [`ClipPaths`] is sealed in its own submodule and [`ClipPaths::for_id`]
+    /// is the only function anywhere that can build one — genuinely the only
+    /// way to get a clip's paths from an id.
     ///
     /// Ids arrive from the socket and are concatenated into filesystem paths,
-    /// so this validates *before* returning the directory: a caller cannot
-    /// build a path without having passed the check, and a command added later
-    /// cannot forget it without also having nowhere to get `dir` from. The
+    /// so `for_id` validates *before* building any of them: a caller cannot
+    /// get a `ClipPaths` without having passed the check, and a command added
+    /// later cannot forget it without also having nowhere to get one from.
+    /// That is a real, compiler-checked guarantee now, not just a hopeful
+    /// comment — see the `mod clip_paths` doc comment above for why the
+    /// struct had to move into its own module to make it one. It is also not
+    /// a claim that the only way to *touch a clip file* changed:
+    /// `Config::clip_dir_path` and `library::{mp4_path, sidecar_path,
+    /// thumb_path}` are all still `pub` and still validate nothing on their
+    /// own — `status_of`, `new`, and `rescan_library` call `clip_dir_path`
+    /// directly, deliberately, because none of them take an id to validate in
+    /// the first place. What changed is narrower and is exactly what matters
+    /// here: there is no longer a way, inside this crate, to turn a socket
+    /// id into a clip path without going through `is_valid_id` first. The
     /// check itself is `trix_core::library::is_valid_id` — a whitelist of
-    /// digits and underscores, which cannot express `..`, a separator, a drive
-    /// letter, or a UNC prefix — and nothing here touches the disk, so a
-    /// rejected id has caused no I/O at all.
-    fn clip_dir_for(&self, id: &str) -> Result<PathBuf> {
-        if !library::is_valid_id(id) {
-            bail!("{id:?} is not a valid clip id");
-        }
-        Ok(self.lock_config().clip_dir_path())
+    /// digits and underscores, which cannot express `..`, a separator, a
+    /// drive letter, or a UNC prefix — and nothing here touches the disk, so
+    /// a rejected id has caused no I/O at all.
+    fn paths_for(&self, id: &str) -> Result<ClipPaths> {
+        let dir = self.lock_config().clip_dir_path();
+        ClipPaths::for_id(dir, id)
     }
 
     /// Disk first, then cache. Shared by `rename` and `set_favorite` so the two
@@ -450,8 +551,18 @@ impl Daemon {
     /// opens is a concurrent edit of the *same clip*, whose loser is simply the
     /// earlier write; there is one desktop user behind this socket, and the
     /// alternative costs every reader.
+    ///
+    /// The same window has a second shape: `edit_meta` racing `delete` on the
+    /// same id. If `delete` wins first, this function's cache lookup above
+    /// already fails it cleanly. If `edit_meta` wins the read and `delete`
+    /// removes the `.mp4` before `write_sidecar` below runs, this call still
+    /// returns `Ok` — it writes a fresh orphan `.json` for a clip whose `.mp4`
+    /// is already gone, and the final `iter_mut().find` silently no-ops
+    /// because `delete` has already evicted the cache entry. No behaviour
+    /// change here either — one desktop user, acceptable — but worth knowing
+    /// if `delete` is ever made to hold this lock across its own write.
     fn edit_meta(&self, id: &str, edit: impl FnOnce(&mut ClipMeta)) -> Result<ClipMeta> {
-        let dir = self.clip_dir_for(id)?;
+        let paths = self.paths_for(id)?;
 
         let mut meta = {
             let library = self.lock_library();
@@ -466,7 +577,7 @@ impl Daemon {
         // the client gets an error and the cache still matches the disk. The
         // other order would answer "renamed" about a title that vanishes at the
         // next scan.
-        library::write_sidecar(&dir, &meta)
+        library::write_sidecar(paths.dir(), &meta)
             .with_context(|| format!("could not update clip {id}"))?;
 
         if let Some(entry) = self.lock_library().iter_mut().find(|clip| clip.id == id) {
@@ -552,6 +663,17 @@ mod tests {
 
     /// The security boundary. Every id-taking command runs through the same
     /// check; if one forgets, this catches it.
+    ///
+    /// `delete` and `reveal` are proven by the `canary` id, which really would
+    /// hit `canary.mp4` if validation were skipped — that is the load-bearing
+    /// case. `rename` and `favorite` cannot be proven the same way: both go
+    /// through `edit_meta`, whose cache lookup fails on all five of these ids
+    /// regardless of whether `is_valid_id` ran (none of them name a clip
+    /// `library::scan` would ever have adopted, since `scan` itself filters
+    /// through `is_valid_id`). So for those two, `is_err()` alone would pass
+    /// even with the check ripped out — what has to be asserted is the error
+    /// *text*, which distinguishes "refused at the boundary" from "fell
+    /// through to a `NotFound` lookup".
     #[test]
     fn every_id_command_rejects_a_traversal_attempt() {
         let (daemon, dir) = fixture("traversal");
@@ -566,8 +688,19 @@ mod tests {
             r"C:\Windows\System32\drivers\etc\hosts",
         ] {
             assert!(daemon.delete(evil).is_err(), "delete accepted {evil:?}");
-            assert!(daemon.rename(evil, "x").is_err(), "rename accepted {evil:?}");
-            assert!(daemon.set_favorite(evil, true).is_err(), "favorite accepted {evil:?}");
+
+            let rename_err = daemon.rename(evil, "x").unwrap_err().to_string();
+            assert!(
+                rename_err.contains("is not a valid clip id"),
+                "rename on {evil:?} must be refused at validation, not fall through to a lookup: {rename_err}"
+            );
+
+            let favorite_err = daemon.set_favorite(evil, true).unwrap_err().to_string();
+            assert!(
+                favorite_err.contains("is not a valid clip id"),
+                "favorite on {evil:?} must be refused at validation, not fall through to a lookup: {favorite_err}"
+            );
+
             assert!(daemon.reveal(evil).is_err(), "reveal accepted {evil:?}");
         }
         assert!(canary.exists(), "a rejected id must not have touched the filesystem");
@@ -629,6 +762,39 @@ mod tests {
         assert!(err.contains("20991231_235959"), "the error should name the clip: {err}");
         assert!(daemon.rename("20991231_235959", "x").is_err());
         assert_eq!(daemon.list(0, 50).total, 3, "a failed delete changed nothing");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A clip deleted in Explorer while the daemon keeps running: `library.list`
+    /// still shows it, because cache-only reads are by design (spec §5.2). But
+    /// there is no `library.refresh` in this build, so a `delete` that fails
+    /// with `NotFound` has to evict the cache entry itself — otherwise the row
+    /// is stuck forever and `total` stays wrong until the daemon restarts, and
+    /// a `rename` on the ghost would write an orphan `.json` for an `.mp4` that
+    /// no longer exists.
+    #[test]
+    fn a_clip_missing_behind_the_daemons_back_is_evicted_by_a_failed_delete() {
+        let (daemon, dir) = fixture("ghost");
+        let id = "20260726_100000";
+        std::fs::remove_file(trix_core::library::mp4_path(&dir, id)).unwrap();
+
+        assert_eq!(daemon.list(0, 50).total, 3, "the cache does not know yet — by design");
+
+        let err = daemon.delete(id).unwrap_err().to_string();
+        assert!(err.contains(id), "the error should name the clip: {err}");
+        assert_eq!(
+            daemon.list(0, 50).total,
+            2,
+            "a failed delete must still evict the ghost row from the cache"
+        );
+
+        // A second delete of the same id is still a clean error, not a panic
+        // and not a different message because the entry is now gone from the
+        // cache too.
+        let err_again = daemon.delete(id).unwrap_err().to_string();
+        assert!(err_again.contains(id), "a repeat delete is still a clean error: {err_again}");
+        assert_eq!(daemon.list(0, 50).total, 2, "nothing further changes");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

@@ -60,7 +60,7 @@ impl ClientHandler for Daemon {
             }
             // Every one of these takes a clip id straight off the wire.
             // `Daemon` validates it before it can reach a path — see
-            // `Daemon::clip_dir_for` — so there is nothing to check here, and
+            // `Daemon::paths_for` — so there is nothing to check here, and
             // deliberately so: a check in the dispatcher is one a second caller
             // of the same method would not get.
             Ok(Command::LibraryDelete { clip_id }) => {
@@ -347,29 +347,46 @@ mod tests {
     /// through `Command::parse`, into the dispatcher. `state.rs` proves the
     /// method rejects a hostile id; this proves nothing in the wiring hands one
     /// through by a different route.
+    ///
+    /// `../../../boot.ini` alone would make the final "untouched" assertion
+    /// unfalsifiable: that id could never resolve to `20260726_100000.mp4`
+    /// under any bug, so the check could not fail no matter what the wiring
+    /// did. `canary` is the id that makes it mean something — like the
+    /// `state.rs` traversal test, it is not a valid clip id, but it *is*
+    /// exactly what `library::mp4_path` would target for it if validation
+    /// were ever skipped on this path.
     #[test]
     fn a_traversal_id_off_the_wire_is_refused_without_touching_a_file() {
         let (daemon, dir) = with_two_clips("traversal");
-        let survivor = trix_core::library::mp4_path(&dir, "20260726_100000");
+        let canary = dir.join("canary.mp4");
+        std::fs::write(&canary, b"must survive").unwrap();
 
         for cmd in ["library.delete", "library.rename", "library.favorite", "library.reveal"] {
-            let request = request_with(
-                7,
-                cmd,
-                &[
-                    ("clip_id", "../../../boot.ini".into()),
-                    ("title", "x".into()),
-                    ("favorite", true.into()),
-                ],
-            );
-            let response = daemon.dispatch(1, &request);
-            assert!(!response.ok, "{cmd} accepted a traversal id");
-            assert!(
-                response.error.unwrap_or_default().contains("boot.ini"),
-                "the error should quote the id it refused, for {cmd}"
-            );
+            for evil in ["../../../boot.ini", "canary"] {
+                let request = request_with(
+                    7,
+                    cmd,
+                    &[
+                        ("clip_id", evil.into()),
+                        ("title", "x".into()),
+                        ("favorite", true.into()),
+                    ],
+                );
+                let response = daemon.dispatch(1, &request);
+                assert!(!response.ok, "{cmd} accepted {evil:?}");
+                let error = response.error.unwrap_or_default();
+                assert!(
+                    error.contains("is not a valid clip id"),
+                    "{cmd} on {evil:?} should be refused at the validation boundary, not fall \
+                     through to a lookup: {error}"
+                );
+                assert!(
+                    error.contains(evil),
+                    "the error should quote the id it refused, for {cmd} on {evil:?}: {error}"
+                );
+            }
         }
-        assert!(survivor.exists(), "a refused id must not have touched the filesystem");
+        assert!(canary.exists(), "a refused id must not have touched the filesystem");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

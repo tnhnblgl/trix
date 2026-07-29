@@ -1,7 +1,8 @@
 //! `trix-daemon`: exposes the control protocol over `pipe::PIPE_NAME` so
 //! something other than `trix.exe` can drive the engine. `status`, `arm`,
-//! `disarm`, and `clip` are answered for real; the rest of the command set
-//! lands in Tasks 6 and 7.
+//! `disarm`, `clip`, and the clip library (`library.list`, `delete`,
+//! `rename`, `favorite`, `reveal`) are answered for real; the rest of the
+//! command set lands in Task 7.
 //!
 //! This file is now only wiring: the state lives in `state::Daemon` and the
 //! request handling in `dispatch`, both in this crate's library half so they
