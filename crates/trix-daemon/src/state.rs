@@ -426,31 +426,26 @@ impl Daemon {
     pub fn delete(&self, id: &str) -> Result<()> {
         let paths = self.paths_for(id)?;
 
-        match std::fs::remove_file(paths.mp4()) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // The cache can be stale — the user may have deleted this clip
-                // in Explorer while the daemon kept running. `library.list`
-                // still shows it (cache-only reads are by design, spec §5.2),
-                // so without evicting it here the row would be stuck forever:
-                // there is no `library.refresh` in this build, `total` would
-                // stay wrong until the daemon restarts, and a `rename` on the
-                // ghost row would happily write an orphan `.json` next to an
-                // `.mp4` that no longer exists. The brief only requires that a
-                // missing `.mp4` be an error, not that the cache entry survive
-                // it, so evicting here does not contradict the plan — and
-                // `an_unknown_but_wellformed_id_is_a_clean_error` still holds:
-                // that id was never in the cache, so this is a no-op for it.
-                self.lock_library().retain(|clip| clip.id != id);
-                bail!("no clip {id} in the library")
-            }
+        // A missing `.mp4` is still an error, but it is not a reason to stop:
+        // the companion cleanup and the cache eviction below both have to run
+        // either way. See the two comments on those steps.
+        let mp4_was_missing = match std::fs::remove_file(paths.mp4()) {
+            Ok(()) => false,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
             Err(e) => return Err(e).with_context(|| format!("could not delete clip {id}")),
-        }
+        };
 
-        // Past this point the clip is gone whatever happens next, so a stuck
-        // sidecar or thumbnail is logged rather than propagated: reporting a
-        // failed delete for a clip that no longer exists would leave a UI
-        // showing a row whose file it cannot open.
+        // The clip is gone whatever happens next, so a stuck sidecar or
+        // thumbnail is logged rather than propagated: reporting a failed delete
+        // for a clip that no longer exists would leave a UI showing a row whose
+        // file it cannot open.
+        //
+        // This runs on the missing-`.mp4` path too, and that is the point. Once
+        // the eviction below drops the row, no client can ever name this id
+        // again — `library.list` reads the cache, and `library::scan` skips a
+        // `.json` with no `.mp4` forever — so anything left here would be
+        // unreachable litter the daemon could never be asked to remove. The
+        // user deleting the `.mp4` in Explorer is exactly how that arises.
         for path in [paths.sidecar(), paths.thumb()] {
             match std::fs::remove_file(path) {
                 Ok(()) => {}
@@ -463,7 +458,22 @@ impl Daemon {
             }
         }
 
+        // The cache can be stale — the user may have deleted this clip in
+        // Explorer while the daemon kept running. `library.list` still shows it
+        // (cache-only reads are by design, spec §5.2), so without evicting here
+        // the row would be stuck forever: there is no `library.refresh` in this
+        // build, `total` would stay wrong until the daemon restarts, and a
+        // `rename` on the ghost row would happily write an orphan `.json` next
+        // to an `.mp4` that no longer exists. The brief only requires that a
+        // missing `.mp4` be an error, not that the cache entry survive it, so
+        // evicting does not contradict the plan — and
+        // `an_unknown_but_wellformed_id_is_a_clean_error` still holds: that id
+        // was never in the cache, so this is a no-op for it.
         self.lock_library().retain(|clip| clip.id != id);
+
+        if mp4_was_missing {
+            bail!("no clip {id} in the library")
+        }
         Ok(())
     }
 
@@ -529,9 +539,14 @@ impl Daemon {
     /// thumb_path}` are all still `pub` and still validate nothing on their
     /// own — `status_of`, `new`, and `rescan_library` call `clip_dir_path`
     /// directly, deliberately, because none of them take an id to validate in
-    /// the first place. What changed is narrower and is exactly what matters
-    /// here: there is no longer a way, inside this crate, to turn a socket
-    /// id into a clip path without going through `is_valid_id` first. The
+    /// the first place. What changed is narrower, and stating it precisely
+    /// matters more than stating it strongly: **no path a `ClipPaths` hands
+    /// out can have come from an unvalidated id**, and no code in this crate
+    /// currently reaches a clip file by any other route. Someone determined
+    /// could still write `library::mp4_path(&self.lock_config().clip_dir_path(),
+    /// id)` in two lines and it would compile — the seal makes the safe road
+    /// the obvious one and the unsafe road a visible detour, which is what a
+    /// compiler can buy here. It does not make the unsafe road impossible. The
     /// check itself is `trix_core::library::is_valid_id` — a whitelist of
     /// digits and underscores, which cannot express `..`, a separator, a
     /// drive letter, or a UNC prefix — and nothing here touches the disk, so
@@ -777,6 +792,7 @@ mod tests {
     fn a_clip_missing_behind_the_daemons_back_is_evicted_by_a_failed_delete() {
         let (daemon, dir) = fixture("ghost");
         let id = "20260726_100000";
+        std::fs::write(trix_core::library::thumb_path(&dir, id), b"jpeg").unwrap();
         std::fs::remove_file(trix_core::library::mp4_path(&dir, id)).unwrap();
 
         assert_eq!(daemon.list(0, 50).total, 3, "the cache does not know yet — by design");
@@ -787,6 +803,19 @@ mod tests {
             daemon.list(0, 50).total,
             2,
             "a failed delete must still evict the ghost row from the cache"
+        );
+
+        // The companions must go with it. Once the row is evicted no client can
+        // name this id again — `list` reads the cache and `scan` skips a
+        // sidecar with no `.mp4` — so anything left here is litter the daemon
+        // could never be asked to clean up.
+        assert!(
+            !trix_core::library::sidecar_path(&dir, id).exists(),
+            "the orphaned sidecar must not be left behind unreachable"
+        );
+        assert!(
+            !trix_core::library::thumb_path(&dir, id).exists(),
+            "the orphaned thumbnail must not be left behind unreachable"
         );
 
         // A second delete of the same id is still a clean error, not a panic
