@@ -7,7 +7,7 @@
 
 use std::io::{Read, Write};
 use std::sync::Arc;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::SyncSender;
 use std::time::{Duration, Instant};
 
 use trix_daemon::pipe::{self, ClientHandler};
@@ -18,7 +18,7 @@ use trix_proto::{MAX_LINE_BYTES, Request, Response};
 struct StubHandler;
 
 impl ClientHandler for StubHandler {
-    fn client_connected(&self, _out: Sender<String>) -> u64 {
+    fn client_connected(&self, _out: SyncSender<String>) -> u64 {
         1
     }
 

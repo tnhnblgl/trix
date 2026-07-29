@@ -2,7 +2,7 @@
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{SyncSender, TrySendError};
 
 use trix_proto::{Event, encode_line};
 
@@ -12,9 +12,26 @@ use trix_proto::{Event, encode_line};
 /// conversion onto every call site for no added safety in this crate.
 pub type ClientId = u64;
 
+/// How many event lines may be queued for one client before the daemon gives
+/// up on it. The queue is *bounded* because an unbounded one is a memory leak
+/// with a friendly name: a client that connects and then stops reading — pipe
+/// buffer full, process wedged — would otherwise accumulate every event the
+/// daemon ever emits, forever, in the one process that must not grow without
+/// bound while it holds a multi-hundred-megabyte replay ring.
+///
+/// 256 is chosen against the fastest stream this protocol has: `stats` at
+/// 1 Hz (spec §4.4) plus the occasional `clip_saved`/`armed`. A healthy client
+/// drains every `EVENT_POLL_MS` (25 ms, `pipe.rs`), so 256 queued lines is
+/// roughly four minutes of backlog — far past any transient scheduling hiccup,
+/// GC pause, or debugger breakpoint, and comfortably short of the burst a
+/// genuinely stuck client produces. The memory bound it buys is what matters:
+/// event lines run a few hundred bytes, so a stuck client costs well under a
+/// megabyte before it is evicted, not gigabytes.
+pub const OUTBOUND_QUEUE_DEPTH: usize = 256;
+
 struct Client {
     id: ClientId,
-    out: Sender<String>,
+    out: SyncSender<String>,
     /// Set by `stats.subscribe`. With nobody subscribed, nothing measures
     /// anything — which is what makes the `stats_seconds = 0` default
     /// coherent (spec §4.4).
@@ -28,7 +45,7 @@ pub struct Clients {
 }
 
 impl Clients {
-    pub fn register(&self, out: Sender<String>) -> ClientId {
+    pub fn register(&self, out: SyncSender<String>) -> ClientId {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         self.lock().push(Client { id, out, stats: false });
         id
@@ -63,11 +80,35 @@ impl Clients {
             tracing::error!(event = %event.event, "could not serialize an event");
             return;
         };
-        // A failed send means that client's session thread has returned and
-        // dropped its receiver; drop the registry entry here rather than
-        // letting the registry accumulate dead entries.
-        self.lock()
-            .retain(|client| !want(client) || client.out.send(line.clone()).is_ok());
+        self.lock().retain(|client| {
+            if !want(client) {
+                return true;
+            }
+            match client.out.try_send(line.clone()) {
+                Ok(()) => true,
+                // The client has stopped draining its socket: its pipe buffer
+                // is full and its session thread is parked in `write_all`.
+                // Every further event would be daemon memory held on behalf of
+                // a process that has already failed, so the registry entry goes
+                // instead. This is the mirror image of what `MAX_LINE_BYTES`
+                // prevents on the read side. Evicting stops the growth; the
+                // connection itself ends on its own the moment the wedged
+                // client reads, exits, or its pipe breaks, and a UI worth the
+                // name reconnects.
+                Err(TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        client = client.id,
+                        depth = OUTBOUND_QUEUE_DEPTH,
+                        "client stopped reading its events; dropping it rather than the daemon's memory"
+                    );
+                    false
+                }
+                // That client's session thread has returned and dropped its
+                // receiver; drop the registry entry rather than letting the
+                // registry accumulate dead entries.
+                Err(TrySendError::Disconnected(_)) => false,
+            }
+        });
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Client>> {
@@ -85,7 +126,12 @@ impl Clients {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::sync::mpsc::channel;
+    use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+
+    /// One client's outbound queue at production depth.
+    fn channel() -> (SyncSender<String>, Receiver<String>) {
+        sync_channel(OUTBOUND_QUEUE_DEPTH)
+    }
 
     #[test]
     fn a_registered_client_receives_a_broadcast() {
@@ -153,5 +199,47 @@ mod tests {
             assert_eq!(remaining[0].id, live_id, "the live client should be the one left behind");
         }
         assert!(live_rx.try_recv().is_ok(), "the live client should still have received the broadcast");
+    }
+
+    /// The bound is the point: a client that stops reading must cost the daemon
+    /// a fixed amount of memory and then get dropped, not grow the queue until
+    /// the process dies holding a replay ring.
+    #[test]
+    fn a_client_that_stops_reading_is_evicted_instead_of_buffered_without_bound() {
+        let clients = Clients::default();
+
+        // `_stalled_rx` is deliberately kept alive and never read from: this is
+        // a client that is connected and simply not draining, which is a
+        // different failure from the dropped-receiver case above.
+        let (stalled_tx, _stalled_rx) = channel();
+        clients.register(stalled_tx);
+
+        let (live_tx, live_rx) = channel();
+        let live_id = clients.register(live_tx);
+
+        for n in 0..OUTBOUND_QUEUE_DEPTH {
+            clients.broadcast(&Event::new("ping", json!(null)));
+            // The healthy client drains as its session thread would, so its own
+            // queue never fills — otherwise this test would evict both and
+            // prove nothing about *which* client the policy drops.
+            assert!(live_rx.try_recv().is_ok(), "the live client should receive event {n}");
+        }
+        assert_eq!(
+            clients.lock().len(),
+            2,
+            "a queue that is full but has not overflowed keeps the client"
+        );
+
+        clients.broadcast(&Event::new("ping", json!(null)));
+
+        {
+            let remaining = clients.lock();
+            assert_eq!(remaining.len(), 1, "one event past the cap evicts the stalled client");
+            assert_eq!(remaining[0].id, live_id, "the client that kept reading stays");
+        }
+        assert!(
+            live_rx.try_recv().is_ok(),
+            "evicting one client must not cost the others the event that tripped it"
+        );
     }
 }

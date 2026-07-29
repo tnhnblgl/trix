@@ -23,7 +23,7 @@ use windows::Win32::Security::{
 use windows::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
-    PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, PeekNamedPipe,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::core::{HSTRING, PWSTR};
@@ -32,6 +32,24 @@ use windows::core::{HSTRING, PWSTR};
 pub const PIPE_NAME: &str = r"\\.\pipe\trix-control";
 
 const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
+
+/// How often an idle connection wakes to flush queued events. A UI blocked in
+/// `read_line_capped` cannot be written to — a synchronous pipe serializes I/O
+/// on the file object — so the loop must never park indefinitely.
+///
+/// 25 ms is below the threshold where a person perceives a UI as lagging, and
+/// costs one `PeekNamedPipe` per connection per interval: a few dozen cheap
+/// syscalls a second against a 60 fps hardware encode. The alternative,
+/// overlapped I/O, buys latency nobody can perceive for a few hundred lines of
+/// unsafe FFI in the one place where a bug is a hang or an abort.
+const EVENT_POLL_MS: u64 = 25;
+
+/// How long the accept loop waits before retrying after a failure that is not
+/// the first-instance bind. Long enough that a persistently failing
+/// `CreateNamedPipeW`/`ConnectNamedPipe` cannot spin a core at 100% emitting a
+/// `warn!` per iteration, short enough that a UI reconnecting after a transient
+/// blip does not notice.
+const ACCEPT_RETRY_MS: u64 = 250;
 
 /// `D:P` — a *protected* DACL, so it does not inherit the permissive default —
 /// carrying one ACE granting `GA` (all access) to this user and nobody else.
@@ -214,6 +232,23 @@ fn handle_of(file: &std::fs::File) -> *mut std::ffi::c_void {
     file.as_raw_handle().cast()
 }
 
+/// True when the client has sent at least one byte, so a read will not block.
+/// `Err` means the pipe is gone — the caller ends the session.
+fn request_pending(instance: &std::fs::File) -> Result<bool, windows::core::Error> {
+    let mut available = 0u32;
+    unsafe {
+        PeekNamedPipe(
+            HANDLE(handle_of(instance)),
+            None,
+            0,
+            None,
+            Some(&mut available),
+            None,
+        )?;
+    }
+    Ok(available > 0)
+}
+
 /// Accepts clients forever on the published [`PIPE_NAME`], handing each to
 /// `handler` on its own thread. Thin delegation to [`serve_at`] — production
 /// callers want this one.
@@ -240,8 +275,25 @@ where
 {
     let security = user_only_security_descriptor()?;
     let mut first = true;
+    let retry = std::time::Duration::from_millis(ACCEPT_RETRY_MS);
     loop {
-        let instance = create_instance(name, &security, first)?;
+        // Only the *first* instance failing is fatal: that is the
+        // single-instance check (`FILE_FLAG_FIRST_PIPE_INSTANCE`), and another
+        // daemon owning the name must abort startup. Every later failure is
+        // transient by nature — handle exhaustion, nonpaged pool pressure — and
+        // propagating it would return out of `serve`, out of `main`, and
+        // terminate a process that may be holding a live replay ring. Losing
+        // the user's next clip because one `CreateNamedPipeW` blipped is not a
+        // trade worth making; log it, wait, and try again.
+        let instance = match create_instance(name, &security, first) {
+            Ok(instance) => instance,
+            Err(e) if first => return Err(e),
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "could not create a pipe instance, retrying");
+                std::thread::sleep(retry);
+                continue;
+            }
+        };
         // Logged here, after the first instance is actually bound, rather
         // than by the caller before calling `serve` — `FILE_FLAG_FIRST_PIPE_INSTANCE`
         // makes that first `create_instance` the single-instance check, and a
@@ -257,26 +309,41 @@ where
         if let Err(e) = connected
             && e.code() != ERROR_PIPE_CONNECTED.to_hresult()
         {
+            // The same sleep closes the other half of the problem: without it,
+            // a persistently failing `ConnectNamedPipe` spins this loop at full
+            // CPU emitting one `warn!` per iteration.
             tracing::warn!(error = %e, "ConnectNamedPipe failed, retrying");
+            std::thread::sleep(retry);
             continue;
         }
 
         let handler = Arc::clone(&handler);
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("trix-client".into())
             .spawn(move || {
                 if let Err(e) = serve_one(instance, handler) {
                     tracing::debug!(error = %format!("{e:#}"), "client session ended");
                 }
-            })
-            .context("failed to spawn a client thread")?;
+            });
+        // Same reasoning as the `create_instance` failure above: a thread that
+        // cannot be spawned is one client that does not get served, not a
+        // reason to kill an armed capture. The closure — and with it this pipe
+        // instance's handle — is dropped by the failed `spawn`, so the instance
+        // is closed rather than leaked.
+        if let Err(e) = spawned {
+            tracing::warn!(error = %e, "could not spawn a client thread, dropping the connection");
+            std::thread::sleep(retry);
+        }
     }
 }
 
 /// What the transport needs from the daemon: turn one request into one
 /// response, and learn each client's id so events can be routed to it.
 pub trait ClientHandler {
-    fn client_connected(&self, out: std::sync::mpsc::Sender<String>) -> u64;
+    /// The queue is a `SyncSender`, not a `Sender`: it is bounded, and a
+    /// broadcast that overflows it drops the client rather than the daemon's
+    /// memory. See [`crate::clients::OUTBOUND_QUEUE_DEPTH`].
+    fn client_connected(&self, out: std::sync::mpsc::SyncSender<String>) -> u64;
     fn client_disconnected(&self, client: u64);
     fn dispatch(&self, client: u64, request: &trix_proto::Request) -> trix_proto::Response;
 }
@@ -303,18 +370,22 @@ pub trait ClientHandler {
 /// accept loop the brief was talking about. A single thread doing read then
 /// write has no such contention and is what this function does instead.
 ///
-/// `out_tx`/`out_rx` still exist because `ClientHandler::client_connected`
-/// needs a `Sender<String>` — that channel is the seam Task 5's event
-/// broadcast (`clients::Clients::broadcast`) hangs off. Anything queued on it
-/// is drained and written out before each blocking read. Nothing calls
-/// `Clients::broadcast` in this task, so that drain never has anything to
-/// do — but when Task 5 wires it up, a broadcast that lands *while* this
-/// thread is already blocked waiting for the client's next line will still
-/// have to wait for that line (or a disconnect) before it can go out; truly
-/// concurrent delivery needs the same overlapped-IO investment noted above.
-/// Documented here so Task 5 does not have to rediscover it.
+/// `out_tx`/`out_rx` carry the event broadcast (`clients::Clients::broadcast`)
+/// to this thread, and anything queued on them is drained and written out
+/// before the loop waits for the next request.
+///
+/// Task 4 left one gap in that, which this task closes. Draining before a
+/// *blocking* read is not enough once something actually broadcasts: a UI
+/// sitting idle is parked inside `read_line_capped`, so an event queued on its
+/// channel would not be delivered until that UI happened to send its next
+/// command — and spec §4.4 requires unsolicited events. The loop therefore
+/// polls with [`request_pending`] (every [`EVENT_POLL_MS`]) instead of blocking
+/// indefinitely, and only enters `read_line_capped` once the client has
+/// committed at least one byte. That read still blocks, but now only *mid-line*,
+/// bounded by the client's own write rather than by its idleness.
 fn serve_one<H: ClientHandler>(instance: std::fs::File, handler: Arc<H>) -> Result<()> {
-    let (out_tx, out_rx) = std::sync::mpsc::channel::<String>();
+    let (out_tx, out_rx) =
+        std::sync::mpsc::sync_channel::<String>(crate::clients::OUTBOUND_QUEUE_DEPTH);
     // Cloned before `client_connected` registers this connection: if either
     // `try_clone` fails, the `?` below must return without ever having
     // registered a client, or the registry would keep a live entry for a
@@ -332,11 +403,22 @@ fn serve_one<H: ClientHandler>(instance: std::fs::File, handler: Arc<H>) -> Resu
     let mut send = |text: &str| -> bool { writer.write_all(text.as_bytes()).is_ok() && writer.flush().is_ok() };
 
     'session: loop {
-        // Deliver anything already queued (Task 5's broadcast path) before
-        // blocking on the next read — see the doc comment above.
+        // Anything a broadcast queued while this client was idle.
         while let Ok(text) = out_rx.try_recv() {
             if !send(&text) {
                 break 'session;
+            }
+        }
+
+        match request_pending(&instance) {
+            Ok(true) => {}
+            Ok(false) => {
+                std::thread::sleep(std::time::Duration::from_millis(EVENT_POLL_MS));
+                continue;
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "peek failed; client is gone");
+                break;
             }
         }
 
