@@ -1,7 +1,8 @@
 //! Who is connected, and where events go.
 
+use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
 
 use trix_proto::{Event, encode_line};
@@ -32,6 +33,13 @@ pub const OUTBOUND_QUEUE_DEPTH: usize = 256;
 struct Client {
     id: ClientId,
     out: SyncSender<String>,
+    /// Set when this client is evicted for not draining its queue, and shared
+    /// with its session thread (`pipe::serve_one` takes a clone via
+    /// `ClientHandler::eviction_flag`). Dropping the registry entry stops the
+    /// daemon's memory growing; setting this is what actually ends the
+    /// connection, so the client learns it was dropped instead of running on
+    /// as a healthy-looking socket that never delivers another event.
+    evicted: Arc<AtomicBool>,
     /// Set by `stats.subscribe`. With nobody subscribed, nothing measures
     /// anything — which is what makes the `stats_seconds = 0` default
     /// coherent (spec §4.4).
@@ -47,8 +55,20 @@ pub struct Clients {
 impl Clients {
     pub fn register(&self, out: SyncSender<String>) -> ClientId {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        self.lock().push(Client { id, out, stats: false });
+        self.lock().push(Client {
+            id,
+            out,
+            evicted: Arc::new(AtomicBool::new(false)),
+            stats: false,
+        });
         id
+    }
+
+    /// A clone of `id`'s eviction flag, for that client's session thread to
+    /// poll. `None` once the client is gone from the registry — callers ask
+    /// immediately after [`Self::register`], while the entry certainly exists.
+    pub fn eviction_flag(&self, id: ClientId) -> Option<Arc<AtomicBool>> {
+        self.lock().iter().find(|c| c.id == id).map(|c| Arc::clone(&c.evicted))
     }
 
     pub fn unregister(&self, id: ClientId) {
@@ -91,11 +111,18 @@ impl Clients {
                 // Every further event would be daemon memory held on behalf of
                 // a process that has already failed, so the registry entry goes
                 // instead. This is the mirror image of what `MAX_LINE_BYTES`
-                // prevents on the read side. Evicting stops the growth; the
-                // connection itself ends on its own the moment the wedged
-                // client reads, exits, or its pipe breaks, and a UI worth the
-                // name reconnects.
+                // prevents on the read side.
+                //
+                // Dropping the entry is only half of it. The *connection* is
+                // still open, and a wedged client that later resumes reading
+                // would unpark, flush its backlog, and go on answering requests
+                // normally — while never receiving another event, forever, and
+                // never being told why. The flag closes that: the session
+                // thread checks it at the top of its loop and ends the
+                // connection as soon as it unparks, so the client sees a
+                // disconnect and a UI worth the name reconnects.
                 Err(TrySendError::Full(_)) => {
+                    client.evicted.store(true, Ordering::Release);
                     tracing::warn!(
                         client = client.id,
                         depth = OUTBOUND_QUEUE_DEPTH,
@@ -241,5 +268,44 @@ mod tests {
             live_rx.try_recv().is_ok(),
             "evicting one client must not cost the others the event that tripped it"
         );
+    }
+
+    /// Eviction has to reach the *connection*, not just the registry. The flag
+    /// is the only channel it has: the session thread is parked in `write_all`
+    /// on a full pipe and cannot be told anything else. A client whose entry is
+    /// dropped while its socket stays open is worse than a disconnected one —
+    /// it looks healthy, answers `status`, and silently never sees another
+    /// `clip_saved`.
+    #[test]
+    fn an_evicted_client_has_its_session_told_to_close() {
+        let clients = Clients::default();
+        let (stalled_tx, _stalled_rx) = channel();
+        let id = clients.register(stalled_tx);
+        // Taken at registration, exactly as `pipe::serve_one` takes it.
+        let flag = clients.eviction_flag(id).expect("a registered client has an eviction flag");
+        assert!(!flag.load(Ordering::Acquire), "a fresh client is not evicted");
+
+        for _ in 0..=OUTBOUND_QUEUE_DEPTH {
+            clients.broadcast(&Event::new("ping", json!(null)));
+        }
+
+        assert!(clients.lock().is_empty(), "the stalled client should have been evicted");
+        assert!(
+            flag.load(Ordering::Acquire),
+            "the session thread must be able to see that it was evicted, or the connection stays \
+             open and permanently event-deaf"
+        );
+    }
+
+    /// The flag outlives the registry entry — the session thread holds an
+    /// `Arc`, so reading it after eviction is well defined rather than a
+    /// lookup that now returns `None`.
+    #[test]
+    fn the_eviction_flag_is_gone_once_the_client_is_unregistered() {
+        let clients = Clients::default();
+        let (tx, _rx) = channel();
+        let id = clients.register(tx);
+        clients.unregister(id);
+        assert!(clients.eviction_flag(id).is_none());
     }
 }

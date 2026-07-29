@@ -102,10 +102,13 @@ pub struct Daemon {
 // the order `status` and `clip` use); the reverse never happens.
 //
 // `armed` is deliberately held across the slow operations: `EngineHandle::spawn`
-// can take seconds and `EngineHandle::clip` blocks until the mux completes. A
-// concurrent `status` waits that out, which is the right trade — the alternative
-// is two threads racing to spawn two engines, or a `disarm` tearing the ring
-// down in the middle of a clip's write.
+// can take seconds, `EngineHandle::clip` blocks until the mux completes, and
+// `disarm` holds it until `EngineHandle::stop` has joined *and* the
+// single-instance slot has been released. A concurrent `status` waits that out,
+// which is the right trade — the alternative is two threads racing to spawn two
+// engines, a `disarm` tearing the ring down in the middle of a clip's write, or
+// a daemon that answers `armed: false` while it is still holding the slot that
+// makes the next `arm` fail.
 
 impl Daemon {
     pub fn new(config: Config) -> Self {
@@ -163,9 +166,22 @@ impl Daemon {
     /// the daemon was already idle — a no-op rather than an error, so a UI
     /// syncing its toggle after a reconnect never sees a spurious failure.
     pub fn disarm(&self) -> Result<bool> {
-        let Some(state) = self.lock_armed().take() else { return Ok(false) };
-        // Taken out of the mutex before the join below, so the lock is not held
-        // while the engine finalizes.
+        // The guard is bound, not left as a temporary of a `let-else`: a
+        // temporary is released at the end of its statement, which would leave
+        // `armed` reading `None` for the whole of the teardown below — while
+        // the engine is still joining and the single-instance slot is still
+        // held. In that window `status` reports `armed: false` about a daemon
+        // that is still finalizing, and an `arm` racing it fails with "another
+        // trix capture session (record or replay) is already running", pointing
+        // the user at a CLI that is not running. Holding it means a concurrent
+        // caller waits out the teardown and then gets a true answer.
+        //
+        // This does not touch the lock ordering: `clients` is still never taken
+        // while `armed` is held. Nothing in here locks `clients` — the
+        // `disarmed` event is broadcast by `dispatch` after this returns — and
+        // `engine.stop()` is `trix-core`, which has no idea the registry exists.
+        let mut armed = self.lock_armed();
+        let Some(state) = armed.take() else { return Ok(false) };
         let Armed { engine, _slot } = state;
         // Whatever the rebuild loop finally returned is logged, not propagated.
         // By the time it is known, capture *is* stopped and the daemon *is*
@@ -177,8 +193,11 @@ impl Daemon {
         }
         // Only now, with the encoder actually released, is the slot handed
         // back — otherwise a `trix replay` racing the disarm could win the slot
-        // and then fail on a still-busy encoder.
+        // and then fail on a still-busy encoder. The `armed` guard goes last,
+        // so no other caller can observe the daemon as idle until the slot it
+        // was holding is genuinely free.
         drop(_slot);
+        drop(armed);
         Ok(true)
     }
 

@@ -6,6 +6,8 @@
 //! released the `armed` lock, which is what makes the lock ordering documented
 //! in `state.rs` true by construction rather than by discipline.
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::SyncSender;
 
 use serde_json::{Map, Value};
@@ -37,6 +39,12 @@ impl ClientHandler for Daemon {
 
     fn client_disconnected(&self, client: ClientId) {
         self.clients.unregister(client);
+    }
+
+    /// Lets the transport see an eviction the registry has already performed,
+    /// so the connection ends rather than lingering as an event-deaf socket.
+    fn eviction_flag(&self, client: ClientId) -> Option<Arc<AtomicBool>> {
+        self.clients.eviction_flag(client)
     }
 
     /// `client` is unused until `stats.subscribe` (Task 7) needs to know which

@@ -9,6 +9,7 @@
 use std::io::{BufReader, Read, Write};
 use std::os::windows::io::FromRawHandle;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use trix_proto::{MAX_LINE_BYTES, RESERVED_ID, Response, decode_request, encode_line};
@@ -232,8 +233,21 @@ fn handle_of(file: &std::fs::File) -> *mut std::ffi::c_void {
     file.as_raw_handle().cast()
 }
 
-/// True when the client has sent at least one byte, so a read will not block.
-/// `Err` means the pipe is gone — the caller ends the session.
+/// True when the client has sent at least one byte *that the OS still holds*,
+/// so a read will not block. `Err` means the pipe is gone — the caller ends the
+/// session.
+///
+/// Only ever a partial answer: this peeks the OS pipe buffer, and the session
+/// reads through a `BufReader` that drains that buffer wholesale on its first
+/// read. Bytes already sitting in the reader are invisible here, which is why
+/// `serve_one` checks `BufReader::buffer()` before it calls this at all.
+///
+/// The `Err` case is narrower than it looks, and that was measured rather than
+/// assumed: with a request written and the client handle then closed,
+/// `PeekNamedPipe` still reports the queued bytes (`Ok`, `available = 25` for a
+/// 25-byte request) and only fails with `ERROR_BROKEN_PIPE` once they have been
+/// read. So a closing client's last command is not lost to this call — `Err`
+/// means the pipe is both broken *and* drained.
 fn request_pending(instance: &std::fs::File) -> Result<bool, windows::core::Error> {
     let mut available = 0u32;
     unsafe {
@@ -346,6 +360,26 @@ pub trait ClientHandler {
     fn client_connected(&self, out: std::sync::mpsc::SyncSender<String>) -> u64;
     fn client_disconnected(&self, client: u64);
     fn dispatch(&self, client: u64, request: &trix_proto::Request) -> trix_proto::Response;
+
+    /// This client's eviction flag, if the handler keeps one. Set by the
+    /// registry when a broadcast overflows the client's queue and its entry is
+    /// dropped (`clients::Clients::send_to`), and polled by [`serve_one`] so
+    /// the *connection* ends too.
+    ///
+    /// Without it, eviction stops the daemon's memory growing and nothing
+    /// else: the socket stays open, the session thread keeps answering
+    /// requests when it unparks, and the client is permanently event-deaf and
+    /// never told why. A UI that stalled for a moment would come back
+    /// answering `status` correctly while silently missing every `clip_saved`.
+    /// A closed connection is the honest outcome — the client sees the
+    /// disconnect and reconnects.
+    ///
+    /// Defaulted to `None` so a handler that never evicts (the test stubs) is
+    /// unaffected, and so this could be added without changing the signature
+    /// of any existing method.
+    fn eviction_flag(&self, _client: u64) -> Option<Arc<AtomicBool>> {
+        None
+    }
 }
 
 /// One connected client: read a line, dispatch it, write the response —
@@ -379,10 +413,27 @@ pub trait ClientHandler {
 /// sitting idle is parked inside `read_line_capped`, so an event queued on its
 /// channel would not be delivered until that UI happened to send its next
 /// command — and spec §4.4 requires unsolicited events. The loop therefore
-/// polls with [`request_pending`] (every [`EVENT_POLL_MS`]) instead of blocking
-/// indefinitely, and only enters `read_line_capped` once the client has
-/// committed at least one byte. That read still blocks, but now only *mid-line*,
-/// bounded by the client's own write rather than by its idleness.
+/// polls (every [`EVENT_POLL_MS`]) instead of blocking indefinitely, and only
+/// enters `read_line_capped` once there is a byte to read.
+///
+/// "Is there a byte to read" is deliberately two questions. [`request_pending`]
+/// peeks the *OS* buffer, but the session reads through a `BufReader` that
+/// empties that buffer on its first read — so a client that writes two complete
+/// request lines in one `write_all` leaves the second one in the reader, where
+/// the peek cannot see it. The reader's own buffer is therefore checked first
+/// and the OS is consulted only when it is empty. Getting that backwards is a
+/// hang, not a slowdown: the client waits forever for a reply to a request the
+/// daemon is holding but never looks at.
+///
+/// What the poll does *not* bound is a half-written line. Once one byte has
+/// arrived, `read_line_capped` blocks until the newline does, so a client that
+/// sends `{` and then stops parks this thread — and this thread alone —
+/// indefinitely; it also stops flushing that client's events, which are its
+/// own. [`MAX_LINE_BYTES`] bounds the memory such a client can cost, nothing
+/// bounds the time. Fixing that needs a read deadline, which on a synchronous
+/// pipe means overlapped I/O — the unsafe complexity this transport is
+/// explicitly not paying for. The failure is self-inflicted and confined to the
+/// connection that caused it.
 fn serve_one<H: ClientHandler>(instance: std::fs::File, handler: Arc<H>) -> Result<()> {
     let (out_tx, out_rx) =
         std::sync::mpsc::sync_channel::<String>(crate::clients::OUTBOUND_QUEUE_DEPTH);
@@ -394,6 +445,9 @@ fn serve_one<H: ClientHandler>(instance: std::fs::File, handler: Arc<H>) -> Resu
     let mut writer = instance.try_clone().context("cloning the pipe handle")?;
     let mut reader = BufReader::new(instance.try_clone().context("cloning the pipe handle")?);
     let client = handler.client_connected(out_tx.clone());
+    // Taken once, right after registration, while the entry certainly exists —
+    // eviction drops that entry, so asking later could not find it.
+    let evicted = handler.eviction_flag(client);
     let mut line = String::new();
 
     // Writes `text` to the pipe. `flush()` is unconditionally `Ok(())` for a
@@ -403,6 +457,16 @@ fn serve_one<H: ClientHandler>(instance: std::fs::File, handler: Arc<H>) -> Resu
     let mut send = |text: &str| -> bool { writer.write_all(text.as_bytes()).is_ok() && writer.flush().is_ok() };
 
     'session: loop {
+        // Evicted for not draining its events (see `ClientHandler::eviction_flag`).
+        // Checked first, and before the drain: the registry entry is already
+        // gone, so what is left in the queue is a backlog for a client that has
+        // been given up on. Ending the connection here is what makes eviction
+        // visible to that client — it unparks, sees the disconnect, reconnects.
+        if evicted.as_ref().is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            tracing::debug!(client, "closing an evicted client's connection");
+            break 'session;
+        }
+
         // Anything a broadcast queued while this client was idle.
         while let Ok(text) = out_rx.try_recv() {
             if !send(&text) {
@@ -410,15 +474,23 @@ fn serve_one<H: ClientHandler>(instance: std::fs::File, handler: Arc<H>) -> Resu
             }
         }
 
-        match request_pending(&instance) {
-            Ok(true) => {}
-            Ok(false) => {
-                std::thread::sleep(std::time::Duration::from_millis(EVENT_POLL_MS));
-                continue;
-            }
-            Err(e) => {
-                tracing::debug!(error = %e, "peek failed; client is gone");
-                break;
+        // The OS is asked only when the reader has nothing of its own. A
+        // `BufReader` drains the whole pipe buffer on its first read, so after
+        // a client writes two requests in one `write_all` the second one lives
+        // in `reader` and `PeekNamedPipe` — correctly — reports zero bytes
+        // available. Peeking unconditionally would park this loop in its 25 ms
+        // sleep forever while holding a request it had already been given.
+        if reader.buffer().is_empty() {
+            match request_pending(&instance) {
+                Ok(true) => {}
+                Ok(false) => {
+                    std::thread::sleep(std::time::Duration::from_millis(EVENT_POLL_MS));
+                    continue 'session;
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "peek failed; client is gone");
+                    break 'session;
+                }
             }
         }
 
