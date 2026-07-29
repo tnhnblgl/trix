@@ -5,9 +5,10 @@
 //! what to broadcast — which is also what keeps the lock ordering below
 //! trivially true.
 
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use trix_core::{config::Config, control, control::SingleInstance, engine::EngineHandle, library};
 use trix_proto::ClipMeta;
 
@@ -74,6 +75,20 @@ impl DaemonStatus {
     }
 }
 
+/// One page of the clip library, plus what a UI needs to render "3 of 47".
+///
+/// `total` is the *unpaged* count, not `clips.len()`: without it a client that
+/// asked for 50 and got 50 cannot tell a full library from a full page, and
+/// cannot size a scrollbar or a page count. `offset` is echoed back because
+/// responses are matched by request id, not by argument — a client that has
+/// several pages in flight would otherwise have to remember which id asked for
+/// which page.
+pub struct LibraryPage {
+    pub clips: Vec<ClipMeta>,
+    pub total: usize,
+    pub offset: usize,
+}
+
 /// What [`Daemon::arm`] did.
 pub struct ArmOutcome {
     /// False when the daemon was already armed. `arm` is idempotent, but the
@@ -110,11 +125,31 @@ pub struct Daemon {
 // a daemon that answers `armed: false` while it is still holding the slot that
 // makes the next `arm` fail.
 
+/// [`library::scan`] with the measurement around it.
+///
+/// The count and the elapsed time are logged at `info` deliberately rather than
+/// `debug`: plan 3 owes a number for how a 5,000-clip library behaves, and this
+/// is the instrument that produces it — from a real user's directory, on the
+/// path that actually runs, without a benchmark harness that would measure
+/// something else. `elapsed_ms` is an integer field rather than a formatted
+/// `Duration` so the answer can be grepped straight out of the daemon log.
+fn scan_and_log(dir: &Path) -> Result<Vec<ClipMeta>> {
+    let started = std::time::Instant::now();
+    let clips = library::scan(dir)?;
+    tracing::info!(
+        clips = clips.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        dir = %dir.display(),
+        "scanned the clip library"
+    );
+    Ok(clips)
+}
+
 impl Daemon {
     pub fn new(config: Config) -> Self {
         // One scan, at startup. A failure here is not fatal: an unreadable clip
         // directory must not stop the daemon from arming and capturing.
-        let library = match library::scan(&config.clip_dir_path()) {
+        let library = match scan_and_log(&config.clip_dir_path()) {
             Ok(clips) => clips,
             Err(e) => {
                 tracing::warn!(
@@ -262,6 +297,184 @@ impl Daemon {
         }
     }
 
+    // --- The clip library ---------------------------------------------------
+    //
+    // The cache in `self.library` *is* the library as far as the socket is
+    // concerned (spec §5.2): `list` never touches the disk, and every mutation
+    // writes the disk first and then updates the cache, so a failed write never
+    // leaves a client believing something happened that did not.
+
+    /// Re-reads the clip directory and replaces the cache.
+    ///
+    /// Deliberately not wired to a command in this build: [`Daemon::new`] scans
+    /// at startup and every mutation below keeps the cache current, which is
+    /// the whole point of caching it. It exists as the seam for the two things
+    /// that need one — a test that wants a known library without depending on
+    /// what the startup scan happened to see, and the `library.refresh` a later
+    /// plan will want for "I deleted clips in Explorer behind your back", which
+    /// is then a one-line dispatch arm rather than a new code path.
+    pub fn rescan_library(&self) -> Result<()> {
+        let dir = self.lock_config().clip_dir_path();
+        let clips = scan_and_log(&dir)?;
+        *self.lock_library() = clips;
+        Ok(())
+    }
+
+    /// One page of the library, newest first — straight out of the cache, no
+    /// disk access (spec §5.2).
+    ///
+    /// `limit` is already clamped to `MAX_LIST_LIMIT` by `Command::parse`, so
+    /// it is not re-clamped here. `offset` is not, and does not need to be:
+    /// `skip` past the end yields an empty iterator rather than the panic a
+    /// slice range would give. An offset past the end is a short page, not an
+    /// error — a UI paging a library that shrank under it should see the end of
+    /// the list, not a failure.
+    pub fn list(&self, offset: usize, limit: usize) -> LibraryPage {
+        let library = self.lock_library();
+        LibraryPage {
+            total: library.len(),
+            clips: library.iter().skip(offset).take(limit).cloned().collect(),
+            offset,
+        }
+    }
+
+    /// Removes a clip's `.mp4`, `.json`, and `.jpg`, then drops it from the
+    /// cache.
+    ///
+    /// The `.mp4` is the clip: if it is not there, there is nothing to delete
+    /// and that is an error. The sidecar and the thumbnail are derived files —
+    /// nothing writes a `.jpg` yet, and a sidecar can legitimately be missing
+    /// on an adopted clip — so their absence is not.
+    pub fn delete(&self, id: &str) -> Result<()> {
+        let dir = self.clip_dir_for(id)?;
+
+        match std::fs::remove_file(library::mp4_path(&dir, id)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                bail!("no clip {id} in the library")
+            }
+            Err(e) => return Err(e).with_context(|| format!("could not delete clip {id}")),
+        }
+
+        // Past this point the clip is gone whatever happens next, so a stuck
+        // sidecar or thumbnail is logged rather than propagated: reporting a
+        // failed delete for a clip that no longer exists would leave a UI
+        // showing a row whose file it cannot open.
+        for path in [library::sidecar_path(&dir, id), library::thumb_path(&dir, id)] {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "the clip was deleted but one of its companion files was not"
+                ),
+            }
+        }
+
+        self.lock_library().retain(|clip| clip.id != id);
+        Ok(())
+    }
+
+    /// Retitles a clip. The file never moves — the id is the filename stem and
+    /// the title is metadata, so renaming cannot collide, cannot break a handle
+    /// an open player is holding, and cannot invalidate the id a client is
+    /// still using in other requests.
+    pub fn rename(&self, id: &str, title: &str) -> Result<ClipMeta> {
+        let title = title.trim();
+        if title.is_empty() {
+            bail!("a clip title cannot be blank");
+        }
+        self.edit_meta(id, |meta| meta.title = title.to_string())
+    }
+
+    /// The same write path as [`Daemon::rename`], with the star instead of the
+    /// title.
+    pub fn set_favorite(&self, id: &str, favorite: bool) -> Result<ClipMeta> {
+        self.edit_meta(id, |meta| meta.favorite = favorite)
+    }
+
+    /// Opens Explorer with the clip selected.
+    ///
+    /// Built argument by argument, never as a formatted command line: the id is
+    /// whitelisted by [`Self::clip_dir_for`] but the clip *directory* comes
+    /// from user config and can hold spaces, quotes, or an `&`, and handing
+    /// that to a shell would be an injection with the user's own token.
+    /// `std::process::Command` passes the path as one argument.
+    ///
+    /// Explorer's exit code is not checked, and the child is not waited on:
+    /// `explorer.exe /select,` routinely returns non-zero after opening the
+    /// window correctly (it hands the request to the already-running shell
+    /// process and exits). Whether it *spawned* is the only thing that
+    /// distinguishes "the user is looking at their clip" from "nothing
+    /// happened", so that is what is reported.
+    pub fn reveal(&self, id: &str) -> Result<()> {
+        let dir = self.clip_dir_for(id)?;
+        let path = library::mp4_path(&dir, id);
+        if !path.exists() {
+            bail!("no clip {id} in the library");
+        }
+        std::process::Command::new("explorer.exe")
+            .arg("/select,")
+            .arg(&path)
+            .spawn()
+            .with_context(|| format!("could not open Explorer for clip {id}"))?;
+        Ok(())
+    }
+
+    /// The choke point every id-taking command goes through, and the reason
+    /// there is no other way to get at the clip directory from an id.
+    ///
+    /// Ids arrive from the socket and are concatenated into filesystem paths,
+    /// so this validates *before* returning the directory: a caller cannot
+    /// build a path without having passed the check, and a command added later
+    /// cannot forget it without also having nowhere to get `dir` from. The
+    /// check itself is `trix_core::library::is_valid_id` — a whitelist of
+    /// digits and underscores, which cannot express `..`, a separator, a drive
+    /// letter, or a UNC prefix — and nothing here touches the disk, so a
+    /// rejected id has caused no I/O at all.
+    fn clip_dir_for(&self, id: &str) -> Result<PathBuf> {
+        if !library::is_valid_id(id) {
+            bail!("{id:?} is not a valid clip id");
+        }
+        Ok(self.lock_config().clip_dir_path())
+    }
+
+    /// Disk first, then cache. Shared by `rename` and `set_favorite` so the two
+    /// cannot drift on validation, on ordering, or on what a failed write
+    /// leaves behind.
+    ///
+    /// The lock is taken twice — once to copy the entry out, once to put the
+    /// edited one back — rather than held across `write_sidecar`, so a slow or
+    /// hung disk cannot block every other client's `list`. The window that
+    /// opens is a concurrent edit of the *same clip*, whose loser is simply the
+    /// earlier write; there is one desktop user behind this socket, and the
+    /// alternative costs every reader.
+    fn edit_meta(&self, id: &str, edit: impl FnOnce(&mut ClipMeta)) -> Result<ClipMeta> {
+        let dir = self.clip_dir_for(id)?;
+
+        let mut meta = {
+            let library = self.lock_library();
+            let Some(found) = library.iter().find(|clip| clip.id == id) else {
+                bail!("no clip {id} in the library");
+            };
+            found.clone()
+        };
+        edit(&mut meta);
+
+        // The sidecar is rewritten before the cache is touched: if this fails,
+        // the client gets an error and the cache still matches the disk. The
+        // other order would answer "renamed" about a title that vanishes at the
+        // next scan.
+        library::write_sidecar(&dir, &meta)
+            .with_context(|| format!("could not update clip {id}"))?;
+
+        if let Some(entry) = self.lock_library().iter_mut().find(|clip| clip.id == id) {
+            *entry = meta.clone();
+        }
+        Ok(meta)
+    }
+
     // Poisoning is recovered from rather than unwrapped: `lock().unwrap()` is a
     // panicking call on a path reachable straight from a socket message, and
     // the Global Constraints forbid those outright. See the same note in
@@ -281,7 +494,168 @@ impl Daemon {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
+
+    fn meta(id: &str) -> ClipMeta {
+        ClipMeta {
+            id: id.to_string(),
+            title: format!("clip_{id}"),
+            created: "2026-07-26T10:00:00+03:00".into(),
+            duration_ms: 15_000,
+            bytes: 5,
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            encoder: "test".into(),
+            has_audio: true,
+            favorite: false,
+        }
+    }
+
+    fn fixture(name: &str) -> (Daemon, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("trix-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for id in ["20260726_100000", "20260726_110000", "20260726_120000"] {
+            std::fs::write(trix_core::library::mp4_path(&dir, id), b"video").unwrap();
+            trix_core::library::write_sidecar(&dir, &meta(id)).unwrap();
+        }
+        let config = Config {
+            clip_dir: dir.to_string_lossy().into_owned(),
+            ..Config::default()
+        };
+        let daemon = Daemon::new(config);
+        daemon.rescan_library().unwrap();
+        (daemon, dir)
+    }
+
+    #[test]
+    fn list_pages_newest_first_and_clamps_past_the_end() {
+        let (daemon, dir) = fixture("list");
+
+        let page = daemon.list(0, 2);
+        assert_eq!(page.total, 3, "total is the unpaged count — the UI needs it for \"3 of 47\"");
+        let ids: Vec<&str> = page.clips.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["20260726_120000", "20260726_110000"]);
+
+        let page = daemon.list(2, 50);
+        assert_eq!(page.clips.len(), 1, "a short final page, not an error");
+
+        let page = daemon.list(99, 50);
+        assert!(page.clips.is_empty(), "an offset past the end is empty, not a panic");
+        assert_eq!(page.total, 3);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The security boundary. Every id-taking command runs through the same
+    /// check; if one forgets, this catches it.
+    #[test]
+    fn every_id_command_rejects_a_traversal_attempt() {
+        let (daemon, dir) = fixture("traversal");
+        let canary = dir.join("canary.mp4");
+        std::fs::write(&canary, b"must survive").unwrap();
+
+        for evil in [
+            "../../../Windows/System32/config/SAM",
+            r"..\..\secrets",
+            "x/../y",
+            "canary",
+            r"C:\Windows\System32\drivers\etc\hosts",
+        ] {
+            assert!(daemon.delete(evil).is_err(), "delete accepted {evil:?}");
+            assert!(daemon.rename(evil, "x").is_err(), "rename accepted {evil:?}");
+            assert!(daemon.set_favorite(evil, true).is_err(), "favorite accepted {evil:?}");
+            assert!(daemon.reveal(evil).is_err(), "reveal accepted {evil:?}");
+        }
+        assert!(canary.exists(), "a rejected id must not have touched the filesystem");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rename_edits_the_title_and_never_moves_the_file() {
+        let (daemon, dir) = fixture("rename");
+        let id = "20260726_110000";
+
+        daemon.rename(id, "Ace on Ascent").unwrap();
+
+        let on_disk = trix_core::library::read_sidecar(
+            &trix_core::library::sidecar_path(&dir, id),
+        )
+        .unwrap();
+        assert_eq!(on_disk.title, "Ace on Ascent");
+        assert_eq!(on_disk.id, id, "the id is the file stem and never changes");
+        assert!(
+            trix_core::library::mp4_path(&dir, id).exists(),
+            "renaming edits metadata only — no collision logic, no broken handles"
+        );
+
+        let cached = daemon.list(0, 50);
+        let entry = cached.clips.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(entry.title, "Ace on Ascent", "the cache must not go stale");
+
+        assert!(daemon.rename(id, "   ").is_err(), "a blank title is not a rename");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn delete_removes_all_three_sidecar_files_and_the_cache_entry() {
+        let (daemon, dir) = fixture("delete");
+        let id = "20260726_100000";
+        // Nothing writes thumbnails yet; deletion must already handle one.
+        std::fs::write(trix_core::library::thumb_path(&dir, id), b"jpeg").unwrap();
+
+        daemon.delete(id).unwrap();
+
+        assert!(!trix_core::library::mp4_path(&dir, id).exists());
+        assert!(!trix_core::library::sidecar_path(&dir, id).exists());
+        assert!(!trix_core::library::thumb_path(&dir, id).exists());
+        assert_eq!(daemon.list(0, 50).total, 2);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An id that is valid syntax but names no clip is a clean error, not a
+    /// panic and not a silent success.
+    #[test]
+    fn an_unknown_but_wellformed_id_is_a_clean_error() {
+        let (daemon, dir) = fixture("unknown");
+
+        let err = daemon.delete("20991231_235959").unwrap_err().to_string();
+        assert!(err.contains("20991231_235959"), "the error should name the clip: {err}");
+        assert!(daemon.rename("20991231_235959", "x").is_err());
+        assert_eq!(daemon.list(0, 50).total, 3, "a failed delete changed nothing");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Favoriting is the same write path as renaming, so what it needs its own
+    /// coverage for is that it edits *only* the flag — a shared helper that
+    /// clobbered the title would otherwise pass every test above.
+    #[test]
+    fn favoriting_sets_the_flag_on_disk_without_disturbing_the_title() {
+        let (daemon, dir) = fixture("favorite");
+        let id = "20260726_120000";
+
+        daemon.rename(id, "Clutch").unwrap();
+        daemon.set_favorite(id, true).unwrap();
+
+        let on_disk =
+            trix_core::library::read_sidecar(&trix_core::library::sidecar_path(&dir, id)).unwrap();
+        assert!(on_disk.favorite);
+        assert_eq!(on_disk.title, "Clutch", "favoriting must not undo a rename");
+
+        daemon.set_favorite(id, false).unwrap();
+        let page = daemon.list(0, 50);
+        let entry = page.clips.iter().find(|c| c.id == id).unwrap();
+        assert!(!entry.favorite, "un-favoriting is the same path in reverse");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// Disarming a daemon that was never armed is a no-op, not an error — a
     /// UI that reconnects and syncs its toggle must not see a spurious failure.
