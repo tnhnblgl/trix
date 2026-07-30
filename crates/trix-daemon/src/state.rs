@@ -5,11 +5,16 @@
 //! what to broadcast — which is also what keeps the lock ordering below
 //! trivially true.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
-use trix_core::{config::Config, control, control::SingleInstance, engine::EngineHandle, library};
+use serde_json::{Map, Value};
+use trix_core::{
+    config::Config, control, control::SingleInstance, engine::EngineHandle, engine::EngineStatus,
+    library, stats,
+};
 use trix_proto::ClipMeta;
 
 use crate::clients::Clients;
@@ -177,8 +182,56 @@ pub struct ArmOutcome {
     pub status: DaemonStatus,
 }
 
+/// The config keys that only take effect at the next `arm`.
+///
+/// Every one is baked into `RecorderSettings` or the capture session when
+/// `EngineHandle::spawn` builds it, so setting one while armed changes the file
+/// and nothing else. `config.set` *reports* them rather than acting on them:
+/// silently re-arming would tear the live replay ring down — and with it the
+/// last fifteen seconds the user may be about to clip — because someone nudged
+/// a bitrate slider. The UI decides whether to prompt.
+///
+/// The three config keys deliberately absent take effect immediately:
+/// `clip_dir` is read per clip, `stats_seconds` per stats tick, and
+/// `clip_hotkey` belongs to `trix replay`'s own loop rather than to anything the
+/// daemon arms.
+pub const REQUIRES_REARM: [&str; 7] = [
+    "fps",
+    "bitrate_kbps",
+    "max_bitrate_kbps",
+    "rate_control",
+    "replay_seconds",
+    "monitor_index",
+    "gpu_priority",
+];
+
+/// What `stats_seconds = 0` means to the control socket: one event a second.
+///
+/// 0 disables the periodic *log line* (`trix replay`'s self-report) and that
+/// stays true — but a client that sent `stats.subscribe {enabled:true}` has
+/// asked to be told, and "off" is not an answer to that. 1 Hz is the rate spec
+/// §4.4 describes and the one [`crate::clients::OUTBOUND_QUEUE_DEPTH`] is sized
+/// against: fast enough for a live meter, slow enough to cost nothing
+/// measurable next to a 60 fps hardware encode.
+const DEFAULT_STATS_SECONDS: u32 = 1;
+
+/// What `config.set` did (spec §4.3: "accepted values + which keys require a
+/// re-arm to take effect").
+pub struct ConfigUpdate {
+    /// The keys that were applied, with the values as they now stand — read
+    /// back out of the saved config rather than echoed from the request, so a
+    /// UI repaints from what the daemon holds and not from what it asked for.
+    pub accepted: Map<String, Value>,
+    /// Which of those keys need an `arm` before they change what is captured.
+    pub requires_rearm: Vec<String>,
+}
+
 pub struct Daemon {
     pub config: Mutex<Config>,
+    /// Where `config.set` persists. `None` means there is nowhere to save —
+    /// `%APPDATA%` unset — which is an error on that command and irrelevant to
+    /// every other one, so it is not a startup failure.
+    config_path: Option<PathBuf>,
     pub clients: Clients,
     armed: Mutex<Option<Armed>>,
     /// The library, scanned once at startup and updated incrementally.
@@ -223,8 +276,34 @@ fn scan_and_log(dir: &Path) -> Result<Vec<ClipMeta>> {
     Ok(clips)
 }
 
+/// A config as a JSON object.
+///
+/// Every field, straight off the `Serialize` derive, so a config key added
+/// later reaches `config.get` and becomes settable through `config.set` without
+/// anyone remembering to touch this file. The `Result` is honoured rather than
+/// unwrapped even though a struct of `u32`s and `String`s cannot fail to
+/// serialize: this runs on a path a socket message reaches directly, in a
+/// `panic = "abort"` build.
+fn config_object(config: &Config) -> Result<Map<String, Value>> {
+    match serde_json::to_value(config) {
+        Ok(Value::Object(object)) => Ok(object),
+        Ok(other) => bail!("the config did not serialize as an object: {other}"),
+        Err(e) => Err(e).context("serializing the config"),
+    }
+}
+
 impl Daemon {
+    /// The daemon over the real `%APPDATA%\trix\config.toml`. Production
+    /// callers want this one.
     pub fn new(config: Config) -> Self {
+        Self::new_at(config, Config::path())
+    }
+
+    /// The daemon with `config.set` persisting to `config_path` — the same seam
+    /// [`crate::pipe::serve_at`] is to `pipe::serve`, and for the same reason:
+    /// without it, a test that exercises `config.set` at all would rewrite the
+    /// settings of whoever ran `cargo test`.
+    pub fn new_at(config: Config, config_path: Option<PathBuf>) -> Self {
         // One scan, at startup. A failure here is not fatal: an unreadable clip
         // directory must not stop the daemon from arming and capturing.
         let library = match scan_and_log(&config.clip_dir_path()) {
@@ -239,6 +318,7 @@ impl Daemon {
         };
         Self {
             config: Mutex::new(config),
+            config_path,
             clients: Clients::default(),
             armed: Mutex::new(None),
             library: Mutex::new(library),
@@ -373,6 +453,158 @@ impl Daemon {
                 clip_dir,
             },
         }
+    }
+
+    // --- Configuration ------------------------------------------------------
+
+    /// `config.get`: the effective config as a JSON object, plus
+    /// `clip_dir_resolved`.
+    ///
+    /// The config's own keys come from its `Serialize` derive rather than a
+    /// hand-written list, so a key added to `Config` later appears here without
+    /// this file changing — which is what the key-set test in `dispatch.rs`
+    /// pins down.
+    ///
+    /// `clip_dir_resolved` is not a config key and is not settable: `clip_dir`
+    /// is empty by default and means "wherever the default is", and a settings
+    /// page cannot show a user where their clips actually land without the
+    /// daemon resolving it for them.
+    pub fn config_json(&self) -> Result<Value> {
+        let config = self.lock_config();
+        let mut object = config_object(&config)?;
+        object.insert(
+            "clip_dir_resolved".to_string(),
+            Value::from(config.clip_dir_path().to_string_lossy().as_ref()),
+        );
+        Ok(Value::Object(object))
+    }
+
+    /// `config.set`: applies known keys, refuses unknown ones by name, writes
+    /// the file, and reports which of the keys need a re-arm.
+    ///
+    /// Nothing is applied and nothing is written unless *every* key is
+    /// acceptable — a settings page that sent five keys and got an error must
+    /// not have to guess which two landed.
+    pub fn set_config(&self, values: &Map<String, Value>) -> Result<ConfigUpdate> {
+        // The known-key set is read off a serialized `Config::default()`, not
+        // listed here, for the same reason `config_json` serializes: a config
+        // key added later is settable without anyone remembering this function
+        // exists.
+        let defaults = config_object(&Config::default())?;
+        for key in values.keys() {
+            if !defaults.contains_key(key) {
+                let known: Vec<&str> = defaults.keys().map(String::as_str).collect();
+                bail!("config.set: unknown key {key:?} (known keys: {})", known.join(", "));
+            }
+        }
+
+        // Held across the write, deliberately. `config.set` is a
+        // read-modify-write of the whole file: two clients setting different
+        // keys at once would otherwise each save a file built from what they
+        // read, and the loser's key would silently revert. The cost is that a
+        // concurrent `status` waits out a small write to local disk; the
+        // alternative is a settings page that sometimes does not stick. This
+        // does not touch the lock ordering documented above — `config` is only
+        // ever taken alone or under `armed`, never the other way around, and
+        // nothing here locks `armed` or `clients`.
+        let mut config = self.lock_config();
+        let base = config_object(&config)?;
+        let mut merged = base.clone();
+        for (key, value) in values {
+            merged.insert(key.clone(), value.clone());
+        }
+
+        let updated: Config = match serde_json::from_value(Value::Object(merged)) {
+            Ok(updated) => updated,
+            // `from_value`'s message says what was wrong ("invalid type:
+            // string, expected u32") but not *which* key, and a settings page
+            // has to be able to point at the offending field. Re-applying one
+            // key at a time finds it. This costs an extra deserialize per key
+            // on a path that has already failed, and nothing at all otherwise.
+            Err(e) => {
+                for (key, value) in values {
+                    let mut one = base.clone();
+                    one.insert(key.clone(), value.clone());
+                    if serde_json::from_value::<Config>(Value::Object(one)).is_err() {
+                        bail!("config.set: {key:?} does not accept {value}: {e}");
+                    }
+                }
+                bail!("config.set: {e}");
+            }
+        };
+
+        // Disk first, then memory — the same order the clip library uses. A
+        // failed write leaves the daemon agreeing with the file rather than
+        // capturing at a setting no restart would reproduce.
+        let path = self
+            .config_path
+            .as_deref()
+            .context("there is nowhere to save the config — APPDATA is not set")?;
+        updated.save_to(path).context("config.set could not save the config")?;
+
+        let after = config_object(&updated)?;
+        let mut accepted = Map::new();
+        let mut requires_rearm = Vec::new();
+        for key in values.keys() {
+            if let Some(value) = after.get(key) {
+                accepted.insert(key.clone(), value.clone());
+            }
+            if REQUIRES_REARM.contains(&key.as_str()) {
+                requires_rearm.push(key.clone());
+            }
+        }
+        *config = updated;
+        Ok(ConfigUpdate { accepted, requires_rearm })
+    }
+
+    // --- Statistics ---------------------------------------------------------
+
+    /// The live engine's counters, or `None` when nothing is armed.
+    pub fn engine_status(&self) -> Option<EngineStatus> {
+        self.lock_armed().as_ref().map(|state| state.engine.status())
+    }
+
+    /// How long the stats thread waits between `stats` events.
+    pub fn stats_interval(&self) -> Duration {
+        let seconds = self.lock_config().stats_seconds.max(DEFAULT_STATS_SECONDS);
+        Duration::from_secs(u64::from(seconds))
+    }
+
+    /// The `stats` event's payload (spec §4.4), or `None` when nothing is
+    /// armed — every counter in it comes from the live engine, and there is no
+    /// honest value for "frames captured" without one.
+    ///
+    /// Built key by key with `Value::from` for the same reason
+    /// [`DaemonStatus::to_json`] is: `serde_json::json!` hides an `unwrap` and
+    /// this reaches the socket in a `panic = "abort"` build.
+    ///
+    /// No GPU memory numbers, deliberately. `StatsReporter` reads those off the
+    /// capture session's D3D device; the daemon has no device even while armed,
+    /// because the reporter lives *inside* the session. Standing a second DXGI
+    /// device up in the daemon purely so it could report on itself would cost
+    /// the memory this project exists to save. `trix_core::stats::working_set`
+    /// needs no device and is what ships.
+    pub fn stats_json(&self) -> Option<Value> {
+        let engine = self.engine_status()?;
+        let mut fields = Map::new();
+        fields.insert(
+            "encoder".to_string(),
+            match engine.encoder.is_empty() {
+                true => Value::Null,
+                false => Value::from(engine.encoder.as_str()),
+            },
+        );
+        fields.insert("monitor_index".to_string(), Value::from(engine.monitor_index));
+        fields.insert("width".to_string(), Value::from(engine.width));
+        fields.insert("height".to_string(), Value::from(engine.height));
+        fields.insert("fps".to_string(), Value::from(engine.fps));
+        fields.insert("ring_seconds_used".to_string(), Value::from(engine.ring_seconds_used));
+        fields.insert("ring_seconds_total".to_string(), Value::from(engine.ring_seconds_total));
+        fields.insert("frames".to_string(), Value::from(engine.frames));
+        fields.insert("dropped".to_string(), Value::from(engine.dropped));
+        fields.insert("paced".to_string(), Value::from(engine.paced));
+        fields.insert("working_set".to_string(), Value::from(stats::working_set()));
+        Some(Value::Object(fields))
     }
 
     // --- The clip library ---------------------------------------------------
@@ -909,6 +1141,26 @@ mod tests {
             object.get("version").and_then(|v| v.as_str()),
             Some(env!("CARGO_PKG_VERSION"))
         );
+    }
+
+    /// Nothing is armed, so there are no counters to report and the stats
+    /// thread has nothing to broadcast. `None` rather than a payload of zeroes:
+    /// a live meter reading "0 frames, 0 dropped" about a daemon that is not
+    /// capturing is a lie a UI would render as a stalled encoder.
+    #[test]
+    fn an_idle_daemon_has_no_stats_payload() {
+        assert!(Daemon::new(Config::default()).stats_json().is_none());
+    }
+
+    /// `stats_seconds = 0` disables the periodic log line, not a subscriber's
+    /// events — a client that asked to be told is told once a second.
+    #[test]
+    fn a_zero_stats_interval_still_ticks_for_a_subscriber() {
+        let daemon = Daemon::new(Config { stats_seconds: 0, ..Config::default() });
+        assert_eq!(daemon.stats_interval(), Duration::from_secs(1));
+
+        let daemon = Daemon::new(Config { stats_seconds: 5, ..Config::default() });
+        assert_eq!(daemon.stats_interval(), Duration::from_secs(5), "an explicit interval wins");
     }
 
     /// `clip` has to name the missing step rather than reporting some internal

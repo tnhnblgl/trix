@@ -23,11 +23,6 @@ use crate::state::Daemon;
 /// two different ways.
 const NOTHING_BUFFERED: &str = "nothing buffered yet — try again in a moment";
 
-/// Answered for commands the protocol defines but this build does not yet
-/// implement — `config.*`, `monitors.list`, `encoders.list`,
-/// `stats.subscribe`. Task 7 replaces the remaining arms.
-const NOT_IMPLEMENTED: &str = "not implemented in this build";
-
 /// Implemented for `Daemon` rather than for `Arc<Daemon>` as the brief's sketch
 /// had it: `pipe::serve` already takes an `Arc<H>`, so implementing the trait
 /// on the `Arc` would make the daemon an `Arc<Arc<Daemon>>` at the call site
@@ -47,9 +42,11 @@ impl ClientHandler for Daemon {
         self.clients.eviction_flag(client)
     }
 
-    /// `client` is unused until `stats.subscribe` (Task 7) needs to know which
-    /// connection asked.
-    fn dispatch(&self, _client: ClientId, request: &Request) -> Response {
+    /// `client` identifies the connection that sent this request. Only
+    /// `stats.subscribe` cares — it is a per-connection flag, not daemon state,
+    /// because two UIs must be able to disagree about whether they want a
+    /// 1 Hz event stream.
+    fn dispatch(&self, client: ClientId, request: &Request) -> Response {
         match Command::parse(request) {
             Ok(Command::Status) => Response::ok(request.id, self.status().to_json()),
             Ok(Command::Arm) => arm(self, request.id),
@@ -75,8 +72,84 @@ impl ClientHandler for Daemon {
             Ok(Command::LibraryReveal { clip_id }) => {
                 acknowledge(request.id, &clip_id, self.reveal(&clip_id))
             }
-            Ok(_) => Response::err(request.id, NOT_IMPLEMENTED),
+            Ok(Command::ConfigGet) => match self.config_json() {
+                Ok(data) => Response::ok(request.id, data),
+                Err(e) => Response::err(request.id, format!("{e:#}")),
+            },
+            Ok(Command::ConfigSet(values)) => config_set(self, request.id, &values),
+            Ok(Command::MonitorsList) => match trix_core::probe::monitors() {
+                Ok(found) => named_array(request.id, "monitors", serde_json::to_value(&found)),
+                Err(e) => Response::err(request.id, format!("{e:#}")),
+            },
+            Ok(Command::EncodersList) => match trix_core::probe::encoders() {
+                Ok(found) => named_array(request.id, "encoders", serde_json::to_value(&found)),
+                Err(e) => Response::err(request.id, format!("{e:#}")),
+            },
+            Ok(Command::StatsSubscribe { enabled }) => {
+                self.clients.set_stats(client, enabled);
+                let mut fields = Map::new();
+                fields.insert("enabled".to_string(), Value::Bool(enabled));
+                Response::ok(request.id, Value::Object(fields))
+            }
+            // No catch-all arm. Every `Command` variant is answered here now,
+            // so the match is exhaustive and the compiler — not a reviewer —
+            // is what stops a command added to `trix-proto` later from
+            // silently falling through to a generic error.
             Err(error) => Response::err(request.id, error),
+        }
+    }
+}
+
+/// `{"accepted":{…},"requires_rearm":[…]}` (spec §4.3).
+fn config_set(daemon: &Daemon, id: u64, values: &Map<String, Value>) -> Response {
+    match daemon.set_config(values) {
+        Ok(update) => {
+            let mut fields = Map::new();
+            fields.insert("accepted".to_string(), Value::Object(update.accepted));
+            fields.insert(
+                "requires_rearm".to_string(),
+                Value::Array(update.requires_rearm.into_iter().map(Value::from).collect()),
+            );
+            Response::ok(id, Value::Object(fields))
+        }
+        // No `error` event. Spec §4.4 broadcasts one for `arm` and `clip`,
+        // whose failure changes what every other client can expect to happen
+        // next; a refused settings write concerns only the client that sent it.
+        Err(e) => Response::err(id, format!("{e:#}")),
+    }
+}
+
+/// `{"monitors":[…]}` and `{"encoders":[…]}` — the same "named array" shape
+/// `library.list` uses for `clips`, so a client never has to tell a bare array
+/// from an object.
+///
+/// Takes the already-serialized list rather than the `Vec`: a generic
+/// `T: Serialize` parameter would need `serde` as a direct dependency of this
+/// crate, which it does not otherwise have. `serde_json::to_value` is called at
+/// the two call sites, where the concrete type is known and inference does the
+/// work.
+///
+/// The enumerations themselves run on the calling client's own session thread,
+/// and both talk to real hardware — DXGI for monitors, `MFTEnumEx` for
+/// encoders. That is deliberate: a settings page opens rarely, the calls take
+/// milliseconds, and caching them would mean serving a stale monitor list to
+/// the one user who just plugged a screen in. A slow enumeration costs that one
+/// connection its own latency and nothing else, because `pipe::serve` gives
+/// every client a thread.
+fn named_array(id: u64, key: &str, serialized: serde_json::Result<Value>) -> Response {
+    match serialized {
+        Ok(value) => {
+            let mut fields = Map::new();
+            fields.insert(key.to_string(), value);
+            Response::ok(id, Value::Object(fields))
+        }
+        // `MonitorInfo` and `EncoderInfo` are strings, integers and bools, so
+        // this cannot actually happen — but `to_value` returns a `Result` and a
+        // `panic = "abort"` build has no room for an `unwrap` on a path a
+        // socket message reaches directly.
+        Err(e) => {
+            tracing::error!(list = key, error = %e, "could not serialize a hardware list");
+            Response::err(id, format!("the {key} list could not be serialized"))
         }
     }
 }
@@ -262,6 +335,22 @@ mod tests {
         Daemon::new(Config::default())
     }
 
+    /// A daemon whose `config.set` writes to a scratch file rather than the
+    /// developer's real `%APPDATA%\trix\config.toml`. Without this seam, every
+    /// `config.set` test below would rewrite the settings of whoever ran
+    /// `cargo test` — and the `fps = 30` one would leave them capturing at 30.
+    ///
+    /// `clip_dir` points into the scratch directory too, so the startup library
+    /// scan does not walk the developer's real clip folder.
+    fn with_scratch_config(name: &str) -> (Daemon, std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("trix-config-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let config = Config { clip_dir: dir.to_string_lossy().into_owned(), ..Config::default() };
+        (Daemon::new_at(config, Some(path.clone())), path, dir)
+    }
+
     #[test]
     fn status_is_answered_without_an_engine() {
         let response = idle().dispatch(1, &request(1, "status"));
@@ -422,17 +511,254 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// The protocol defines more commands than this build answers; the ones it
-    /// does not must say so rather than parse-error, so a UI can tell "you are
-    /// talking to an older daemon" from "you sent nonsense".
+    /// The published `config.get` payload: every key `Config` has, plus
+    /// `clip_dir_resolved`.
+    ///
+    /// The expected key set is *derived* from `Config::default()` rather than
+    /// written out here, and that is the whole point. A config key added to
+    /// `Config` later has to reach a settings page without anyone remembering
+    /// the daemon exists; if `config.get` ever grows a hand-written field list,
+    /// this fails the day the next key is added rather than the day a user
+    /// notices it missing from the UI.
     #[test]
-    fn a_command_this_build_does_not_answer_says_so() {
-        let daemon = idle();
-        for cmd in ["config.get", "monitors.list", "encoders.list"] {
-            let response = daemon.dispatch(1, &request(5, cmd));
-            assert!(!response.ok, "{cmd} should not report success yet");
-            assert_eq!(response.error.as_deref(), Some(NOT_IMPLEMENTED), "for {cmd}");
+    fn config_get_returns_every_config_key_plus_the_resolved_clip_dir() {
+        let response = idle().dispatch(1, &request(1, "config.get"));
+        assert!(response.ok, "config.get must be answered now: {:?}", response.error);
+        let data = response.data.expect("config.get carries data");
+        let object = data.as_object().expect("config.get answers with an object");
+
+        let defaults = serde_json::to_value(Config::default()).unwrap();
+        let mut expected: Vec<&str> =
+            defaults.as_object().unwrap().keys().map(String::as_str).collect();
+        expected.push("clip_dir_resolved");
+        expected.sort_unstable();
+
+        let mut actual: Vec<&str> = object.keys().map(String::as_str).collect();
+        actual.sort_unstable();
+        assert_eq!(
+            actual, expected,
+            "config.get must round-trip every Config key, plus clip_dir_resolved and nothing else"
+        );
+
+        // The empty default is exactly the case a UI cannot render on its own,
+        // which is why the resolved path is sent alongside it.
+        assert_eq!(object.get("clip_dir").and_then(Value::as_str), Some(""));
+        let resolved = object.get("clip_dir_resolved").and_then(Value::as_str).unwrap_or_default();
+        assert!(
+            resolved.ends_with(r"Videos\Trix"),
+            "an empty clip_dir must resolve to the default: {resolved}"
+        );
+    }
+
+    /// The refusal boundary. A key the daemon does not know, and a value it
+    /// cannot apply, are both named in the error — a settings page has to be
+    /// able to point at the field — and neither writes anything.
+    ///
+    /// The all-or-nothing case is the one worth the extra assertion: a client
+    /// that sent five keys and got one error must not have to guess which two
+    /// landed.
+    #[test]
+    fn config_set_refuses_what_it_cannot_apply_and_writes_nothing() {
+        let (daemon, path, dir) = with_scratch_config("refuse");
+
+        let unknown = daemon.dispatch(1, &request_with(5, "config.set", &[("nope", 1.into())]));
+        assert!(!unknown.ok, "an unknown key is not a setting");
+        let error = unknown.error.unwrap_or_default();
+        assert!(error.contains("nope"), "the error must name the key it refused: {error}");
+        assert!(!path.exists(), "a refused config.set must not have written the file");
+
+        let wrong_type =
+            daemon.dispatch(1, &request_with(6, "config.set", &[("fps", "sixty".into())]));
+        assert!(!wrong_type.ok, "fps is a number");
+        let error = wrong_type.error.unwrap_or_default();
+        assert!(error.contains("fps"), "the error must name the key that would not take: {error}");
+        assert!(!path.exists(), "a refused config.set must not have written the file");
+
+        let mixed = daemon.dispatch(
+            1,
+            &request_with(7, "config.set", &[("fps", 30.into()), ("nope", 1.into())]),
+        );
+        assert!(!mixed.ok);
+        assert!(!path.exists(), "one bad key must refuse the whole request, not half of it");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `fps` is baked into `RecorderSettings` when the engine is spawned, so
+    /// setting it changes the file and nothing that is already capturing. The
+    /// response says so; it does not re-arm, because tearing down a live replay
+    /// ring is not something a slider gets to do on its own.
+    #[test]
+    fn config_set_of_an_engine_key_asks_for_a_rearm() {
+        let (daemon, path, dir) = with_scratch_config("rearm");
+
+        let response = daemon.dispatch(1, &request_with(4, "config.set", &[("fps", 30.into())]));
+        assert!(response.ok, "config.set must be answered now: {:?}", response.error);
+        let data = response.data.expect("config.set carries data");
+        assert_eq!(data.pointer("/accepted/fps").and_then(Value::as_u64), Some(30));
+        assert_eq!(
+            data.get("requires_rearm").and_then(Value::as_array).map(Vec::as_slice),
+            Some([Value::from("fps")].as_slice()),
+            "fps only takes effect at the next arm, and the UI has to be told"
+        );
+
+        // Persisted, not merely remembered — a setting that does not survive a
+        // restart is a bug a user finds tomorrow.
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("fps = 30"), "config.set must write the file: {saved}");
+        // And visible to the very next config.get, from the same daemon.
+        let after = daemon.dispatch(1, &request(5, "config.get")).data.unwrap();
+        assert_eq!(after.get("fps").and_then(Value::as_u64), Some(30));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `clip_dir` is read when a clip is written, not when the engine starts,
+    /// so it takes effect immediately and the re-arm list stays empty. A UI
+    /// that prompted "restart capture?" for this would be wrong.
+    #[test]
+    fn config_set_of_a_live_key_needs_no_rearm() {
+        let (daemon, path, dir) = with_scratch_config("live");
+        let clips = dir.join("Clips");
+
+        let response = daemon.dispatch(
+            1,
+            &request_with(
+                8,
+                "config.set",
+                &[("clip_dir", Value::from(clips.to_string_lossy().as_ref()))],
+            ),
+        );
+        assert!(response.ok, "config.set must be answered now: {:?}", response.error);
+        let data = response.data.expect("config.set carries data");
+        assert!(
+            data.get("requires_rearm").and_then(Value::as_array).is_some_and(Vec::is_empty),
+            "clip_dir is read per clip and needs no re-arm: {data}"
+        );
+        assert!(path.exists(), "an accepted config.set writes the file");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The settings dropdowns' data source, over the wire. Named-array shape
+    /// (`{"monitors":[…]}`) so a client never has to tell a bare array from an
+    /// object, and `index` really is a `config.monitor_index` value.
+    #[test]
+    fn monitors_list_answers_with_the_data_the_probe_prints() {
+        let response = idle().dispatch(1, &request(2, "monitors.list"));
+        assert!(response.ok, "monitors.list must be answered now: {:?}", response.error);
+        let data = response.data.expect("monitors.list carries data");
+        let monitors = data.get("monitors").and_then(Value::as_array).expect("monitors is an array");
+        assert!(!monitors.is_empty(), "a machine running this test has a desktop attached");
+
+        let first = monitors.first().expect("at least one monitor");
+        for key in ["index", "name", "width", "height", "left", "top", "adapter"] {
+            assert!(first.get(key).is_some(), "a settings dropdown binds {key:?}: {first}");
         }
+        assert_eq!(
+            first.get("index").and_then(Value::as_u64),
+            Some(0),
+            "the first entry is monitor_index 0 — these are config values, not ordinals"
+        );
+    }
+
+    /// The encoder dropdown. Every entry has to be nameable and its hardware
+    /// flag has to be there, because "software fallback" is exactly the thing a
+    /// user needs to see before they wonder why their game got slower.
+    #[test]
+    fn encoders_list_names_the_real_mfts() {
+        let response = idle().dispatch(1, &request(3, "encoders.list"));
+        assert!(response.ok, "encoders.list must be answered now: {:?}", response.error);
+        let data = response.data.expect("encoders.list carries data");
+        let encoders = data.get("encoders").and_then(Value::as_array).expect("encoders is an array");
+        assert!(!encoders.is_empty(), "a Windows machine offers at least a software H.264 MFT");
+
+        for encoder in encoders {
+            assert!(
+                encoder.get("name").and_then(Value::as_str).is_some_and(|n| !n.is_empty()),
+                "an encoder with no name is not selectable: {encoder}"
+            );
+            assert!(
+                encoder.get("codec").and_then(Value::as_str).is_some_and(|c| c.trim() == c),
+                "codec labels reach the UI unpadded: {encoder}"
+            );
+            assert!(
+                encoder.get("hardware").and_then(Value::as_bool).is_some(),
+                "the hardware flag is what a settings page warns on: {encoder}"
+            );
+        }
+    }
+
+    /// `stats` is per-connection, not daemon state: two UIs must be able to
+    /// disagree about whether they want a 1 Hz event stream. This is the one
+    /// command that needs to know *which* client sent it.
+    #[test]
+    fn stats_subscribe_flips_only_the_asking_clients_flag() {
+        let daemon = idle();
+        let (subscriber_tx, subscriber_rx) =
+            std::sync::mpsc::sync_channel(crate::clients::OUTBOUND_QUEUE_DEPTH);
+        let subscriber = daemon.client_connected(subscriber_tx);
+        let (bystander_tx, bystander_rx) =
+            std::sync::mpsc::sync_channel(crate::clients::OUTBOUND_QUEUE_DEPTH);
+        daemon.client_connected(bystander_tx);
+        assert!(!daemon.clients.any_stats_subscribers(), "nothing measures anything yet");
+
+        let on = daemon.dispatch(
+            subscriber,
+            &request_with(10, "stats.subscribe", &[("enabled", true.into())]),
+        );
+        assert!(on.ok, "stats.subscribe must be answered now: {:?}", on.error);
+        assert_eq!(
+            on.data.as_ref().and_then(|d| d.get("enabled")),
+            Some(&Value::Bool(true)),
+            "the response echoes the state the client is now in"
+        );
+        assert!(daemon.clients.any_stats_subscribers(), "the stats thread may now do work");
+
+        daemon.clients.broadcast_stats(&Event::new("stats", Value::Object(Map::new())));
+        assert!(subscriber_rx.try_recv().is_ok(), "the subscriber receives stats");
+        assert!(bystander_rx.try_recv().is_err(), "a client that never asked must not");
+
+        let off = daemon.dispatch(
+            subscriber,
+            &request_with(11, "stats.subscribe", &[("enabled", false.into())]),
+        );
+        assert!(off.ok);
+        assert!(
+            !daemon.clients.any_stats_subscribers(),
+            "unsubscribing is the same command in reverse, and it stops the measuring"
+        );
+    }
+
+    /// Malformed input never drops a connection — it gets an error *response*
+    /// and the socket stays open. The commands this build added are the newest
+    /// place that could get wrong, so they are where it is checked.
+    #[test]
+    fn a_new_command_with_bad_arguments_answers_with_an_error() {
+        let daemon = idle();
+
+        let empty = daemon.dispatch(1, &request(11, "config.set"));
+        assert_eq!(empty.id, 11, "the caller needs its id back to match the reply");
+        assert!(!empty.ok, "config.set with nothing to set is not a request");
+        assert!(empty.error.unwrap_or_default().contains("config.set"));
+
+        let not_an_object =
+            daemon.dispatch(1, &request_with(12, "config.set", &[("values", 5.into())]));
+        assert!(!not_an_object.ok);
+        assert!(
+            not_an_object.error.unwrap_or_default().contains("values"),
+            "the error should name the argument that was the wrong shape"
+        );
+
+        let no_flag = daemon.dispatch(1, &request(13, "stats.subscribe"));
+        assert!(!no_flag.ok);
+        let error = no_flag.error.unwrap_or_default();
+        assert!(error.contains("enabled"), "the error should name the missing argument: {error}");
+
+        assert!(
+            daemon.dispatch(1, &request(14, "status")).ok,
+            "three bad requests must leave the daemon answering the fourth"
+        );
     }
 
     #[test]

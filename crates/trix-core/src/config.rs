@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
@@ -147,12 +147,22 @@ impl Config {
     /// directory. Used by `config.set`.
     pub fn save(&self) -> Result<()> {
         let path = Self::path().context("APPDATA is not set")?;
+        self.save_to(&path)
+    }
+
+    /// [`Self::save`]'s body, against an explicit path.
+    ///
+    /// Exists so a test can persist somewhere other than the developer's real
+    /// `%APPDATA%\trix\config.toml` — the same seam `pipe::serve_at` is to
+    /// `pipe::serve`. Without it, exercising `config.set` at all would rewrite
+    /// the settings of whoever ran `cargo test`.
+    pub fn save_to(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
         let text = toml::to_string_pretty(self).context("serializing config")?;
-        std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+        std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
     }
 }
 

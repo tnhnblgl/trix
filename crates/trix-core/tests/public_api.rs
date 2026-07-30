@@ -85,6 +85,15 @@ fn engine_entry_points_are_public() {
     // Plain CPU-side data structure — safe to actually construct.
     let _ = trix_core::stats::LatencyHistogram::new();
 
+    // The daemon's `monitors.list` / `encoders.list` and the device-free half
+    // of the memory report, which its `stats` event calls with no capture
+    // session anywhere. Bound rather than called for the same reason as the
+    // rest of this test: `encoders` runs `MFStartup`.
+    let _: fn() -> anyhow::Result<Vec<trix_core::probe::MonitorInfo>> = trix_core::probe::monitors;
+    let _: fn() -> anyhow::Result<Vec<trix_core::probe::EncoderInfo>> = trix_core::probe::encoders;
+    let _: fn() -> u64 = trix_core::stats::working_set;
+    let _: fn(&Config, &std::path::Path) -> anyhow::Result<()> = Config::save_to;
+
     // `encode`: bound, not called — MFStartup has a real (if idempotent)
     // process-wide side effect and this test must stay a pure type-check.
     let _: fn() -> anyhow::Result<()> = trix_core::encode::mf::ensure_mf_started;

@@ -1,12 +1,15 @@
 //! `trix-daemon`: exposes the control protocol over `pipe::PIPE_NAME` so
-//! something other than `trix.exe` can drive the engine. `status`, `arm`,
-//! `disarm`, `clip`, and the clip library (`library.list`, `delete`,
-//! `rename`, `favorite`, `reveal`) are answered for real; the rest of the
-//! command set lands in Task 7.
+//! something other than `trix.exe` can drive the engine. The whole command set
+//! is answered for real — `status`, `arm`, `disarm`, `clip`, the clip library
+//! (`library.list`, `delete`, `rename`, `favorite`, `reveal`), the settings
+//! (`config.get`, `config.set`), the hardware enumerations (`monitors.list`,
+//! `encoders.list`), and `stats.subscribe`.
 //!
 //! This file is now only wiring: the state lives in `state::Daemon` and the
 //! request handling in `dispatch`, both in this crate's library half so they
-//! can be tested without a running process.
+//! can be tested without a running process. The one thing that has to live
+//! here is the stats thread — it is a thread, not a request, and nothing in
+//! the library half owns one.
 
 use std::sync::{Arc, OnceLock};
 
@@ -135,6 +138,75 @@ fn disarm_within_budget(daemon: Arc<Daemon>) {
     }
 }
 
+/// How often the stats thread wakes to ask whether an event is due.
+///
+/// Not the event interval — that is `Daemon::stats_interval`, which a client
+/// can change at runtime through `config.set stats_seconds`. Sleeping for the
+/// interval itself would mean a `stats.subscribe` sent just after a tick waited
+/// a full period (an hour, at `stats_seconds = 3600`) before anything arrived,
+/// and a shortened interval would not take effect until the old one expired.
+/// A quarter second is under the threshold at which a person notices a meter
+/// starting late, and costs four atomic-free mutex peeks a second on a daemon
+/// nobody is watching.
+const STATS_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Broadcasts `stats` to subscribed clients while the daemon is armed.
+///
+/// Two gates, checked in this order and both before any measurement happens.
+/// **Nobody subscribed** means nothing measures anything at all — that is what
+/// makes the `stats_seconds = 0` default coherent (spec §4.4), and it is
+/// checked first because it is the cheap check and the common case: a daemon
+/// with no UI attached does no work here beyond waking up. **Nothing armed**
+/// means there are no counters to report; `Daemon::stats_json` returns `None`
+/// and the tick is skipped rather than broadcasting a payload of zeroes, which
+/// a live meter would render as a stalled encoder.
+///
+/// The thread runs for the life of the process and is never joined — like the
+/// shutdown watcher above, `std::process::exit` takes it with us. It holds only
+/// an `Arc<Daemon>`, takes the `clients` and `armed` locks briefly and one at a
+/// time, and cannot deadlock against a broadcast: it never holds one while
+/// taking the other.
+fn spawn_stats_thread(daemon: Arc<Daemon>) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    use trix_proto::Event;
+
+    std::thread::Builder::new()
+        .name("trix-stats".into())
+        .spawn(move || {
+            let mut next_at = std::time::Instant::now();
+            loop {
+                std::thread::sleep(STATS_POLL);
+
+                if !daemon.clients.any_stats_subscribers() {
+                    // Nothing is being measured, so nothing is owed. The
+                    // deadline is pushed out rather than left in the past, so
+                    // the first tick after someone subscribes is a fresh
+                    // interval and not a burst of catch-up events.
+                    next_at = std::time::Instant::now();
+                    continue;
+                }
+                let Some(data) = daemon.stats_json() else { continue };
+
+                let now = std::time::Instant::now();
+                if now < next_at {
+                    continue;
+                }
+                // `checked_add` rather than `+`: the interval comes from
+                // `stats_seconds`, which a client sets over the socket, and
+                // `Instant + Duration` panics on overflow. `u32::MAX` seconds
+                // is 136 years and would not actually overflow a `u64` of
+                // nanoseconds-since-boot — but "would not actually" is not the
+                // bar in a `panic = "abort"` build for a value that arrives on
+                // the wire. Falling back to `now` means an absurd interval
+                // degrades to every tick rather than to a dead process.
+                next_at = now.checked_add(daemon.stats_interval()).unwrap_or(now);
+                daemon.clients.broadcast_stats(&Event::new("stats", data));
+            }
+        })
+        .context("failed to spawn the stats thread")?;
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     init_tracing();
 
@@ -161,6 +233,11 @@ fn main() -> anyhow::Result<()> {
     // `set` can only fail if something already filled the slot, and nothing
     // else ever writes to it.
     let _ = slot.set(Arc::clone(&daemon));
+
+    // Started before the socket is listening so the first client to subscribe
+    // is already being served by a running thread. It idles at one wakeup every
+    // `STATS_POLL` until somebody actually subscribes.
+    spawn_stats_thread(Arc::clone(&daemon))?;
 
     // `pipe::serve` logs "listening on {PIPE_NAME}" itself, once the first
     // pipe instance is actually bound — see the comment in `pipe.rs`.

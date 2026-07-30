@@ -112,6 +112,36 @@ pub fn mb(bytes: u64) -> f64 {
     (bytes as f64 / (1024.0 * 1024.0) * 10.0).round() / 10.0
 }
 
+/// This process's working set, in bytes.
+///
+/// Split out of [`StatsReporter::memory`] because it is the one memory figure
+/// that needs no D3D device: `K32GetProcessMemoryInfo` asks the OS about the
+/// current process and nothing else. That matters for the daemon's `stats`
+/// event, which is emitted whether or not a capture session exists — and the
+/// daemon has no device to build a [`StatsReporter`] around even when it is
+/// armed, since the reporter lives *inside* the capture session. Creating a
+/// second DXGI device in the daemon purely so it could report on itself would
+/// cost the memory this project exists to save, so the daemon reports the
+/// working set and no GPU numbers. `memory()` calls straight through to here,
+/// so there is exactly one implementation of the call.
+///
+/// Returns 0 when the query fails rather than propagating: a stats line is a
+/// diagnostic, and a missing number must not be able to end a capture. (The
+/// single-pass version returned `WorkingSetSize` from a zeroed struct on that
+/// path, which is the same 0 — the behaviour is preserved, not invented.)
+pub fn working_set() -> u64 {
+    let mut counters = PROCESS_MEMORY_COUNTERS {
+        cb: size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        ..Default::default()
+    };
+    let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) };
+    if !ok.as_bool() {
+        tracing::warn!("process memory counters query failed");
+        return 0;
+    }
+    counters.WorkingSetSize as u64
+}
+
 /// Owns the DXGI adapter handle for per-process video-memory queries and the
 /// periodic-report timer. Lives inside a capture session.
 pub struct StatsReporter {
@@ -156,17 +186,6 @@ impl StatsReporter {
     }
 
     pub fn memory(&self) -> MemoryReport {
-        let mut counters = PROCESS_MEMORY_COUNTERS {
-            cb: size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
-            ..Default::default()
-        };
-        let ok = unsafe {
-            K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb)
-        };
-        if !ok.as_bool() {
-            tracing::warn!("process memory counters query failed");
-        }
-
         let query = |group| -> u64 {
             let Some(adapter) = &self.adapter else { return 0 };
             let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
@@ -177,7 +196,7 @@ impl StatsReporter {
         };
 
         MemoryReport {
-            working_set: counters.WorkingSetSize as u64,
+            working_set: working_set(),
             gpu_local: query(DXGI_MEMORY_SEGMENT_GROUP_LOCAL),
             gpu_shared: query(DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL),
         }
@@ -238,5 +257,28 @@ mod tests {
         assert!(m.working_set > 1 << 20, "working set should exceed 1 MiB");
         assert_eq!(m.gpu_local, 0);
         assert_eq!(m.ws_minus_gpu(), m.working_set);
+    }
+
+    /// The daemon's `stats` event calls this with no device anywhere in sight,
+    /// so it has to work standing alone — and it has to be the *same* number
+    /// `memory()` reports, or the daemon and the capture log would quote two
+    /// different working sets for one process.
+    #[test]
+    fn working_set_is_live_without_a_device() {
+        let standalone = working_set();
+        assert!(standalone > 1 << 20, "working set should exceed 1 MiB");
+
+        let reporter = StatsReporter { adapter: None, interval: None, next_at: Instant::now() };
+        let through_the_reporter = reporter.memory().working_set;
+        // Not `assert_eq!`: the two calls are microseconds apart and a real
+        // working set moves. Within 64 MiB is "the same number", and still
+        // fails loudly if one of them ever returns 0 or reads a different
+        // counter.
+        let drift = standalone.abs_diff(through_the_reporter);
+        assert!(
+            drift < 64 << 20,
+            "working_set() and memory().working_set should be the same counter: \
+             {standalone} vs {through_the_reporter}"
+        );
     }
 }
