@@ -246,7 +246,14 @@ try {
         $pids = ($procs | ForEach-Object { $_.Id }) -join ','
         $binaryWriteTime = (Get-Item $DaemonPath).LastWriteTime
 
-        $mismatches = @(Get-StaleDaemonMismatches -Procs $procs -DaemonPath $DaemonPath -BinaryWriteTime $binaryWriteTime)
+        # No @() wrap here. Get-StaleDaemonMismatches already returns its array
+        # as a single object via `return ,$mismatches`; wrapping that in @()
+        # collects the array into a *new* one-element array, so .Count is 1 for
+        # every input -- healthy and stale alike -- and `-join` renders the
+        # nested array as the literal text "System.Object[]". The two idioms
+        # each solve the unrolling problem alone and cancel each other when
+        # combined: the comma is the one that survives.
+        $mismatches = Get-StaleDaemonMismatches -Procs $procs -DaemonPath $DaemonPath -BinaryWriteTime $binaryWriteTime
         $staleDetail = if ($mismatches.Count -gt 0) {
             "$($mismatches -join '; ') -- stop the stale daemon (Stop-Process -Name trix-daemon -Force) and re-run so the gate tests the binary that was just built"
         } else { '' }
