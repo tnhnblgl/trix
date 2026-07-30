@@ -115,6 +115,8 @@ crates/trix-core/             the engine — no CLI, no argument parsing, no sub
   tests/public_api.rs           guards the surface the daemon consumes
 crates/trix-cli/              produces trix.exe
   src/main.rs                   clap surface + subscriber; depends on trix-core directly
+crates/trix-proto/            wire types only: Request/Response/Event, ClipMeta, the Command parser — serde only, no windows-rs, no unsafe
+crates/trix-daemon/           produces trix-daemon.exe: the control socket, arm/disarm/clip, the clip library, config, hardware enumeration, and stats — depends on trix-core + trix-proto
 ```
 
 The CLI depends on `trix-core` directly rather than routing through the daemon: it is the
@@ -499,6 +501,58 @@ surface the daemon will consume (proven: flipping `pub mod stats;` to
 `tracing-subscriber` does raw string-prefix matching — so `RUST_LOG=trix::record=debug`
 now matches nothing, and any future crate must be named `trix*` for default
 logging to reach it.
+
+### Control protocol (2026-07-27) — Stage 2 of the desktop UI spec ✅
+
+Two new crates: `trix-proto` (wire types — `Request`/`Response`/`Event`, `ClipMeta`, the
+`Command` parser; serde only, no `windows-rs`, no `unsafe`) and `trix-daemon`
+(`trix-daemon.exe` — a DACL-restricted named pipe at `\\.\pipe\trix-control`, newline-
+delimited JSON, one thread per client connection, commands funnelled onto the existing
+single-threaded engine session). The full command set from spec §4.3 is served: `status`,
+`arm`/`disarm`, `clip`, `config.get`/`config.set`, `library.list`/`delete`/`rename`/
+`favorite`/`reveal`, `monitors.list`/`encoders.list`, and `stats.subscribe`. Events (`armed`,
+`disarmed`, `clip_saved`, `stats`) broadcast on the same connection a client's own requests
+are answered on, interleaved with responses — a client must correlate by `id` and cannot
+assume the next line in is its own reply. Workspace suite **99/99**, zero `trix-daemon`
+clippy warnings.
+
+**`clip_dir` behaviour change for the CLI:** `trix replay`'s hotkey clip now lands in the
+resolved `clip_dir` (default `%USERPROFILE%\Videos\Trix`, overridable in `config.toml`)
+instead of whatever the working directory happened to be when the hotkey fired — the daemon
+and the CLI now agree on where a clip goes, matching spec §5.1.
+
+**`panic = "abort"` kept for the daemon**, decided with measurements rather than by default.
+`unwind` costs 685 KB against a 1,565,696-byte binary (+44%) and cannot protect the capture
+path anyway — `windows-capture` calls the frame handler across an `extern "system"` boundary,
+and Rust aborts rather than unwinding through foreign frames regardless of the profile
+setting. The exposure it would have covered is socket-facing code, which is instead required
+to be panic-free by construction.
+
+**Stage-2 gate** (`scripts/protocol-smoke.ps1`, spec §10 verification item 2): a scripted
+PowerShell client drives the real pipe end to end against a release build (`cargo build
+--release` run first so the gate matches HEAD) — refuse-if-locked → arm → wait for the
+replay ring to fill → `status` → `clip` → verify the clip on disk → `library.list` →
+`disarm` → confirm the CLI's single-instance slot is free again. Run against real capture
+hardware, session unlocked (the gate's own mandatory first check):
+
+- `arm`: `ok:true`, encoder `Intel® Quick Sync Video H.264 Encoder MFT` (the wire and the
+  sidecar both carry it as `IntelÂ® Quick Sync…` — a pre-existing double-UTF-8 artifact in
+  the *driver's own* MFT friendly-name string, already carried in this plan's findings since
+  Task 2, not a Trix bug), `clip_dir` `C:\Users\Tunahan\Videos\Trix`, `ring_seconds_total`
+  20 (this machine's configured `replay_seconds`).
+- `status` at the 10 s mark: `ring_seconds_used` 10.17, correctly between 5 and 20; the gate
+  then waits out the rest of the configured ring length before clipping, so the clip reflects
+  a genuinely full buffer rather than whatever partial fill 10 s happened to hold.
+- `clip`: id `20260730_173945`; `20260730_173945.mp4` on disk at 22,086,306 bytes;
+  `20260730_173945.json` carries all eleven `ClipMeta` keys, `duration_ms` 21,500 (within 20%
+  of `ring_seconds_total × 1000` = 20,000), `encoder` matching `arm`'s exactly.
+- `library.list`: the new clip present and first (newest-first).
+- `disarm`: `ok:true`; `trix.exe replay --exit-after 3` then exits 0 (`frames=172 dropped=0`),
+  proving the single-instance slot came back.
+
+All checks passed. **Outstanding:** playing the clip back and confirming video and audio are
+present and in sync is a hand-verification step the script cannot perform — that still
+belongs to the user before plan 3 (the desktop UI) begins.
 
 ## 6. First Concrete Step
 

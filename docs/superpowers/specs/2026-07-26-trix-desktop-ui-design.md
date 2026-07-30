@@ -120,7 +120,16 @@ schema compiler in the build.
 {"event":"clip_saved","data":{ /* clip metadata, §5.2 */ }}
 ```
 
+`id: 0` is reserved for responses to lines too malformed to yield a usable id — a request that
+cannot even be parsed as `{"id":…,"cmd":…}` still gets an error response, and `0` is what it
+carries back since no real id could be recovered from it. Clients must never send a request
+with `id: 0`.
+
 ### 4.3 Commands
+
+Argument shapes below use `{clip_id}`, not `{id}`: `id` is already taken by the request's own
+correlation id in the same flattened object (§4.2), so a clip identifier needs a different
+name on the wire.
 
 | Command | Returns |
 |---|---|
@@ -130,12 +139,13 @@ schema compiler in the build.
 | `config.get` | full effective config |
 | `config.set` | accepted values + which keys require a re-arm to take effect |
 | `library.list` | `{offset, limit}` → paged clip metadata, newest first |
-| `library.delete` | `{id}` — removes mp4, json, and jpg |
-| `library.rename` | `{id, title}` — edits metadata only, filename never moves |
-| `library.favorite` | `{id, favorite}` |
-| `library.reveal` | `{id}` — opens Explorer with the file selected |
-| `library.export` | `{id, dest, start_ms, end_ms, mode}` — see §6.3 |
+| `library.delete` | `{clip_id}` — removes mp4, json, and jpg |
+| `library.rename` | `{clip_id, title}` — edits metadata only, filename never moves |
+| `library.favorite` | `{clip_id, favorite}` |
+| `library.reveal` | `{clip_id}` — opens Explorer with the file selected |
+| `library.export` | `{clip_id, dest, start_ms, end_ms, mode}` — see §6.3. **Arrives in stage 4** with trim/export in the desktop app; not present in stage 2 or 3 |
 | `monitors.list` / `encoders.list` | real probe data for the settings dropdowns |
+| `stats.subscribe` | `{enabled}` → acknowledgement echoing the subscribed state; subscribes/unsubscribes this connection to `stats` events (§4.4) |
 
 ### 4.4 Events
 
