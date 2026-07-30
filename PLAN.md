@@ -124,7 +124,7 @@ ground-truth verification harness for every phase, and putting it behind the dae
 thing under test behind the thing under test.
 
 Planned additions (see `docs/superpowers/specs/2026-07-26-trix-desktop-ui-design.md`):
-`trix-proto` (wire types), `trix-daemon` (tray + control socket), `trix-ui` (Tauri app).
+`trix-ui` (Tauri app).
 
 ---
 

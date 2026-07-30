@@ -74,6 +74,58 @@ function Confirm-Check {
     }
 }
 
+function Get-TrixDaemonPackageVersion {
+    # The authoritative version for the trix-daemon crate, read from Cargo's
+    # own metadata rather than hardcoded or copy-pasted from Cargo.toml. This
+    # is compared against the live `status` response's `version` field so a
+    # stale trix-daemon.exe left running from an earlier build cannot make
+    # this gate pass silently against code that is not HEAD.
+    param([Parameter(Mandatory)][string]$RepoRoot)
+    $manifestPath = Join-Path $RepoRoot 'Cargo.toml'
+    $metadataJson = & cargo metadata --no-deps --format-version 1 --manifest-path $manifestPath 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($metadataJson)) {
+        throw "cargo metadata --no-deps failed (exit $LASTEXITCODE) -- cannot determine the expected trix-daemon version"
+    }
+    $metadata = $metadataJson | ConvertFrom-Json
+    $pkg = @($metadata.packages) | Where-Object { $_.name -eq 'trix-daemon' } | Select-Object -First 1
+    if ($null -eq $pkg) {
+        throw "cargo metadata did not report a package named 'trix-daemon'"
+    }
+    return $pkg.version
+}
+
+function Get-StaleDaemonMismatches {
+    # Returns a human-readable mismatch description for every process in
+    # $Procs whose exe path isn't $DaemonPath, or whose StartTime is not after
+    # $BinaryWriteTime (i.e. it was already running before the binary being
+    # gated was even built). An empty array means every process matches, so
+    # it's safe to reuse the daemon they represent. Pulled out as its own
+    # function so it can be exercised directly with synthetic process objects
+    # in isolation, without needing a real stale/fresh daemon pair on disk.
+    param(
+        [Parameter(Mandatory)]$Procs,
+        [Parameter(Mandatory)][string]$DaemonPath,
+        [Parameter(Mandatory)][datetime]$BinaryWriteTime
+    )
+    $mismatches = @()
+    foreach ($proc in @($Procs)) {
+        $procPath = $null
+        try { $procPath = $proc.Path } catch { }
+        if ($procPath -ne $DaemonPath) {
+            $mismatches += "PID $($proc.Id): path is '$procPath', expected '$DaemonPath'"
+        } elseif ($proc.StartTime -le $BinaryWriteTime) {
+            $mismatches += "PID $($proc.Id): started $($proc.StartTime), which is not after the binary's last write time ($BinaryWriteTime)"
+        }
+    }
+    # The leading comma is required, not decorative: PowerShell unrolls a
+    # plain `return $mismatches` one level, so a *zero*-mismatch array (the
+    # common, healthy case) would emit nothing and the caller would receive
+    # $null instead of an empty array -- which then throws under
+    # Set-StrictMode the moment it does `$mismatches.Count`. The comma
+    # operator forces the whole array through as a single object.
+    return ,$mismatches
+}
+
 # --- Pipe client --------------------------------------------------------------
 
 function Connect-TrixControl {
@@ -166,22 +218,42 @@ try {
 
     # Step 1 -- refuse to run against a locked session. A locked desktop makes
     # Windows Graphics Capture silently stop delivering frames while the run
-    # still exits 0 with a one-frame clip -- this is not optional.
-    Write-Host "[1/10] Checking the session is not locked..."
-    if (Get-Process -Name 'LogonUI' -ErrorAction SilentlyContinue) {
-        throw "the session is locked (LogonUI is running) -- Windows Graphics Capture stops delivering frames on a locked desktop and this run would silently produce a bogus one-frame clip. Unlock the session and re-run."
-    }
-    Write-Host "  OK: session is unlocked"
+    # still exits 0 with a one-frame clip -- this is not optional, so it goes
+    # through Confirm-Check like every other check rather than a bare throw,
+    # so it shows up in the SUMMARY receipt too.
+    Write-Host "[1/9] Checking the session is not locked..."
+    $logonUiRunning = [bool](Get-Process -Name 'LogonUI' -ErrorAction SilentlyContinue)
+    Confirm-Check "session is not locked (LogonUI is not running)" (-not $logonUiRunning) `
+        "Windows Graphics Capture stops delivering frames on a locked desktop and this run would silently produce a bogus one-frame clip -- unlock the session and re-run"
 
-    # Step 2 -- start the daemon if nothing is already serving the pipe.
-    Write-Host "[2/10] Ensuring trix-daemon is running..."
+    # Step 2 -- start the daemon if nothing is already serving the pipe. If one
+    # is already running, it must be *this* build, checked two independent
+    # ways: (a) its exe path matches $DaemonPath and it was started after that
+    # binary's last write time, and (b) once `status` responds, its `version`
+    # field matches the trix-daemon package version from `cargo metadata`.
+    # Without both, a daemon left running from days ago would make this gate
+    # fully green about code that is not HEAD.
+    Write-Host "[2/9] Ensuring trix-daemon is running..."
     if (-not (Test-Path $DaemonPath)) { throw "daemon binary not found: $DaemonPath" }
     if (-not (Test-Path $TrixPath)) { throw "trix binary not found: $TrixPath" }
 
+    $expectedVersion = Get-TrixDaemonPackageVersion -RepoRoot $RepoRoot
+    Write-Host "  expected trix-daemon version (from cargo metadata): $expectedVersion"
+
     $existing = Get-Process -Name 'trix-daemon' -ErrorAction SilentlyContinue
     if ($existing) {
-        $pids = ($existing | ForEach-Object { $_.Id }) -join ','
-        Write-Host "  daemon already running (PID $pids) -- using it, will not stop it on exit"
+        $procs = @($existing)
+        $pids = ($procs | ForEach-Object { $_.Id }) -join ','
+        $binaryWriteTime = (Get-Item $DaemonPath).LastWriteTime
+
+        $mismatches = @(Get-StaleDaemonMismatches -Procs $procs -DaemonPath $DaemonPath -BinaryWriteTime $binaryWriteTime)
+        $staleDetail = if ($mismatches.Count -gt 0) {
+            "$($mismatches -join '; ') -- stop the stale daemon (Stop-Process -Name trix-daemon -Force) and re-run so the gate tests the binary that was just built"
+        } else { '' }
+        Confirm-Check "running trix-daemon (PID $pids) is the freshly built binary (path and start time match $DaemonPath)" `
+            ($mismatches.Count -eq 0) $staleDetail
+
+        Write-Host "  daemon already running (PID $pids) -- path and start time match, using it, will not stop it on exit"
     } else {
         Write-Host "  starting $DaemonPath"
         $outLog = Join-Path $env:TEMP 'trix-daemon-smoke.out.log'
@@ -213,7 +285,7 @@ try {
     }
 
     # Step 3 -- connect, arm, assert ok:true and a non-empty encoder name.
-    Write-Host "[3/10] Connecting and arming..."
+    Write-Host "[3/9] Connecting and arming..."
     $conn = Connect-TrixControl
     $armTime = Get-Date
     $armResp = Send-TrixCommand -Conn $conn -Cmd 'arm' -TimeoutMs 15000
@@ -240,10 +312,18 @@ try {
     Write-Host "  armed. encoder = $encoder, clip_dir = $clipDir, ring_seconds_total = $ringSecondsTotal"
 
     # Step 4 -- wait for the ring to fill, then check status.
-    Write-Host "[4/10] Waiting 10s for the replay ring to fill..."
+    Write-Host "[4/9] Waiting 10s for the replay ring to fill..."
     Start-Sleep -Seconds 10
     $statusResp = Send-TrixCommand -Conn $conn -Cmd 'status'
     Confirm-Check "status returns ok:true" ([bool]$statusResp.ok) (Get-JsonProp $statusResp 'error')
+
+    # Confirms this run is exercising the trix-daemon.exe that was just built
+    # rather than some other build left resident on the machine -- the second
+    # of the two independent stale-daemon defenses (the first is the PID's
+    # path/start-time check in Step 2).
+    $daemonVersion = $statusResp.data.version
+    Confirm-Check "status version ($daemonVersion) matches the trix-daemon package version ($expectedVersion)" `
+        ($daemonVersion -eq $expectedVersion)
 
     # clip_dir and ring_seconds_total come back from status directly -- take
     # the freshest values rather than hardcoding a path or 15 seconds.
@@ -270,10 +350,14 @@ try {
         $ringSecondsTotal = [int]$statusResp.data.ring_seconds_total
         $ringUsed = [double]$statusResp.data.ring_seconds_used
         Write-Host "  ring now at $ringUsed / $ringSecondsTotal seconds"
+        # Asserted, not just printed: an insufficient wait here would otherwise
+        # only surface two steps later as a confusing duration_ms mismatch.
+        Confirm-Check "ring_seconds_used ($ringUsed) reached at least 90% of ring_seconds_total ($ringSecondsTotal) after the full-ring wait" `
+            ($ringUsed -ge ($ringSecondsTotal * 0.9))
     }
 
     # Step 5 -- clip.
-    Write-Host "[5/10] Requesting a clip..."
+    Write-Host "[5/9] Requesting a clip..."
     $clipResp = Send-TrixCommand -Conn $conn -Cmd 'clip' -TimeoutMs 15000
     Confirm-Check "clip returns ok:true" ([bool]$clipResp.ok) (Get-JsonProp $clipResp 'error')
     $clipId = $clipResp.data.id
@@ -281,7 +365,7 @@ try {
     Write-Host "  clip id = $clipId"
 
     # Step 6 -- the clip on disk: mp4 size, sidecar keys, duration, encoder.
-    Write-Host "[6/10] Verifying the clip on disk..."
+    Write-Host "[6/9] Verifying the clip on disk..."
     $mp4Path = Join-Path $clipDir "$clipId.mp4"
     $jsonPath = Join-Path $clipDir "$clipId.json"
 
@@ -315,7 +399,7 @@ try {
         ($sidecar.encoder -eq $encoder)
 
     # Step 7 -- library.list: the new clip present and first (newest-first).
-    Write-Host "[7/10] Checking library.list..."
+    Write-Host "[7/9] Checking library.list..."
     $listResp = Send-TrixCommand -Conn $conn -Cmd 'library.list' -Arguments @{ offset = 0; limit = 50 }
     Confirm-Check "library.list returns ok:true" ([bool]$listResp.ok) (Get-JsonProp $listResp 'error')
     $clips = @($listResp.data.clips)
@@ -324,7 +408,7 @@ try {
     Confirm-Check "the new clip is first in library.list" ($firstId -eq $clipId) "first=$firstId expected=$clipId"
 
     # Step 8 -- disarm.
-    Write-Host "[8/10] Disarming..."
+    Write-Host "[8/9] Disarming..."
     $disarmResp = Send-TrixCommand -Conn $conn -Cmd 'disarm'
     Confirm-Check "disarm returns ok:true" ([bool]$disarmResp.ok) (Get-JsonProp $disarmResp 'error')
     $didDisarm = $true
@@ -333,7 +417,7 @@ try {
     $conn = $null
 
     # Step 9 -- the single-instance slot must be free again.
-    Write-Host "[9/10] Confirming the single-instance slot is free (trix.exe replay --exit-after 3)..."
+    Write-Host "[9/9] Confirming the single-instance slot is free (trix.exe replay --exit-after 3)..."
     $replayOutput = & $TrixPath replay --exit-after 3
     $replayExit = $LASTEXITCODE
     $replayOutput | ForEach-Object { Write-Host "  | $_" }
