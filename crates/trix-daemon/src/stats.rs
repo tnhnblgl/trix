@@ -67,7 +67,11 @@ pub fn spawn_stats_thread(daemon: Arc<Daemon>, poll: Duration) -> Result<()> {
 /// other input the loop reads (who is subscribed, what the interval is, what
 /// time it is) stays real. The idle case does not need the seam and does not
 /// use it: `a_subscribed_but_idle_daemon_is_sent_nothing` below drives
-/// [`spawn_stats_thread`] itself, so the production wiring is covered too.
+/// [`spawn_stats_thread`] itself — though that test asserts nothing *arrives*,
+/// so what it establishes is that the real `Daemon::stats_json` stays silent on
+/// an unarmed daemon, not that the delivering path is wired up. Nothing here
+/// proves an armed daemon broadcasts; only hand verification against real
+/// capture hardware does, which is what Step 5 of the task brief is for.
 fn spawn_sampling(
     daemon: Arc<Daemon>,
     poll: Duration,
@@ -189,7 +193,16 @@ mod tests {
     }
 
     fn expect_quiet(rx: &Receiver<String>, why: &str) {
-        if let Ok(line) = rx.recv_timeout(QUIET) {
+        expect_quiet_for(rx, QUIET, why);
+    }
+
+    /// [`expect_quiet`] with the window named explicitly, for the one test
+    /// whose claim is about an *interval* rather than about the loop being
+    /// idle. A quiet window has to outlast the wait it rules out: watching for
+    /// 200 ms proves nothing about whether the next event is a second away or
+    /// an hour away, because neither would have arrived yet.
+    fn expect_quiet_for(rx: &Receiver<String>, window: Duration, why: &str) {
+        if let Ok(line) = rx.recv_timeout(window) {
             panic!("an event arrived that should not have: {why}\nline: {line}");
         }
     }
@@ -284,8 +297,15 @@ mod tests {
         // from the next event onward, not retroactively.
         expect_stats(&rx, "the deadline already set is honoured at its original length");
         // And *that* broadcast re-read the config, so the one after it is an
-        // hour away rather than another second.
-        expect_quiet(&rx, "the new interval was picked up without restarting the thread");
+        // hour away rather than another second. The window has to outlast the
+        // second it rules out — with the default 200 ms this assertion would
+        // hold just as well if the interval had been read once at thread start,
+        // which is exactly the bug it exists to catch.
+        expect_quiet_for(
+            &rx,
+            Duration::from_millis(1_500),
+            "the new interval was picked up without restarting the thread",
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

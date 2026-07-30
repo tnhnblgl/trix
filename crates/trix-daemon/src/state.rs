@@ -1251,6 +1251,17 @@ mod tests {
     /// the same way `config.get`'s key set is derived from `Config` rather than
     /// hand-written. It fails on the day the key is added, not on the day a
     /// user sets it to four billion.
+    ///
+    /// Its reach is exactly "numeric in a serialized `Config::default()`",
+    /// which is every field `Config` has today (six `u32`s) but is not the
+    /// same claim as "every future field". An `Option<u32>` defaulting to
+    /// `None` serializes as `null`, so this loop would skip it and the key
+    /// would reach `config.set` unbounded; a signed or floating key would be
+    /// forced into the table here, but `check_ranges` reads values through
+    /// `as_u64`, which is `None` for a negative, so the bound would never
+    /// fire. Both want a change to `check_ranges`, not just a row in the
+    /// table — noted here so a later reader does not take this test for more
+    /// cover than it gives.
     #[test]
     fn every_numeric_config_key_is_range_checked() {
         let defaults = config_object(&Config::default()).expect("the config serializes");
