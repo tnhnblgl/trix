@@ -22,3 +22,4 @@ pub mod clients;
 pub mod dispatch;
 pub mod pipe;
 pub mod state;
+pub mod stats;

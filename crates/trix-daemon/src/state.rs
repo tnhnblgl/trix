@@ -195,7 +195,7 @@ pub struct ArmOutcome {
 /// `clip_dir` is read per clip, `stats_seconds` per stats tick, and
 /// `clip_hotkey` belongs to `trix replay`'s own loop rather than to anything the
 /// daemon arms.
-pub const REQUIRES_REARM: [&str; 7] = [
+pub(crate) const REQUIRES_REARM: [&str; 7] = [
     "fps",
     "bitrate_kbps",
     "max_bitrate_kbps",
@@ -204,6 +204,78 @@ pub const REQUIRES_REARM: [&str; 7] = [
     "monitor_index",
     "gpu_priority",
 ];
+
+/// The accepted range of every numeric config key, as `(key, min, max)`.
+///
+/// Sanity bounds, not a product policy. Their job is to reject the absurd —
+/// the values that turn one socket line into a machine-wide failure — and to
+/// leave every value a person might plausibly want alone. Serde's
+/// `from_value` is airtight about *type* and says nothing about *magnitude*,
+/// and `replay_seconds` proves why that gap matters: `{"replay_seconds":
+/// 4294967295}` deserializes cleanly, persists, and at the next `arm` becomes a
+/// 136-year retention window, so `replay.rs`'s eviction never evicts and the
+/// ring grows until the process is OOM-killed. `bitrate_kbps` blows the same
+/// RAM bound from the other side, since the ring's size is seconds × bitrate.
+/// The precedent is `MAX_LIST_LIMIT` in `trix-proto`, which clamps
+/// `library.list` for the same reason: a number off the wire that nothing else
+/// bounds.
+///
+/// Why each number:
+/// - `fps` 1..=480 — 0 persists a config nothing can arm from (`replay.rs` and
+///   `capture/mod.rs` both `.max(1)`, so it survives, but only by ignoring
+///   what the user asked for); 480 clears the fastest display anyone captures.
+/// - `bitrate_kbps` 1..=200_000 — 200 Mbit/s is far above any real capture,
+///   and 0 would ask the encoder for no bits at all.
+/// - `max_bitrate_kbps` 0..=200_000 — 0 stays legal because it is the
+///   documented "auto" (1.5× target), and is the default.
+/// - `replay_seconds` 1..=600 — the ring is RAM, so ten minutes is the outer
+///   bound; 0 would be a ring with nothing in it to clip.
+/// - `monitor_index` 0..=63 — more attached displays than any consumer GPU
+///   drives, and an out-of-range index only fails at `arm` anyway.
+/// - `stats_seconds` 0..=86_400 — 0 stays legal because it is the documented
+///   "no periodic log line", and is the default; a day is the outer bound.
+///
+/// The keys deliberately absent are the non-numeric ones. `rate_control` and
+/// `gpu_priority` both document falling back on an unknown value
+/// (`Config::rate_control`, `Config::gpu_priority_low`) and that behaviour is
+/// not this constant's to change; `clip_hotkey` is parsed by `trix replay`'s
+/// own loop; `clip_dir` is any path the user likes. What the table *must* not
+/// do is fall silently behind `Config`, so
+/// `every_numeric_config_key_is_range_checked` fails the build the day a
+/// numeric key is added without a bound here.
+const NUMERIC_BOUNDS: [(&str, u64, u64); 6] = [
+    ("fps", 1, 480),
+    ("bitrate_kbps", 1, 200_000),
+    ("max_bitrate_kbps", 0, 200_000),
+    ("replay_seconds", 1, 600),
+    ("monitor_index", 0, 63),
+    ("stats_seconds", 0, 86_400),
+];
+
+/// Refuses the whole request if any bounded key is out of range.
+///
+/// Runs before anything is merged, deserialized, or written, so a rejection has
+/// touched neither the daemon's in-memory config nor the file — `config.set` is
+/// all-or-nothing across the whole `values` map, and a settings page that sent
+/// five keys and got an error must not have to guess which two landed.
+///
+/// Only values that are already non-negative whole numbers are checked here.
+/// A `-1`, a `1.5`, or a `"sixty"` is not a range problem but a *type* problem,
+/// and [`Daemon::set_config`]'s existing per-key retry produces a far better
+/// message for it ("does not accept …") than a range would. Skipping those here
+/// lets each error say the true thing.
+fn check_ranges(values: &Map<String, Value>) -> Result<()> {
+    for (key, value) in values {
+        let Some(&(_, min, max)) = NUMERIC_BOUNDS.iter().find(|(name, _, _)| name == key) else {
+            continue;
+        };
+        let Some(number) = value.as_u64() else { continue };
+        if number < min || number > max {
+            bail!("config.set: {key:?} accepts {min} to {max}, not {number}");
+        }
+    }
+    Ok(())
+}
 
 /// What `stats_seconds = 0` means to the control socket: one event a second.
 ///
@@ -217,7 +289,7 @@ const DEFAULT_STATS_SECONDS: u32 = 1;
 
 /// What `config.set` did (spec §4.3: "accepted values + which keys require a
 /// re-arm to take effect").
-pub struct ConfigUpdate {
+pub(crate) struct ConfigUpdate {
     /// The keys that were applied, with the values as they now stand — read
     /// back out of the saved config rather than echoed from the request, so a
     /// UI repaints from what the daemon holds and not from what it asked for.
@@ -303,7 +375,7 @@ impl Daemon {
     /// [`crate::pipe::serve_at`] is to `pipe::serve`, and for the same reason:
     /// without it, a test that exercises `config.set` at all would rewrite the
     /// settings of whoever ran `cargo test`.
-    pub fn new_at(config: Config, config_path: Option<PathBuf>) -> Self {
+    pub(crate) fn new_at(config: Config, config_path: Option<PathBuf>) -> Self {
         // One scan, at startup. A failure here is not fatal: an unreadable clip
         // directory must not stop the daemon from arming and capturing.
         let library = match scan_and_log(&config.clip_dir_path()) {
@@ -484,8 +556,11 @@ impl Daemon {
     ///
     /// Nothing is applied and nothing is written unless *every* key is
     /// acceptable — a settings page that sent five keys and got an error must
-    /// not have to guess which two landed.
-    pub fn set_config(&self, values: &Map<String, Value>) -> Result<ConfigUpdate> {
+    /// not have to guess which two landed. "Acceptable" is three separate
+    /// gates: the key is one `Config` has, its value is in range
+    /// ([`NUMERIC_BOUNDS`]), and it deserializes at the right type. All three
+    /// run before the file is opened.
+    pub(crate) fn set_config(&self, values: &Map<String, Value>) -> Result<ConfigUpdate> {
         // The known-key set is read off a serialized `Config::default()`, not
         // listed here, for the same reason `config_json` serializes: a config
         // key added later is settable without anyone remembering this function
@@ -497,6 +572,9 @@ impl Daemon {
                 bail!("config.set: unknown key {key:?} (known keys: {})", known.join(", "));
             }
         }
+        // Before the lock, before the merge, before the file: an out-of-range
+        // value has cost nothing but the check by the time it is refused.
+        check_ranges(values)?;
 
         // Held across the write, deliberately. `config.set` is a
         // read-modify-write of the whole file: two clients setting different
@@ -560,7 +638,11 @@ impl Daemon {
     // --- Statistics ---------------------------------------------------------
 
     /// The live engine's counters, or `None` when nothing is armed.
-    pub fn engine_status(&self) -> Option<EngineStatus> {
+    ///
+    /// Private: [`Self::stats_json`] two methods below is the only caller, and
+    /// a second one would be a second place that has to know `EngineStatus`
+    /// only exists while armed.
+    fn engine_status(&self) -> Option<EngineStatus> {
         self.lock_armed().as_ref().map(|state| state.engine.status())
     }
 
@@ -1161,6 +1243,72 @@ mod tests {
 
         let daemon = Daemon::new(Config { stats_seconds: 5, ..Config::default() });
         assert_eq!(daemon.stats_interval(), Duration::from_secs(5), "an explicit interval wins");
+    }
+
+    /// The guard that makes [`NUMERIC_BOUNDS`] a *rule* rather than a list
+    /// somebody once wrote. Every numeric key `Config` serializes has to have a
+    /// bound, so a config key added later cannot reach `config.set` unchecked —
+    /// the same way `config.get`'s key set is derived from `Config` rather than
+    /// hand-written. It fails on the day the key is added, not on the day a
+    /// user sets it to four billion.
+    #[test]
+    fn every_numeric_config_key_is_range_checked() {
+        let defaults = config_object(&Config::default()).expect("the config serializes");
+        for (key, value) in &defaults {
+            if !value.is_number() {
+                continue;
+            }
+            assert!(
+                NUMERIC_BOUNDS.iter().any(|(name, _, _)| name == key),
+                "{key:?} is a numeric config key with no entry in NUMERIC_BOUNDS — config.set \
+                 would take any value serde can coerce, including one that costs the machine its \
+                 memory"
+            );
+        }
+
+        // And nothing in the table names a key that no longer exists, which
+        // would be a bound quietly guarding nothing.
+        for (key, _, _) in NUMERIC_BOUNDS {
+            assert!(defaults.contains_key(key), "NUMERIC_BOUNDS names {key:?}, which Config has not");
+        }
+    }
+
+    /// The refusal itself, at the state layer: it names the key, the value and
+    /// the range, and it is an error rather than a panic. `dispatch.rs` covers
+    /// the wire behaviour and the "wrote nothing" half.
+    #[test]
+    fn an_out_of_range_value_is_refused_with_the_range_in_the_message() {
+        let daemon = Daemon::new_at(Config::default(), None);
+        let mut values = Map::new();
+        values.insert("replay_seconds".to_string(), Value::from(u32::MAX));
+
+        let error = match daemon.set_config(&values) {
+            Ok(_) => panic!("a 136-year replay ring is not a setting"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(error.contains("replay_seconds"), "the error names the key: {error}");
+        assert!(error.contains("4294967295"), "the error quotes the value: {error}");
+        assert!(error.contains("600"), "the error states the accepted range: {error}");
+    }
+
+    /// Out-of-range is checked; wrong-*type* is still reported as the type
+    /// error it is, because "must be 1 to 480" is a poor description of
+    /// `"sixty"`. The two messages must not swap places.
+    #[test]
+    fn a_wrong_type_value_still_gets_the_type_error_not_a_range_error() {
+        let daemon = Daemon::new_at(Config::default(), None);
+        let mut values = Map::new();
+        values.insert("fps".to_string(), Value::from("sixty"));
+
+        let error = match daemon.set_config(&values) {
+            Ok(_) => panic!("fps is a number"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(error.contains("fps"), "the error names the key: {error}");
+        assert!(
+            error.contains("does not accept"),
+            "a string fps is a type problem, not a range problem: {error}"
+        );
     }
 
     /// `clip` has to name the missing step rather than reporting some internal

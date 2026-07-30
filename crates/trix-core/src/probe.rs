@@ -22,7 +22,7 @@ use windows::{
             MFVideoFormat_HEVC,
         },
         System::{
-            Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree},
+            Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize},
             LibraryLoader::{GetModuleHandleW, GetProcAddress},
             SystemInformation::OSVERSIONINFOW,
         },
@@ -245,16 +245,36 @@ const CODEC_LABEL_WIDTH: usize = 5;
 /// encoder — the same rule the report has always used, kept here rather than in
 /// the printer so `encoders.list` offers a UI the same set the report describes.
 pub fn encoders() -> Result<Vec<EncoderInfo>> {
+    // COM outermost, Media Foundation inside it, each balanced on every path.
+    // The `?` here is what makes the pairing correct rather than merely
+    // symmetrical: `HRESULT::ok()` treats `S_OK` *and* `S_FALSE` as success,
+    // and those are exactly the two returns that incremented this thread's
+    // initialization count and therefore owe a `CoUninitialize`. The one
+    // return that must **not** be paired — `RPC_E_CHANGED_MODE`, meaning the
+    // thread is already in a single-threaded apartment and this call did
+    // nothing — is a failure HRESULT, so it leaves through the `?` above the
+    // uninitialize instead of through it.
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
         .ok()
         .context("CoInitializeEx failed")?;
+
+    // Whichever way the enumeration went. The single-pass version returned
+    // early on an enumeration failure and left both of these unbalanced; that
+    // never mattered for a one-shot `trix probe`, but `encoders.list` is
+    // answered on a long-lived daemon that a UI can call as often as it likes,
+    // and each unbalanced call would bump the calling session thread's COM
+    // count for the life of that connection.
+    let found = enumerate_with_media_foundation();
+    unsafe { CoUninitialize() };
+    found
+}
+
+/// [`encoders`]'s body between `MFStartup` and `MFShutdown`, split out so the
+/// startup is paired by function scope rather than by a reader tracking two
+/// early returns. The caller owns the COM half of the same pattern.
+fn enumerate_with_media_foundation() -> Result<Vec<EncoderInfo>> {
     unsafe { MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET) }.context("MFStartup failed")?;
 
-    // Media Foundation is shut down whichever way the enumeration went. The
-    // single-pass version returned early on an enumeration failure and left
-    // `MFStartup` unbalanced; that never mattered for a one-shot `trix probe`,
-    // but `encoders.list` is answered on a long-lived daemon that a UI can call
-    // as often as it likes.
     let found = enumerate_encoders();
     let shutdown = unsafe { MFShutdown() }.context("MFShutdown failed");
 

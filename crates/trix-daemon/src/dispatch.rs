@@ -584,6 +584,120 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Type coercion is not the only thing that can make a setting absurd.
+    /// `{"replay_seconds": 4294967295}` deserializes cleanly and would be a
+    /// 136-year retention window at the next `arm` — `evict` would never evict
+    /// and the ring would grow until the process was OOM-killed. Two socket
+    /// lines must not be able to do that, so every numeric key carries a sanity
+    /// range and an out-of-range value is refused *by name, with the range*,
+    /// having written nothing.
+    #[test]
+    fn config_set_refuses_an_out_of_range_value_for_every_bounded_key() {
+        let (daemon, path, dir) = with_scratch_config("range");
+
+        // One real write first, so the "unchanged" assertions below compare a
+        // file that exists against itself rather than against absence — the
+        // weaker check the refusal tests above already make.
+        let seed = daemon.dispatch(1, &request_with(1, "config.set", &[("fps", 30.into())]));
+        assert!(seed.ok, "the seed write must land: {:?}", seed.error);
+        let before = std::fs::read(&path).unwrap();
+
+        for (key, bad) in [
+            ("fps", 0u64),
+            ("fps", 481),
+            ("bitrate_kbps", 0),
+            ("bitrate_kbps", 200_001),
+            ("max_bitrate_kbps", 200_001),
+            ("replay_seconds", 0),
+            ("replay_seconds", 601),
+            ("replay_seconds", u64::from(u32::MAX)),
+            ("monitor_index", 64),
+            ("stats_seconds", 86_401),
+        ] {
+            let response =
+                daemon.dispatch(1, &request_with(2, "config.set", &[(key, bad.into())]));
+            assert!(!response.ok, "config.set accepted {key} = {bad}");
+            let error = response.error.unwrap_or_default();
+            assert!(error.contains(key), "the error must name the key: {error}");
+            assert!(
+                error.contains(&bad.to_string()),
+                "the error must quote the value it refused: {error}"
+            );
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                before,
+                "a refused {key} = {bad} must leave the file byte-unchanged"
+            );
+        }
+
+        // Mixed: one key the daemon would happily take, one it will not. All
+        // or nothing across the whole map — a partial write is worse than a
+        // rejection, because a settings page cannot tell which half landed.
+        let mixed = daemon.dispatch(
+            1,
+            &request_with(
+                3,
+                "config.set",
+                &[("bitrate_kbps", 12_000.into()), ("replay_seconds", 9_999.into())],
+            ),
+        );
+        assert!(!mixed.ok, "one out-of-range key refuses the whole request");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "the valid half of a mixed request must not reach the disk either"
+        );
+        let after = daemon.dispatch(1, &request(4, "config.get")).data.unwrap();
+        assert_eq!(
+            after.get("bitrate_kbps").and_then(Value::as_u64),
+            Some(8_000),
+            "nor the daemon's own memory"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The bounds are inclusive at both ends, and the two documented zeroes
+    /// (`max_bitrate_kbps` = auto, `stats_seconds` = no periodic log line, both
+    /// of them defaults) stay legal. A bound that quietly refused the shipping
+    /// default would be worse than no bound at all.
+    #[test]
+    fn config_set_accepts_both_ends_of_every_range() {
+        let (daemon, path, dir) = with_scratch_config("bounds");
+
+        for (key, edge) in [
+            ("fps", 1u64),
+            ("fps", 480),
+            ("bitrate_kbps", 1),
+            ("bitrate_kbps", 200_000),
+            ("max_bitrate_kbps", 0),
+            ("max_bitrate_kbps", 200_000),
+            ("replay_seconds", 1),
+            ("replay_seconds", 600),
+            ("monitor_index", 0),
+            ("monitor_index", 63),
+            ("stats_seconds", 0),
+            ("stats_seconds", 86_400),
+        ] {
+            let response =
+                daemon.dispatch(1, &request_with(5, "config.set", &[(key, edge.into())]));
+            assert!(
+                response.ok,
+                "config.set refused {key} = {edge}, which is on the boundary: {:?}",
+                response.error
+            );
+            let data = response.data.expect("an accepted config.set carries data");
+            assert_eq!(
+                data.pointer(&format!("/accepted/{key}")).and_then(Value::as_u64),
+                Some(edge),
+                "the boundary value must be reported back as accepted, not silently clamped"
+            );
+        }
+        assert!(path.exists(), "an accepted config.set writes the file");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// `fps` is baked into `RecorderSettings` when the engine is spawned, so
     /// setting it changes the file and nothing that is already capturing. The
     /// response says so; it does not re-arm, because tearing down a live replay

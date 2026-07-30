@@ -143,19 +143,18 @@ impl Config {
             .unwrap_or_else(|| PathBuf::from("."))
     }
 
-    /// Writes the config back to `%APPDATA%\trix\config.toml`, creating the
-    /// directory. Used by `config.set`.
-    pub fn save(&self) -> Result<()> {
-        let path = Self::path().context("APPDATA is not set")?;
-        self.save_to(&path)
-    }
-
-    /// [`Self::save`]'s body, against an explicit path.
+    /// Writes the config to `path`, creating the directory. Used by
+    /// `config.set`.
     ///
-    /// Exists so a test can persist somewhere other than the developer's real
-    /// `%APPDATA%\trix\config.toml` — the same seam `pipe::serve_at` is to
-    /// `pipe::serve`. Without it, exercising `config.set` at all would rewrite
-    /// the settings of whoever ran `cargo test`.
+    /// Takes the path rather than deriving `%APPDATA%\trix\config.toml`
+    /// itself, and there used to be a `save()` above that did the deriving —
+    /// it is gone because nothing called it. The daemon holds its own
+    /// `config_path` (`state::Daemon`, resolved once from [`Self::path`] at
+    /// construction) precisely so a test can persist somewhere other than the
+    /// developer's real settings file, the same seam `pipe::serve_at` is to
+    /// `pipe::serve`. With every caller already holding a path, a second
+    /// entry point that quietly picked the real one was a trap rather than a
+    /// convenience.
     pub fn save_to(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
