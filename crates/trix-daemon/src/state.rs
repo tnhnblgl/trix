@@ -817,6 +817,16 @@ impl Daemon {
     /// that to a shell would be an injection with the user's own token.
     /// `std::process::Command` passes the path as one argument.
     ///
+    /// A missing `.mp4` is an error here and, unlike [`Daemon::delete`], does
+    /// *not* evict the stale cache row. The asymmetry is deliberate: `delete`
+    /// is a mutation the user asked for and its whole job is to make the row go
+    /// away, so discovering the file was already gone is just an earlier route
+    /// to the same outcome. `reveal` is read-shaped — a UI sends it on a click,
+    /// sometimes on hover — and a read that silently deletes the row the user
+    /// was pointing at would surprise far more than the stale row does. The
+    /// stale row still has a route out: the `delete` the user reaches for next,
+    /// or the `library.refresh` a later plan owns.
+    ///
     /// Explorer's exit code is not checked, and the child is not waited on:
     /// `explorer.exe /select,` routinely returns non-zero after opening the
     /// window correctly (it hands the request to the already-running shell

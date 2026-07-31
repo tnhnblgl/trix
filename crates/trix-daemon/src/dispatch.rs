@@ -795,8 +795,15 @@ mod tests {
     /// The settings dropdowns' data source, over the wire. Named-array shape
     /// (`{"monitors":[…]}`) so a client never has to tell a bare array from an
     /// object, and `index` really is a `config.monitor_index` value.
+    ///
+    /// Renamed from `..._answers_with_the_data_the_probe_prints`, which
+    /// over-claimed: nothing here compares anything to what `trix probe`
+    /// prints. The body was always fine — it asserts the wire shape a dropdown
+    /// binds to — but a reader auditing coverage stops at the name, and a name
+    /// that promises a cross-check nobody wrote is how a reviewer concludes
+    /// something is covered when it is not.
     #[test]
-    fn monitors_list_answers_with_the_data_the_probe_prints() {
+    fn monitors_list_answers_with_the_wire_shape_a_dropdown_binds() {
         let response = idle("monitors").dispatch(1, &request(2, "monitors.list"));
         assert!(response.ok, "monitors.list must be answered now: {:?}", response.error);
         let data = response.data.expect("monitors.list carries data");
@@ -817,8 +824,13 @@ mod tests {
     /// The encoder dropdown. Every entry has to be nameable and its hardware
     /// flag has to be there, because "software fallback" is exactly the thing a
     /// user needs to see before they wonder why their game got slower.
+    ///
+    /// Renamed from `encoders_list_names_the_real_mfts` for the reason given on
+    /// the monitors test above: the list does come from `MFTEnumEx`, but this
+    /// test asserts JSON key presence and says nothing about *which* MFTs, so
+    /// the old name promised a cross-check that is not here.
     #[test]
-    fn encoders_list_names_the_real_mfts() {
+    fn encoders_list_answers_with_the_wire_shape_a_dropdown_binds() {
         let response = idle("encoders").dispatch(1, &request(3, "encoders.list"));
         assert!(response.ok, "encoders.list must be answered now: {:?}", response.error);
         let data = response.data.expect("encoders.list carries data");

@@ -131,21 +131,48 @@ Argument shapes below use `{clip_id}`, not `{id}`: `id` is already taken by the 
 correlation id in the same flattened object (§4.2), so a clip identifier needs a different
 name on the wire.
 
-| Command | Returns |
-|---|---|
-| `status` | armed, encoder, monitor, ring seconds used/total, daemon version |
-| `arm` / `disarm` | new armed state |
-| `clip` | clip metadata for the clip just saved |
-| `config.get` | full effective config |
-| `config.set` | accepted values + which keys require a re-arm to take effect |
-| `library.list` | `{offset, limit}` → paged clip metadata, newest first |
-| `library.delete` | `{clip_id}` — removes mp4, json, and jpg |
-| `library.rename` | `{clip_id, title}` — edits metadata only, filename never moves |
-| `library.favorite` | `{clip_id, favorite}` |
-| `library.reveal` | `{clip_id}` — opens Explorer with the file selected |
-| `library.export` | `{clip_id, dest, start_ms, end_ms, mode}` — see §6.3. **Arrives in stage 4** with trim/export in the desktop app; not present in stage 2 or 3 |
-| `monitors.list` / `encoders.list` | real probe data for the settings dropdowns |
-| `stats.subscribe` | `{enabled}` → acknowledgement echoing the subscribed state; subscribes/unsubscribes this connection to `stats` events (§4.4) |
+The `Returns` column below describes the `data` object of the success response —
+`{"id":…,"ok":true,"data":{…}}`. A failure is always
+`{"id":…,"ok":false,"error":"…"}` with no `data`, for every command. A
+third-party UI binds to these shapes, so they are published here rather than
+left to be reverse-engineered out of `dispatch.rs`.
+
+**Wrapping convention.** Three rules, applied consistently:
+
+1. **A list is always wrapped under a name** — `{"clips":[…]}`, `{"monitors":[…]}`,
+   `{"encoders":[…]}`. Never a bare array, so a client never has to tell an array
+   from an object before it can parse a response, and so a list can grow siblings
+   (`total`, `offset`) without changing type.
+2. **A single clip is sent bare** — `clip`, `library.rename` and `library.favorite`
+   put the `ClipMeta` object (§5.2) directly in `data`, with no wrapper key. It is
+   already an object and already self-describing; wrapping it would buy nothing.
+3. **A command with nothing to return still names what it acted on** —
+   `library.delete` and `library.reveal` answer `{"clip_id":"…"}` so a UI that
+   pipelined several can act on the right row without keeping its own
+   request-id-to-clip table. `disarm` has no subject and answers `{}`.
+
+| Command | Arguments | Returns (`data`) |
+|---|---|---|
+| `status` | — | `{armed, encoder, monitor_index, ring_seconds_used, ring_seconds_total, version, clip_dir}`. `encoder` is `null` when disarmed, and may be `null` for up to one engine tick after `arm` |
+| `arm` | — | the same object `status` returns. Idempotent: re-arming an armed daemon answers normally and broadcasts no `armed` event |
+| `disarm` | — | `{}`. Idempotent: disarming an idle daemon is `ok:true` and broadcasts nothing |
+| `clip` | — | the `ClipMeta` (§5.2) of the clip just saved, bare. An empty ring is an *error* response, not an `ok` with no clip |
+| `config.get` | — | every `Config` key, plus `clip_dir_resolved` — the absolute directory an empty `clip_dir` actually resolves to. `clip_dir_resolved` is not a config key and is not settable |
+| `config.set` | `{<key>: <value>, …}` | `{accepted:{<key>:<value>,…}, requires_rearm:[<key>,…]}`. `accepted` is read back out of the saved config, not echoed from the request. All-or-nothing: one bad key refuses the whole request and writes nothing |
+| `library.list` | `{offset, limit}` | `{clips:[ClipMeta,…], total, offset}`, newest first. `total` is the *unpaged* count, so "3 of 47" is renderable; `offset` is echoed back |
+| `library.delete` | `{clip_id}` | `{clip_id}` — removes mp4, json, and jpg |
+| `library.rename` | `{clip_id, title}` | the updated `ClipMeta`, bare — edits metadata only, the filename never moves, so the id is unchanged |
+| `library.favorite` | `{clip_id, favorite}` | the updated `ClipMeta`, bare |
+| `library.reveal` | `{clip_id}` | `{clip_id}` — opens Explorer with the file selected |
+| `library.export` | `{clip_id, dest, start_ms, end_ms, mode}` | see §6.3. **Arrives in stage 4** with trim/export in the desktop app; not present in stage 2 or 3 |
+| `monitors.list` | — | `{monitors:[{index, name, width, height, left, top, adapter},…]}`. `index` is a `config.monitor_index` value, not an ordinal |
+| `encoders.list` | — | `{encoders:[{name, codec, hardware},…]}`. `hardware:false` is what a settings page warns on |
+| `stats.subscribe` | `{enabled}` | `{enabled}`, echoing the state this connection is now in. Per-connection, not daemon state: two UIs may disagree. Subscribes/unsubscribes this connection to `stats` events (§4.4) |
+
+An unknown `clip_id` and a syntactically invalid one are both plain error
+responses. Clip ids are validated against `YYYYMMDD_HHMMSS[_N]` before they are
+joined to any path, so a hostile id is refused at the boundary rather than
+reaching the filesystem.
 
 ### 4.4 Events
 
