@@ -630,10 +630,27 @@ fn run_driven_inner(
                 } else {
                     failures += 1;
                 }
-                println!(
-                    "capture session lost (display change / device reset?) — \
-                     rebuilding, replay ring restarts empty"
-                );
+                // Gated on the same signal the banner at the bottom of
+                // `start_session` uses. `run_driven` passes `print_clips:
+                // false` precisely so the daemon stays silent on stdout, and
+                // this line escaped it. Beyond the inconsistency, `println!`
+                // panics when the write fails, and this is a `panic = "abort"`
+                // build: a daemon launched without a valid stdout handle (a
+                // tray process created with CREATE_NO_WINDOW and no
+                // redirection) would abort here, holding a live replay ring,
+                // the first time a display change reached this line. The CLI's
+                // wording is unchanged.
+                if options.print_clips {
+                    println!(
+                        "capture session lost (display change / device reset?) — \
+                         rebuilding, replay ring restarts empty"
+                    );
+                } else {
+                    tracing::warn!(
+                        "capture session lost (display change / device reset?) — \
+                         rebuilding, replay ring restarts empty"
+                    );
+                }
             }
             Err(e) if !ever_ran => return Err(e),
             Err(e) => {
@@ -794,7 +811,16 @@ fn run_session(
             Ok(EngineCommand::Stop) => break,
             Err(RecvTimeoutError::Timeout) => {
                 if control::shutdown_requested() {
-                    println!("stop requested — closing replay buffer");
+                    // Same gating, and the same reason, as the rebuild line in
+                    // `run_driven_inner`: on the daemon's engine thread stdout
+                    // may not exist, and an unguarded `println!` there is an
+                    // abort with a live ring in hand. `trix replay`'s output is
+                    // byte-identical.
+                    if options.print_clips {
+                        println!("stop requested — closing replay buffer");
+                    } else {
+                        tracing::info!("stop requested — closing replay buffer");
+                    }
                     break;
                 }
                 if capture.is_finished() {
