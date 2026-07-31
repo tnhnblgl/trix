@@ -34,6 +34,20 @@ pub const PIPE_NAME: &str = r"\\.\pipe\trix-control";
 
 const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
 
+/// The pipe mode word every instance is created with.
+///
+/// Hoisted out of the [`CreateNamedPipeW`] call so that
+/// `PIPE_REJECT_REMOTE_CLIENTS` — half of the transport's security story, and a
+/// binding constraint of spec §4.1 — is something a test can assert on. Unlike
+/// the DACL it cannot be read back off a live handle, so a named constant is
+/// the only place the claim can be pinned; see
+/// `the_pipe_mode_rejects_remote_clients` below, which fails the day someone
+/// edits these flags.
+const PIPE_MODE: windows::Win32::System::Pipes::NAMED_PIPE_MODE =
+    windows::Win32::System::Pipes::NAMED_PIPE_MODE(
+        PIPE_TYPE_BYTE.0 | PIPE_READMODE_BYTE.0 | PIPE_WAIT.0 | PIPE_REJECT_REMOTE_CLIENTS.0,
+    );
+
 /// How often an idle connection wakes to flush queued events. A UI blocked in
 /// `read_line_capped` cannot be written to — a synchronous pipe serializes I/O
 /// on the file object — so the loop must never park indefinitely.
@@ -153,7 +167,7 @@ fn create_instance(name: &str, security: &LocalSecurityDescriptor, first: bool) 
         CreateNamedPipeW(
             &HSTRING::from(name),
             open_mode,
-            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            PIPE_MODE,
             PIPE_UNLIMITED_INSTANCES,
             PIPE_BUFFER_BYTES,
             PIPE_BUFFER_BYTES,
@@ -559,13 +573,139 @@ mod tests {
         assert_eq!(PIPE_NAME, r"\\.\pipe\trix-control");
     }
 
-    /// The DACL is the whole security story: `D:P` protects it from inheriting
-    /// a permissive default, and the single ACE grants the current user alone.
+    /// The SDDL *string builder*, and only that. Kept because the literal is
+    /// the published form, but note what it does not say: nothing here proves
+    /// the string ever reaches a pipe. That claim belongs to
+    /// `the_live_pipe_carries_the_user_only_dacl` below, which is the test that
+    /// fails if the security attributes are dropped from `CreateNamedPipeW`.
     #[test]
     fn the_security_descriptor_grants_only_this_user() {
         let sid = current_user_sid_string().expect("current user must have a SID");
         assert!(sid.starts_with("S-1-"), "unexpected SID form: {sid}");
         assert_eq!(sddl_for(&sid), format!("D:P(A;;GA;;;{sid})"));
+    }
+
+    /// The DACL as the kernel actually holds it, read back off a live pipe.
+    ///
+    /// This exists because the string-builder test above is a tautology with
+    /// respect to the thing that matters. Replace `Some(&attributes as *const
+    /// _)` in `create_instance` with `None` and that test — and every other
+    /// test in the workspace — stays green while the pipe silently inherits the
+    /// permissive default DACL, which for a named pipe grants read access to
+    /// Everyone and to the anonymous account. Spec §4.1 makes the user-only
+    /// DACL a binding constraint; hand verification does not survive the next
+    /// refactor, so the constraint needs a test that can fail.
+    ///
+    /// Binds a pid-private name rather than the live [`PIPE_NAME`], for the
+    /// same reason [`serve_at`] exists: running the suite must not fight a
+    /// daemon that is already serving the real socket.
+    ///
+    /// What is asserted is deliberately not the exact ACE text. `GA`
+    /// (`GENERIC_ALL`) is mapped to the object type's specific rights when the
+    /// descriptor is applied, so the rights field comes back as a hex mask
+    /// rather than the `GA` that went in — asserting on it would pin an
+    /// implementation detail of the kernel's generic mapping. The three things
+    /// asserted are the three the security argument actually rests on: the DACL
+    /// is *protected* (`D:P`, so it did not inherit anything), it names this
+    /// user, and it contains exactly one allow ACE and no deny ACEs — so there
+    /// is nobody else on it.
+    #[test]
+    fn the_live_pipe_carries_the_user_only_dacl() {
+        use windows::Win32::Foundation::ERROR_SUCCESS;
+        use windows::Win32::Security::Authorization::{
+            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo,
+            SE_KERNEL_OBJECT,
+        };
+        use windows::Win32::Security::DACL_SECURITY_INFORMATION;
+
+        let sid = current_user_sid_string().expect("current user must have a SID");
+        let security = user_only_security_descriptor().expect("building the descriptor");
+        let name = format!(r"\\.\pipe\trix-dacl-test-{}", std::process::id());
+        let instance = create_instance(&name, &security, false).expect("binding the test pipe");
+
+        // The descriptor the kernel hands back is its own allocation, freed
+        // with `LocalFree` — hence the guard type, which also covers the early
+        // return an assertion failure would take.
+        let mut live = PSECURITY_DESCRIPTOR::default();
+        let status = unsafe {
+            GetSecurityInfo(
+                HANDLE(handle_of(&instance)),
+                SE_KERNEL_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                None,
+                None,
+                Some(&mut live),
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS, "GetSecurityInfo on the live pipe failed: {status:?}");
+        let live = LocalSecurityDescriptor(live);
+
+        let mut text = PWSTR::null();
+        unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                live.0,
+                SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION,
+                &mut text,
+                None,
+            )
+            .expect("converting the live descriptor back to SDDL");
+        }
+        let sddl = unsafe { text.to_string() }.expect("the live SDDL is valid UTF-16");
+        unsafe {
+            let _ = LocalFree(Some(windows::Win32::Foundation::HLOCAL(text.0.cast())));
+        }
+
+        assert!(
+            sddl.starts_with("D:P"),
+            "the live DACL is not protected, so it inherited a default: {sddl}"
+        );
+        assert!(
+            sddl.contains(&sid),
+            "the live DACL does not name this user ({sid}): {sddl}"
+        );
+        assert_eq!(
+            sddl.matches("(A;").count(),
+            1,
+            "the live DACL grants access to somebody other than this user: {sddl}"
+        );
+        assert_eq!(
+            sddl.matches("(D;").count(),
+            0,
+            "the live DACL carries a deny ACE, which this descriptor never builds: {sddl}"
+        );
+    }
+
+    /// `PIPE_REJECT_REMOTE_CLIENTS` is the other half of spec §4.1's transport
+    /// constraint, and unlike the DACL it cannot be read back off a handle —
+    /// which is exactly why the mode word is a named constant. Asserting on
+    /// [`PIPE_MODE`] is not a tautology the way asserting on `sddl_for` was:
+    /// `create_instance` passes this same constant to `CreateNamedPipeW`, so
+    /// there is one definition and no second copy to drift from.
+    #[test]
+    fn the_pipe_mode_rejects_remote_clients() {
+        assert_ne!(
+            PIPE_MODE.0 & PIPE_REJECT_REMOTE_CLIENTS.0,
+            0,
+            "a pipe that accepts remote clients is reachable from off the machine"
+        );
+        // The other three names in the word contribute no bits at all:
+        // `PIPE_TYPE_BYTE`, `PIPE_READMODE_BYTE` and `PIPE_WAIT` are Win32's
+        // defaults and are literally zero — it is their opposites
+        // (`PIPE_TYPE_MESSAGE`, `PIPE_READMODE_MESSAGE`, `PIPE_NOWAIT`) that
+        // carry bits. So `PIPE_MODE & PIPE_WAIT != 0` would be a *false*
+        // assertion, and the true claim is that none of those opposites is
+        // set. Pinning the whole word says exactly that, and fails either way:
+        // drop `PIPE_REJECT_REMOTE_CLIENTS` and it fails, add message framing
+        // or non-blocking I/O — both of which `serve_one` is not written for —
+        // and it fails too.
+        assert_eq!(
+            PIPE_MODE.0,
+            PIPE_REJECT_REMOTE_CLIENTS.0,
+            "the mode word changed; the session loop assumes a blocking byte stream (spec §4.1)"
+        );
     }
 
     #[test]
