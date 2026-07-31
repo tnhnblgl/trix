@@ -44,8 +44,7 @@ unsafe extern "system" fn on_console_ctrl(ctrl_type: u32) -> BOOL {
 /// Routes Ctrl+C / Ctrl+Break / console-close into a polled flag instead of
 /// process death, so sessions can finalize their MP4 before exiting.
 pub fn install_shutdown_handler() -> Result<()> {
-    unsafe { SetConsoleCtrlHandler(Some(on_console_ctrl), true) }
-        .context("SetConsoleCtrlHandler")
+    unsafe { SetConsoleCtrlHandler(Some(on_console_ctrl), true) }.context("SetConsoleCtrlHandler")
 }
 
 pub fn shutdown_requested() -> bool {

@@ -22,8 +22,7 @@ use windows::core::Interface;
 
 /// Histogram bucket upper bounds in microseconds. The last bucket is
 /// open-ended; 33 ms ≈ two frame intervals at 60 fps.
-const BOUNDS_US: [u64; 9] =
-    [500, 1_000, 2_000, 4_000, 8_000, 16_000, 33_000, 66_000, u64::MAX];
+const BOUNDS_US: [u64; 9] = [500, 1_000, 2_000, 4_000, 8_000, 16_000, 33_000, 66_000, u64::MAX];
 
 /// Fixed-size latency histogram: no allocation, O(1) record, quantiles read
 /// as "≤ bucket bound". Good enough to certify budgets, cheap enough to sit
@@ -236,7 +235,8 @@ mod tests {
 
     #[test]
     fn ws_minus_gpu_subtracts_both_segments_and_saturates() {
-        let report = MemoryReport { working_set: 100 << 20, gpu_local: 30 << 20, gpu_shared: 50 << 20 };
+        let report =
+            MemoryReport { working_set: 100 << 20, gpu_local: 30 << 20, gpu_shared: 50 << 20 };
         assert_eq!(report.ws_minus_gpu(), 20 << 20);
         let inverted = MemoryReport { gpu_shared: 90 << 20, ..report };
         assert_eq!(inverted.ws_minus_gpu(), 0);
@@ -251,8 +251,7 @@ mod tests {
     // Exercises the real OS counters; no D3D device needed for the CPU half.
     #[test]
     fn process_counters_are_live() {
-        let reporter =
-            StatsReporter { adapter: None, interval: None, next_at: Instant::now() };
+        let reporter = StatsReporter { adapter: None, interval: None, next_at: Instant::now() };
         let m = reporter.memory();
         assert!(m.working_set > 1 << 20, "working set should exceed 1 MiB");
         assert_eq!(m.gpu_local, 0);

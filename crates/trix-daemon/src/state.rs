@@ -972,10 +972,7 @@ mod tests {
             std::fs::write(trix_core::library::mp4_path(&dir, id), b"video").unwrap();
             trix_core::library::write_sidecar(&dir, &meta(id)).unwrap();
         }
-        let config = Config {
-            clip_dir: dir.to_string_lossy().into_owned(),
-            ..Config::default()
-        };
+        let config = Config { clip_dir: dir.to_string_lossy().into_owned(), ..Config::default() };
         let daemon = Daemon::new_at(config, None);
         daemon.rescan_library().unwrap();
         (daemon, dir)
@@ -1077,10 +1074,8 @@ mod tests {
 
         daemon.rename(id, "Ace on Ascent").unwrap();
 
-        let on_disk = trix_core::library::read_sidecar(
-            &trix_core::library::sidecar_path(&dir, id),
-        )
-        .unwrap();
+        let on_disk =
+            trix_core::library::read_sidecar(&trix_core::library::sidecar_path(&dir, id)).unwrap();
         assert_eq!(on_disk.title, "Ace on Ascent");
         assert_eq!(on_disk.id, id, "the id is the file stem and never changes");
         assert!(
@@ -1257,10 +1252,7 @@ mod tests {
         assert_eq!(object.get("armed"), Some(&serde_json::Value::Bool(false)));
         assert_eq!(object.get("encoder"), Some(&serde_json::Value::Null));
         assert_eq!(object.get("clip_dir").and_then(|v| v.as_str()), Some(r"D:\Clips"));
-        assert_eq!(
-            object.get("version").and_then(|v| v.as_str()),
-            Some(env!("CARGO_PKG_VERSION"))
-        );
+        assert_eq!(object.get("version").and_then(|v| v.as_str()), Some(env!("CARGO_PKG_VERSION")));
     }
 
     /// Nothing is armed, so there are no counters to report and the stats
@@ -1318,7 +1310,10 @@ mod tests {
         // And nothing in the table names a key that no longer exists, which
         // would be a bound quietly guarding nothing.
         for (key, _, _) in NUMERIC_BOUNDS {
-            assert!(defaults.contains_key(key), "NUMERIC_BOUNDS names {key:?}, which Config has not");
+            assert!(
+                defaults.contains_key(key),
+                "NUMERIC_BOUNDS names {key:?}, which Config has not"
+            );
         }
     }
 

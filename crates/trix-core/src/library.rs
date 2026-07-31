@@ -91,8 +91,7 @@ pub fn write_sidecar(dir: &Path, meta: &ClipMeta) -> Result<()> {
     let final_path = sidecar_path(dir, &meta.id);
     let temp_path = final_path.with_extension("json.tmp");
     let json = serde_json::to_string_pretty(meta).context("serializing clip metadata")?;
-    std::fs::write(&temp_path, json)
-        .with_context(|| format!("writing {}", temp_path.display()))?;
+    std::fs::write(&temp_path, json).with_context(|| format!("writing {}", temp_path.display()))?;
     // Windows rename fails if the destination exists; rewriting a sidecar
     // (rename, favorite) is a normal operation.
     let _ = std::fs::remove_file(&final_path);
@@ -101,8 +100,8 @@ pub fn write_sidecar(dir: &Path, meta: &ClipMeta) -> Result<()> {
 }
 
 pub fn read_sidecar(path: &Path) -> Result<ClipMeta> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
 }
 
@@ -181,11 +180,9 @@ pub fn now_rfc3339_local() -> String {
     // and the active seasonal bias has to be folded in or half the year is
     // reported an hour out.
     let id = unsafe { GetTimeZoneInformation(&mut tz) };
-    let bias = tz.Bias
-        + if id == TIME_ZONE_ID_DAYLIGHT { tz.DaylightBias } else { tz.StandardBias };
-    format_rfc3339(
-        now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond, -bias,
-    )
+    let bias =
+        tz.Bias + if id == TIME_ZONE_ID_DAYLIGHT { tz.DaylightBias } else { tz.StandardBias };
+    format_rfc3339(now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond, -bias)
 }
 
 /// Split out from [`now_rfc3339_local`] so the offset arithmetic is testable
@@ -215,10 +212,7 @@ mod tests {
     /// Istanbul is UTC+3; Windows reports that as a Bias of -180 minutes.
     #[test]
     fn rfc3339_renders_a_positive_offset() {
-        assert_eq!(
-            format_rfc3339(2026, 7, 26, 14, 30, 12, 180),
-            "2026-07-26T14:30:12+03:00"
-        );
+        assert_eq!(format_rfc3339(2026, 7, 26, 14, 30, 12, 180), "2026-07-26T14:30:12+03:00");
     }
 
     #[test]

@@ -225,7 +225,10 @@ mod tests {
             assert_eq!(remaining.len(), 1, "the client with a dropped receiver should be evicted");
             assert_eq!(remaining[0].id, live_id, "the live client should be the one left behind");
         }
-        assert!(live_rx.try_recv().is_ok(), "the live client should still have received the broadcast");
+        assert!(
+            live_rx.try_recv().is_ok(),
+            "the live client should still have received the broadcast"
+        );
     }
 
     /// The bound is the point: a client that stops reading must cost the daemon

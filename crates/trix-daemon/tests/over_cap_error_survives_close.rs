@@ -46,7 +46,10 @@ impl ClientHandler for StubHandler {
 /// up there means the pipe will never appear — reporting that error directly
 /// is a better failure than the generic "could not connect" this loop would
 /// otherwise take up to 5 seconds to reach.
-fn connect_client(name: &str, serve_failure: &std::sync::mpsc::Receiver<anyhow::Error>) -> std::fs::File {
+fn connect_client(
+    name: &str,
+    serve_failure: &std::sync::mpsc::Receiver<anyhow::Error>,
+) -> std::fs::File {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match std::fs::OpenOptions::new().read(true).write(true).open(name) {
@@ -70,7 +73,13 @@ fn read_line(source: &mut impl Read) -> Option<String> {
     let mut byte = [0u8; 1];
     loop {
         match source.read(&mut byte).expect("reading the response line failed") {
-            0 => return if line.is_empty() { None } else { Some(String::from_utf8_lossy(&line).into_owned()) },
+            0 => {
+                return if line.is_empty() {
+                    None
+                } else {
+                    Some(String::from_utf8_lossy(&line).into_owned())
+                };
+            }
             _ => {
                 if byte[0] == b'\n' {
                     return Some(String::from_utf8_lossy(&line).into_owned());

@@ -14,23 +14,21 @@ use std::sync::OnceLock;
 use anyhow::{Context as _, Result, anyhow};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Multithread, ID3D11Texture2D};
 use windows::Win32::Media::MediaFoundation::{
-    ICodecAPI, IMF2DBuffer, IMFAttributes, IMFDXGIDeviceManager, IMFMediaType, IMFSinkWriter,
-    IMFTransform,
     CODECAPI_AVEncCommonMaxBitRate, CODECAPI_AVEncCommonMeanBitRate,
-    CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_CBR,
-    eAVEncCommonRateControlMode_PeakConstrainedVBR,
-    MF_API_VERSION, MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
+    CODECAPI_AVEncCommonRateControlMode, ICodecAPI, IMF2DBuffer, IMFAttributes,
+    IMFDXGIDeviceManager, IMFMediaType, IMFSinkWriter, IMFTransform, MF_API_VERSION,
+    MF_LOW_LATENCY, MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
     MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS,
     MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
-    MF_LOW_LATENCY, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
-    MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
-    MF_SDK_VERSION, MF_SINK_WRITER_D3D_MANAGER, MFSampleExtension_CleanPoint,
+    MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE,
+    MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_SDK_VERSION, MF_SINK_WRITER_D3D_MANAGER,
     MF_SINK_WRITER_DISABLE_THROTTLING, MF_SINK_WRITER_STATISTICS, MFAudioFormat_AAC,
     MFAudioFormat_PCM, MFCreateAttributes, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer,
-    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFCreateSinkWriterFromURL, MFMediaType_Audio,
-    MFMediaType_Video, MFSTARTUP_NOSOCKET, MFStartup, MFT_ENUM_HARDWARE_URL_Attribute,
-    MFT_FRIENDLY_NAME_Attribute, MFVideoFormat_H264, MFVideoFormat_NV12,
-    MFVideoInterlace_Progressive,
+    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFCreateSinkWriterFromURL,
+    MFMediaType_Audio, MFMediaType_Video, MFSTARTUP_NOSOCKET, MFSampleExtension_CleanPoint,
+    MFStartup, MFT_ENUM_HARDWARE_URL_Attribute, MFT_FRIENDLY_NAME_Attribute, MFVideoFormat_H264,
+    MFVideoFormat_NV12, MFVideoInterlace_Progressive, eAVEncCommonRateControlMode_CBR,
+    eAVEncCommonRateControlMode_PeakConstrainedVBR,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Variant::{VARIANT, VT_UI4};
@@ -100,10 +98,25 @@ pub(crate) fn apply_rate_control(transform: &IMFTransform, settings: &RecorderSe
         RateControl::PeakVbr => eAVEncCommonRateControlMode_PeakConstrainedVBR,
     };
     unsafe {
-        set_codec_u32(&codec, &CODECAPI_AVEncCommonRateControlMode, mode.0 as u32, "rate control mode");
-        set_codec_u32(&codec, &CODECAPI_AVEncCommonMeanBitRate, settings.bitrate_bps, "mean bitrate");
+        set_codec_u32(
+            &codec,
+            &CODECAPI_AVEncCommonRateControlMode,
+            mode.0 as u32,
+            "rate control mode",
+        );
+        set_codec_u32(
+            &codec,
+            &CODECAPI_AVEncCommonMeanBitRate,
+            settings.bitrate_bps,
+            "mean bitrate",
+        );
         if settings.rate_control == RateControl::PeakVbr {
-            set_codec_u32(&codec, &CODECAPI_AVEncCommonMaxBitRate, settings.max_bitrate_bps, "max bitrate");
+            set_codec_u32(
+                &codec,
+                &CODECAPI_AVEncCommonMaxBitRate,
+                settings.max_bitrate_bps,
+                "max bitrate",
+            );
         }
     }
     tracing::info!(
@@ -226,13 +239,8 @@ impl MfRecorder {
 
             // 3 NV12 targets ≈ 50 ms of pipeline depth at 60 fps; measured
             // drain is fast enough that even 2 never dropped a frame.
-            let converter = VideoConverter::new(
-                device,
-                settings.width,
-                settings.height,
-                settings.fps,
-                3,
-            )?;
+            let converter =
+                VideoConverter::new(device, settings.width, settings.height, settings.fps, 3)?;
 
             Ok(Self {
                 writer,
@@ -424,9 +432,7 @@ impl ClipMuxer {
             if keyframe {
                 sample.SetUINT32(&MFSampleExtension_CleanPoint, 1)?;
             }
-            self.writer
-                .WriteSample(self.video_stream, &sample)
-                .context("WriteSample(clip video)")
+            self.writer.WriteSample(self.video_stream, &sample).context("WriteSample(clip video)")
         }
     }
 
@@ -456,7 +462,11 @@ fn audio_type(subtype: &GUID) -> Result<IMFMediaType> {
 /// through `ICodecAPI` and (b) name it in the log so the hardware path is
 /// proven active. Best-effort throughout — a writer that won't surface its
 /// transform still records, just on the media-type bitrate hint.
-fn configure_video_transform(writer: &IMFSinkWriter, video_stream: u32, settings: &RecorderSettings) {
+fn configure_video_transform(
+    writer: &IMFSinkWriter,
+    video_stream: u32,
+    settings: &RecorderSettings,
+) {
     unsafe {
         let mut raw: *mut core::ffi::c_void = std::ptr::null_mut();
         if writer

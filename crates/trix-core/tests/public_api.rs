@@ -19,16 +19,10 @@ fn config_is_publicly_constructible() {
 
 #[test]
 fn session_option_structs_are_publicly_constructible() {
-    let _record = RecordOptions {
-        duration_secs: 10,
-        output: PathBuf::from("out.mp4"),
-        no_audio: false,
-    };
-    let _replay = ReplayOptions {
-        auto_clip_secs: Some(8),
-        exit_after_secs: Some(12),
-        print_clips: true,
-    };
+    let _record =
+        RecordOptions { duration_secs: 10, output: PathBuf::from("out.mp4"), no_audio: false };
+    let _replay =
+        ReplayOptions { auto_clip_secs: Some(8), exit_after_secs: Some(12), print_clips: true };
 }
 
 #[test]

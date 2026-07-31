@@ -192,7 +192,11 @@ fn print_monitors() -> Result<()> {
         for monitor in &adapter.monitors {
             println!(
                 "    Monitor {}: {} — {}x{} at ({}, {})",
-                monitor.index, monitor.name, monitor.width, monitor.height, monitor.left,
+                monitor.index,
+                monitor.name,
+                monitor.width,
+                monitor.height,
+                monitor.left,
                 monitor.top,
             );
             monitors_seen += 1;
@@ -254,9 +258,7 @@ pub fn encoders() -> Result<Vec<EncoderInfo>> {
     // thread is already in a single-threaded apartment and this call did
     // nothing — is a failure HRESULT, so it leaves through the `?` above the
     // uninitialize instead of through it.
-    unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
-        .ok()
-        .context("CoInitializeEx failed")?;
+    unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok().context("CoInitializeEx failed")?;
 
     // Whichever way the enumeration went. The single-pass version returned
     // early on an enumeration failure and left both of these unbalanced; that
@@ -333,10 +335,8 @@ fn enum_encoders(
     subtype: GUID,
     flags: windows::Win32::Media::MediaFoundation::MFT_ENUM_FLAG,
 ) -> Result<Vec<String>> {
-    let output_type = MFT_REGISTER_TYPE_INFO {
-        guidMajorType: MFMediaType_Video,
-        guidSubtype: subtype,
-    };
+    let output_type =
+        MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: subtype };
 
     let mut activates: *mut Option<IMFActivate> = std::ptr::null_mut();
     let mut count = 0u32;
@@ -369,8 +369,9 @@ fn enum_encoders(
 fn friendly_name(activate: &IMFActivate) -> String {
     let mut value = PWSTR::null();
     let mut length = 0u32;
-    let result =
-        unsafe { activate.GetAllocatedString(&MFT_FRIENDLY_NAME_Attribute, &mut value, &mut length) };
+    let result = unsafe {
+        activate.GetAllocatedString(&MFT_FRIENDLY_NAME_Attribute, &mut value, &mut length)
+    };
     match result {
         Ok(()) if !value.is_null() => {
             let name = unsafe { value.to_string() }.unwrap_or_else(|_| "<invalid utf-16>".into());

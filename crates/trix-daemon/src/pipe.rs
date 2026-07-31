@@ -151,7 +151,11 @@ fn user_only_security_descriptor() -> Result<LocalSecurityDescriptor> {
 /// Creates one pipe instance. `first` adds `FILE_FLAG_FIRST_PIPE_INSTANCE`,
 /// which is how a second daemon is refused: the flag fails if the name already
 /// has an instance.
-fn create_instance(name: &str, security: &LocalSecurityDescriptor, first: bool) -> Result<std::fs::File> {
+fn create_instance(
+    name: &str,
+    security: &LocalSecurityDescriptor,
+    first: bool,
+) -> Result<std::fs::File> {
     // `CreateNamedPipeW`'s last parameter is `Option<*const SECURITY_ATTRIBUTES>`
     // (a borrow, not an out-param), so `attributes` is never mutated after
     // construction — no `mut` binding, matching the project's zero-warnings bar.
@@ -265,14 +269,7 @@ fn handle_of(file: &std::fs::File) -> *mut std::ffi::c_void {
 fn request_pending(instance: &std::fs::File) -> Result<bool, windows::core::Error> {
     let mut available = 0u32;
     unsafe {
-        PeekNamedPipe(
-            HANDLE(handle_of(instance)),
-            None,
-            0,
-            None,
-            Some(&mut available),
-            None,
-        )?;
+        PeekNamedPipe(HANDLE(handle_of(instance)), None, 0, None, Some(&mut available), None)?;
     }
     Ok(available > 0)
 }
@@ -346,13 +343,11 @@ where
         }
 
         let handler = Arc::clone(&handler);
-        let spawned = std::thread::Builder::new()
-            .name("trix-client".into())
-            .spawn(move || {
-                if let Err(e) = serve_one(instance, handler) {
-                    tracing::debug!(error = %format!("{e:#}"), "client session ended");
-                }
-            });
+        let spawned = std::thread::Builder::new().name("trix-client".into()).spawn(move || {
+            if let Err(e) = serve_one(instance, handler) {
+                tracing::debug!(error = %format!("{e:#}"), "client session ended");
+            }
+        });
         // Same reasoning as the `create_instance` failure above: a thread that
         // cannot be spawned is one client that does not get served, not a
         // reason to kill an armed capture. The closure — and with it this pipe
@@ -473,7 +468,9 @@ fn serve_one<H: ClientHandler>(instance: std::fs::File, handler: Arc<H>) -> Resu
     // `File` on Windows (std never calls `FlushFileBuffers`), so it cannot by
     // itself report anything; it stays in the chain only so a failure from
     // either call is what makes `send` return `false`.
-    let mut send = |text: &str| -> bool { writer.write_all(text.as_bytes()).is_ok() && writer.flush().is_ok() };
+    let mut send = |text: &str| -> bool {
+        writer.write_all(text.as_bytes()).is_ok() && writer.flush().is_ok()
+    };
 
     'session: loop {
         // Evicted for not draining its events (see `ClientHandler::eviction_flag`).
@@ -520,7 +517,8 @@ fn serve_one<H: ClientHandler>(instance: std::fs::File, handler: Arc<H>) -> Resu
                 // The one case where a bad line does close the connection:
                 // past the cap the remaining bytes cannot be resynchronized to
                 // a frame boundary, so there is nothing to recover to.
-                let response = Response::err(RESERVED_ID, format!("line exceeded {MAX_LINE_BYTES} bytes"));
+                let response =
+                    Response::err(RESERVED_ID, format!("line exceeded {MAX_LINE_BYTES} bytes"));
                 if let Ok(text) = encode_line(&response) {
                     send(&text);
                 }
@@ -618,8 +616,7 @@ mod tests {
     fn the_live_pipe_carries_the_user_only_dacl() {
         use windows::Win32::Foundation::ERROR_SUCCESS;
         use windows::Win32::Security::Authorization::{
-            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo,
-            SE_KERNEL_OBJECT,
+            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SE_KERNEL_OBJECT,
         };
         use windows::Win32::Security::DACL_SECURITY_INFORMATION;
 
@@ -667,10 +664,7 @@ mod tests {
             sddl.starts_with("D:P"),
             "the live DACL is not protected, so it inherited a default: {sddl}"
         );
-        assert!(
-            sddl.contains(&sid),
-            "the live DACL does not name this user ({sid}): {sddl}"
-        );
+        assert!(sddl.contains(&sid), "the live DACL does not name this user ({sid}): {sddl}");
         assert_eq!(
             sddl.matches("(A;").count(),
             1,
@@ -707,8 +701,7 @@ mod tests {
         // or non-blocking I/O — both of which `serve_one` is not written for —
         // and it fails too.
         assert_eq!(
-            PIPE_MODE.0,
-            PIPE_REJECT_REMOTE_CLIENTS.0,
+            PIPE_MODE.0, PIPE_REJECT_REMOTE_CLIENTS.0,
             "the mode word changed; the session loop assumes a blocking byte stream (spec §4.1)"
         );
     }

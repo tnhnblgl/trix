@@ -1,0 +1,9 @@
+# Ratifies the style this codebase already uses rather than imposing a new one.
+#
+# Default rustfmt rewrites ~241 places in this tree, because it breaks any
+# struct literal, call, or match arm past a narrow width onto multiple lines
+# even when the one-line form is well inside `max_width`. Trix has never been
+# written that way. `Max` lets those constructs stay on one line up to
+# `max_width`, which reduces the reformat to whitespace-only changes -- almost
+# all of them import-list wrapping.
+use_small_heuristics = "Max"

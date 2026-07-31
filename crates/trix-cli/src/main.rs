@@ -6,7 +6,11 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "trix", version, about = "Trix core engine — ultra-lightweight screen/clip recorder")]
+#[command(
+    name = "trix",
+    version,
+    about = "Trix core engine — ultra-lightweight screen/clip recorder"
+)]
 struct Cli {
     /// Enable verbose (debug-level) logging
     #[arg(short, long, global = true)]
@@ -169,9 +173,8 @@ mod tests {
     /// notice the parsed values silently going wrong.
     #[test]
     fn replay_test_hooks_parse_to_expected_values() {
-        let cli =
-            Cli::try_parse_from(["trix", "replay", "--auto-clip", "8", "--exit-after", "12"])
-                .unwrap();
+        let cli = Cli::try_parse_from(["trix", "replay", "--auto-clip", "8", "--exit-after", "12"])
+            .unwrap();
         let Command::Replay { auto_clip, exit_after } = cli.command else {
             panic!("expected Replay");
         };

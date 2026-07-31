@@ -25,8 +25,7 @@ use windows_capture::{
     graphics_capture_api::InternalCaptureControl,
     monitor::Monitor,
     settings::{
-        ColorFormat, CursorCaptureSettings, DirtyRegionSettings, SecondaryWindowSettings,
-        Settings,
+        ColorFormat, CursorCaptureSettings, DirtyRegionSettings, SecondaryWindowSettings, Settings,
     },
 };
 
@@ -37,12 +36,12 @@ use crate::{
     },
     config::Config,
     control,
-    engine::{EngineCommand, EngineStatus},
     encode::{
         convert::VideoConverter,
         h264::{EncodedPacket, H264Encoder},
         mf::{ClipMuxer, RecorderSettings, create_device_manager},
     },
+    engine::{EngineCommand, EngineStatus},
     library,
     stats::{LatencyHistogram, StatsReporter, mb},
 };
@@ -185,9 +184,7 @@ impl ReplaySession {
     /// Seconds of footage the ring currently holds.
     fn ring_span_secs(&self) -> f64 {
         match (self.video_ring.front(), self.video_ring.back()) {
-            (Some(front), Some(back)) => {
-                (back.pts_100ns - front.pts_100ns) as f64 / 10_000_000.0
-            }
+            (Some(front), Some(back)) => (back.pts_100ns - front.pts_100ns) as f64 / 10_000_000.0,
             _ => 0.0,
         }
     }
@@ -258,8 +255,7 @@ impl ReplaySession {
         // Drain audio up to this instant so the clip keeps its trailing
         // audio even when the screen has been static.
         if self.t0_qpc.is_some() {
-            let now_100ns =
-                unsafe { windows::Win32::Media::MediaFoundation::MFGetSystemTime() };
+            let now_100ns = unsafe { windows::Win32::Media::MediaFoundation::MFGetSystemTime() };
             self.pump_audio_to(now_100ns - SILENCE_GRACE_100NS);
         }
 
@@ -277,8 +273,7 @@ impl ReplaySession {
                 base_index = i;
             }
         }
-        let video: Vec<EncodedPacket> =
-            self.video_ring.iter().skip(base_index).cloned().collect();
+        let video: Vec<EncodedPacket> = self.video_ring.iter().skip(base_index).cloned().collect();
         if video.is_empty() || !video[0].keyframe {
             return Ok(None);
         }
@@ -480,8 +475,7 @@ fn save_clip(
 
     let last = &snapshot.video[snapshot.video.len() - 1];
     let video_100ns = last.pts_100ns + last.duration_100ns - snapshot.base_pts;
-    let audio_secs =
-        snapshot.audio_pcm.len() as f64 / (SAMPLE_RATE * ENCODER_BLOCK_ALIGN) as f64;
+    let audio_secs = snapshot.audio_pcm.len() as f64 / (SAMPLE_RATE * ENCODER_BLOCK_ALIGN) as f64;
     let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
     let meta = ClipMeta {
@@ -588,8 +582,7 @@ pub fn run_driven(
         crate::capture::lower_gpu_priority();
     }
     let mut ready = ready;
-    let options =
-        ReplayOptions { auto_clip_secs: None, exit_after_secs: None, print_clips: false };
+    let options = ReplayOptions { auto_clip_secs: None, exit_after_secs: None, print_clips: false };
     run_driven_inner(config, &commands, &status, &mut ready, None, options)
 }
 
@@ -702,14 +695,13 @@ fn start_session(config: &Config, hotkey: Option<&control::Hotkey>) -> Result<Li
     let height = monitor.height().map_err(|e| anyhow!("monitor height: {e}"))?;
     let clip_dir = config.clip_dir_path();
 
-    let (audio_handle, audio_rx) =
-        match LoopbackCapture::start() {
-            Ok((handle, rx)) => (Some(handle), Some(rx)),
-            Err(e) => {
-                tracing::warn!("audio capture unavailable, replay continues without: {e}");
-                (None, None)
-            }
-        };
+    let (audio_handle, audio_rx) = match LoopbackCapture::start() {
+        Ok((handle, rx)) => (Some(handle), Some(rx)),
+        Err(e) => {
+            tracing::warn!("audio capture unavailable, replay continues without: {e}");
+            (None, None)
+        }
+    };
 
     let flags = ReplayFlags {
         settings: RecorderSettings {

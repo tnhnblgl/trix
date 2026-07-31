@@ -99,12 +99,9 @@ fn bool_arg(req: &Request, key: &str) -> Result<bool, String> {
 fn usize_arg(req: &Request, key: &str, default: usize) -> Result<usize, String> {
     match req.args.get(key) {
         None => Ok(default),
-        Some(value) => value
-            .as_u64()
-            .and_then(|n| usize::try_from(n).ok())
-            .ok_or_else(|| {
-                format!("{} requires {key:?} to be a non-negative whole number", req.cmd)
-            }),
+        Some(value) => value.as_u64().and_then(|n| usize::try_from(n).ok()).ok_or_else(|| {
+            format!("{} requires {key:?} to be a non-negative whole number", req.cmd)
+        }),
     }
 }
 

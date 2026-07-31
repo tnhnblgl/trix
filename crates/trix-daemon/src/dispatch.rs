@@ -479,11 +479,7 @@ mod tests {
                 let request = request_with(
                     7,
                     cmd,
-                    &[
-                        ("clip_id", evil.into()),
-                        ("title", "x".into()),
-                        ("favorite", true.into()),
-                    ],
+                    &[("clip_id", evil.into()), ("title", "x".into()), ("favorite", true.into())],
                 );
                 let response = daemon.dispatch(1, &request);
                 assert!(!response.ok, "{cmd} accepted {evil:?}");
@@ -612,10 +608,8 @@ mod tests {
         assert!(error.contains("fps"), "the error must name the key that would not take: {error}");
         assert!(!path.exists(), "a refused config.set must not have written the file");
 
-        let mixed = daemon.dispatch(
-            1,
-            &request_with(7, "config.set", &[("fps", 30.into()), ("nope", 1.into())]),
-        );
+        let mixed = daemon
+            .dispatch(1, &request_with(7, "config.set", &[("fps", 30.into()), ("nope", 1.into())]));
         assert!(!mixed.ok);
         assert!(!path.exists(), "one bad key must refuse the whole request, not half of it");
 
@@ -652,8 +646,7 @@ mod tests {
             ("monitor_index", 64),
             ("stats_seconds", 86_401),
         ] {
-            let response =
-                daemon.dispatch(1, &request_with(2, "config.set", &[(key, bad.into())]));
+            let response = daemon.dispatch(1, &request_with(2, "config.set", &[(key, bad.into())]));
             assert!(!response.ok, "config.set accepted {key} = {bad}");
             let error = response.error.unwrap_or_default();
             assert!(error.contains(key), "the error must name the key: {error}");
@@ -807,7 +800,8 @@ mod tests {
         let response = idle("monitors").dispatch(1, &request(2, "monitors.list"));
         assert!(response.ok, "monitors.list must be answered now: {:?}", response.error);
         let data = response.data.expect("monitors.list carries data");
-        let monitors = data.get("monitors").and_then(Value::as_array).expect("monitors is an array");
+        let monitors =
+            data.get("monitors").and_then(Value::as_array).expect("monitors is an array");
         assert!(!monitors.is_empty(), "a machine running this test has a desktop attached");
 
         let first = monitors.first().expect("at least one monitor");
@@ -834,7 +828,8 @@ mod tests {
         let response = idle("encoders").dispatch(1, &request(3, "encoders.list"));
         assert!(response.ok, "encoders.list must be answered now: {:?}", response.error);
         let data = response.data.expect("encoders.list carries data");
-        let encoders = data.get("encoders").and_then(Value::as_array).expect("encoders is an array");
+        let encoders =
+            data.get("encoders").and_then(Value::as_array).expect("encoders is an array");
         assert!(!encoders.is_empty(), "a Windows machine offers at least a software H.264 MFT");
 
         for encoder in encoders {

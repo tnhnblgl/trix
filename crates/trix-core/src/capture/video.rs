@@ -19,8 +19,8 @@ use windows_capture::{
     graphics_capture_api::InternalCaptureControl,
     monitor::Monitor,
     settings::{
-        ColorFormat, CursorCaptureSettings, DirtyRegionSettings,
-        MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
+        ColorFormat, CursorCaptureSettings, DirtyRegionSettings, MinimumUpdateIntervalSettings,
+        SecondaryWindowSettings, Settings,
     },
 };
 

@@ -116,9 +116,8 @@ fn spawn_shutdown_watcher(daemon: Arc<OnceLock<Arc<Daemon>>>) -> anyhow::Result<
 /// never happens.
 fn disarm_within_budget(daemon: Arc<Daemon>) {
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
-    let spawned = std::thread::Builder::new()
-        .name("trix-shutdown-disarm".into())
-        .spawn(move || {
+    let spawned =
+        std::thread::Builder::new().name("trix-shutdown-disarm".into()).spawn(move || {
             if let Err(e) = daemon.disarm() {
                 tracing::warn!(error = %format!("{e:#}"), "disarm on shutdown failed");
             }

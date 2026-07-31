@@ -61,7 +61,10 @@ impl ClientHandler for EventHandler {
 /// reaches its first `CreateNamedPipeW`. Polls `serve_failure` on every retry
 /// so a bind failure is reported directly instead of as a generic timeout.
 /// Same shape as `over_cap_error_survives_close.rs`'s helper.
-fn connect_client(name: &str, serve_failure: &std::sync::mpsc::Receiver<anyhow::Error>) -> std::fs::File {
+fn connect_client(
+    name: &str,
+    serve_failure: &std::sync::mpsc::Receiver<anyhow::Error>,
+) -> std::fs::File {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match std::fs::OpenOptions::new().read(true).write(true).open(name) {

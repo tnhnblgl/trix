@@ -12,8 +12,8 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
     D3D11_VIDEO_PROCESSOR_COLOR_SPACE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
-    D3D11_VPOV_DIMENSION_TEXTURE2D, ID3D11Device, ID3D11Texture2D,
+    D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+    D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D, ID3D11Device, ID3D11Texture2D,
     ID3D11VideoContext, ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC};
@@ -32,7 +32,6 @@ pub struct VideoConverter {
 // SAFETY: used from one thread at a time (moved into the capture thread);
 // the underlying D3D11 device has multithread protection enabled.
 unsafe impl Send for VideoConverter {}
-
 
 impl VideoConverter {
     pub fn new(
@@ -58,9 +57,8 @@ impl VideoConverter {
             OutputHeight: height,
             Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
         };
-        let enumerator = unsafe {
-            video_device.CreateVideoProcessorEnumerator(&desc).context("VP enumerator")?
-        };
+        let enumerator =
+            unsafe { video_device.CreateVideoProcessorEnumerator(&desc).context("VP enumerator")? };
         let processor =
             unsafe { video_device.CreateVideoProcessor(&enumerator, 0).context("VP create")? };
 
@@ -122,7 +120,12 @@ impl VideoConverter {
             in_desc.Anonymous.Texture2D.ArraySlice = 0;
             let mut input_view = None;
             self.video_device
-                .CreateVideoProcessorInputView(source, &self.enumerator, &in_desc, Some(&mut input_view))
+                .CreateVideoProcessorInputView(
+                    source,
+                    &self.enumerator,
+                    &in_desc,
+                    Some(&mut input_view),
+                )
                 .context("VP input view")?;
             let input_view = input_view.unwrap();
 
@@ -133,7 +136,12 @@ impl VideoConverter {
             out_desc.Anonymous.Texture2D.MipSlice = 0;
             let mut output_view = None;
             self.video_device
-                .CreateVideoProcessorOutputView(target, &self.enumerator, &out_desc, Some(&mut output_view))
+                .CreateVideoProcessorOutputView(
+                    target,
+                    &self.enumerator,
+                    &out_desc,
+                    Some(&mut output_view),
+                )
                 .context("VP output view")?;
             let output_view = output_view.unwrap();
 

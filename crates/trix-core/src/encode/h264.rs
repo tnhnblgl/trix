@@ -10,17 +10,16 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, IMFAttributes, IMFDXGIDeviceManager, IMFMediaEventGenerator, IMFSample,
-    IMFTransform, MF_E_NO_EVENTS_AVAILABLE, MF_E_TRANSFORM_NEED_MORE_INPUT,
-    MF_E_TRANSFORM_STREAM_CHANGE, MF_EVENT_FLAG_NO_WAIT,
-    IMFMediaType, MF_LOW_LATENCY, MF_MT_MPEG_SEQUENCE_HEADER, MF_TRANSFORM_ASYNC_UNLOCK,
-    MFCreateAttributes, MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateSample,
-    MFSampleExtension_CleanPoint,
-    MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_ADAPTER_LUID, MFT_ENUM_FLAG_HARDWARE,
-    MFT_ENUM_FLAG_SORTANDFILTER, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    IMFActivate, IMFAttributes, IMFDXGIDeviceManager, IMFMediaEventGenerator, IMFMediaType,
+    IMFSample, IMFTransform, METransformHaveOutput, METransformNeedInput, MF_E_NO_EVENTS_AVAILABLE,
+    MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_EVENT_FLAG_NO_WAIT,
+    MF_LOW_LATENCY, MF_MT_MPEG_SEQUENCE_HEADER, MF_TRANSFORM_ASYNC_UNLOCK, MFCreateAttributes,
+    MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateSample, MFMediaType_Video,
+    MFSampleExtension_CleanPoint, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_ADAPTER_LUID,
+    MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
     MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
-    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnum2, METransformHaveOutput,
-    METransformNeedInput, MFMediaType_Video, MFVideoFormat_H264, MFVideoFormat_NV12,
+    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnum2, MFVideoFormat_H264,
+    MFVideoFormat_NV12,
 };
 use windows::core::Interface;
 
@@ -316,11 +315,9 @@ fn activate_hardware_encoder(device: &ID3D11Device) -> Result<(IMFTransform, Str
         windows::Win32::System::Com::CoTaskMemFree(Some(activates as *const _));
         let activate = chosen.ok_or_else(|| anyhow!("null encoder activate"))?;
 
-        let name = allocated_string(
-            &activate.cast::<IMFAttributes>()?,
-            &MFT_FRIENDLY_NAME_Attribute,
-        )
-        .unwrap_or_else(|| "<unnamed>".into());
+        let name =
+            allocated_string(&activate.cast::<IMFAttributes>()?, &MFT_FRIENDLY_NAME_Attribute)
+                .unwrap_or_else(|| "<unnamed>".into());
         tracing::info!(encoder = %name, "hardware H.264 MFT activated");
 
         let transform = activate.ActivateObject::<IMFTransform>().context("ActivateObject")?;

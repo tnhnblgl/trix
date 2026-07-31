@@ -106,9 +106,7 @@ impl EngineHandle {
         // The rebuild loop drains queued commands while it waits for the
         // display to settle, so an unanswered clip means "no ring right now",
         // not a dead engine.
-        answer
-            .recv()
-            .map_err(|_| anyhow!("capture is rebuilding — try again in a moment"))?
+        answer.recv().map_err(|_| anyhow!("capture is rebuilding — try again in a moment"))?
     }
 
     /// Stops capture and joins the thread, surfacing whatever the rebuild loop
