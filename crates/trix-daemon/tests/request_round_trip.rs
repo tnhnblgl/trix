@@ -13,6 +13,7 @@
 
 use std::io::{Read, Write};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Sender, SyncSender};
 use std::time::{Duration, Instant};
 
@@ -36,6 +37,13 @@ impl ClientHandler for EchoHandler {
     fn dispatch(&self, _client: u64, request: &Request) -> Response {
         let _ = self.dispatched.send(request.id);
         Response::ok(request.id, serde_json::Value::Null)
+    }
+
+    /// No registry behind this handler, so nothing can ever evict. Stated
+    /// rather than inherited: `eviction_flag` is a required method precisely so
+    /// a handler that *does* have a registry cannot forget it by accident.
+    fn eviction_flag(&self, _client: u64) -> Option<Arc<AtomicBool>> {
+        None
     }
 }
 

@@ -10,6 +10,7 @@
 
 use std::io::Read;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Sender, SyncSender};
 use std::time::{Duration, Instant};
 
@@ -39,6 +40,20 @@ impl ClientHandler for EventHandler {
     /// Never called in this test: the client under test sends nothing at all.
     fn dispatch(&self, _client: u64, request: &Request) -> Response {
         Response::ok(request.id, serde_json::Value::Null)
+    }
+
+    /// Forwarded to the registry, exactly as the production handler
+    /// (`dispatch.rs`'s `impl ClientHandler for Daemon`) does.
+    ///
+    /// This handler is the one place in the test suite that drives a *real*
+    /// `Clients`, and until `eviction_flag` became a required method it had
+    /// silently inherited the `None` default — so its registry could evict a
+    /// client's entry while the connection stayed open forever, event-deaf.
+    /// Returning `None` here would have satisfied the compiler and preserved
+    /// that hole; forwarding is what makes this harness match the thing it is
+    /// standing in for.
+    fn eviction_flag(&self, client: u64) -> Option<Arc<AtomicBool>> {
+        self.clients.eviction_flag(client)
     }
 }
 

@@ -388,12 +388,17 @@ pub trait ClientHandler {
     /// A closed connection is the honest outcome — the client sees the
     /// disconnect and reconnects.
     ///
-    /// Defaulted to `None` so a handler that never evicts (the test stubs) is
-    /// unaffected, and so this could be added without changing the signature
-    /// of any existing method.
-    fn eviction_flag(&self, _client: u64) -> Option<Arc<AtomicBool>> {
-        None
-    }
+    /// Deliberately *not* defaulted, though it was when it was introduced. A
+    /// `{ None }` default made this method optional to implement, and a handler
+    /// that omitted it got half a feature with no compile error and no test
+    /// failure: eviction would stop the daemon's memory growing and leave the
+    /// socket open forever, event-deaf. That was not hypothetical — the
+    /// `EventHandler` in `tests/events.rs` drives a *real* [`crate::clients::Clients`]
+    /// registry and had inherited exactly that hole. Requiring the method makes
+    /// the compiler catch the next one, which is precisely what the default was
+    /// hiding. A handler that genuinely never evicts returns `None` explicitly,
+    /// which costs it one line and says so out loud.
+    fn eviction_flag(&self, client: u64) -> Option<Arc<AtomicBool>>;
 }
 
 /// One connected client: read a line, dispatch it, write the response —
