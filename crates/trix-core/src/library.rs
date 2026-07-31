@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use trix_proto::ClipMeta;
 use windows::Win32::System::{
     SystemInformation::GetLocalTime,
@@ -58,22 +58,31 @@ pub fn allocate_clip_id(dir: &Path) -> Result<String> {
         "{:04}{:02}{:02}_{:02}{:02}{:02}",
         now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond
     );
-    Ok(next_free_id(dir, &stem))
+    next_free_id(dir, &stem)
 }
 
 /// Two clips in the same second get `_2`, `_3`, … rather than one silently
 /// overwriting the other.
-fn next_free_id(dir: &Path, stem: &str) -> String {
+///
+/// Returns `Result` rather than ending in an `unreachable!()`. The loop below
+/// genuinely cannot run out — it would need `u32::MAX` clips written within one
+/// second — but this function sits on a path a socket message reaches
+/// (`clip` → `EngineCommand::Clip` → `save_clip` → `allocate_clip_id`), and the
+/// build is `panic = "abort"`, where a panicking call anywhere on such a path is
+/// forbidden outright rather than argued about. The caller already returns
+/// `Result`, so honouring it costs a bounded range and one `bail!`, and removes
+/// the argument entirely.
+fn next_free_id(dir: &Path, stem: &str) -> Result<String> {
     if !mp4_path(dir, stem).exists() {
-        return stem.to_string();
+        return Ok(stem.to_string());
     }
-    for n in 2u32.. {
+    for n in 2u32..=u32::MAX {
         let candidate = format!("{stem}_{n}");
         if !mp4_path(dir, &candidate).exists() {
-            return candidate;
+            return Ok(candidate);
         }
     }
-    unreachable!("u32 range is not exhaustible in one second")
+    bail!("no free clip id for {stem} — the clip directory already holds every suffix")
 }
 
 /// Writes the sidecar to a temp file and renames it into place, so a crash
@@ -257,11 +266,11 @@ mod tests {
         let _ = std::fs::remove_file(dir.join("20260726_143012.mp4"));
 
         std::fs::write(dir.join("20260726_143012.mp4"), b"x").unwrap();
-        let next = next_free_id(&dir, "20260726_143012");
+        let next = next_free_id(&dir, "20260726_143012").unwrap();
         assert_eq!(next, "20260726_143012_2");
 
         std::fs::write(dir.join("20260726_143012_2.mp4"), b"x").unwrap();
-        assert_eq!(next_free_id(&dir, "20260726_143012"), "20260726_143012_3");
+        assert_eq!(next_free_id(&dir, "20260726_143012").unwrap(), "20260726_143012_3");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
