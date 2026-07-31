@@ -966,9 +966,32 @@ mod tests {
             clip_dir: dir.to_string_lossy().into_owned(),
             ..Config::default()
         };
-        let daemon = Daemon::new(config);
+        let daemon = Daemon::new_at(config, None);
         daemon.rescan_library().unwrap();
         (daemon, dir)
+    }
+
+    /// A daemon that touches neither of the developer's real files, for the
+    /// tests that need no clips at all.
+    ///
+    /// These were written as `Daemon::new(Config::default())`, which is the
+    /// production constructor: it resolves `config_path` from `Config::path()`
+    /// — the live `%APPDATA%\trix\config.toml` — and runs the startup library
+    /// scan over the real `Videos\Trix`. So `disarm_when_idle_is_not_an_error`
+    /// and its neighbours walked the user's actual footage on every
+    /// `cargo test --workspace`, and the `config.set` tests were aimed at their
+    /// actual settings. Nothing was ever written, because those tests reject
+    /// before the write — but that is a property of the assertions, not of the
+    /// fixture, and this crate already had the seam (`Daemon::new_at`) in three
+    /// other places with a doc comment explaining exactly why it matters.
+    ///
+    /// `config_path` is `None`, so a `config.set` has nowhere to go. `clip_dir`
+    /// is a scratch path that is deliberately never created — `library::scan`
+    /// reports a missing directory as an empty library — so this does no
+    /// filesystem I/O and leaves nothing to clean up.
+    fn idle(name: &str, config: Config) -> Daemon {
+        let dir = std::env::temp_dir().join(format!("trix-idle-{name}-{}", std::process::id()));
+        Daemon::new_at(Config { clip_dir: dir.to_string_lossy().into_owned(), ..config }, None)
     }
 
     #[test]
@@ -1170,7 +1193,7 @@ mod tests {
     /// UI that reconnects and syncs its toggle must not see a spurious failure.
     #[test]
     fn disarm_when_idle_is_not_an_error() {
-        let daemon = Daemon::new(Config::default());
+        let daemon = idle("disarm", Config::default());
         assert!(daemon.disarm().is_ok());
         assert!(!daemon.status().armed);
     }
@@ -1181,7 +1204,7 @@ mod tests {
     #[test]
     fn idle_status_reports_config_not_engine_state() {
         let config = Config { replay_seconds: 30, monitor_index: 1, ..Config::default() };
-        let daemon = Daemon::new(config);
+        let daemon = idle("status", config);
         let status = daemon.status();
         assert!(!status.armed);
         assert_eq!(status.ring_seconds_total, 30);
@@ -1196,7 +1219,12 @@ mod tests {
     /// becoming `""` when nothing is armed.
     #[test]
     fn the_status_wire_shape_is_the_published_one() {
-        let daemon = Daemon::new(Config { clip_dir: r"D:\Clips".into(), ..Config::default() });
+        // Not routed through `idle`: this test asserts on `clip_dir` reaching the
+        // wire verbatim, so it has to choose the literal itself. `new_at(.., None)`
+        // still keeps it off the real config file, and `D:\Clips` is nobody's real
+        // clip directory -- a missing one scans as an empty library.
+        let daemon =
+            Daemon::new_at(Config { clip_dir: r"D:\Clips".into(), ..Config::default() }, None);
         let json = daemon.status().to_json();
         let object = json.as_object().expect("status must serialize as a JSON object");
 
@@ -1231,17 +1259,17 @@ mod tests {
     /// capturing is a lie a UI would render as a stalled encoder.
     #[test]
     fn an_idle_daemon_has_no_stats_payload() {
-        assert!(Daemon::new(Config::default()).stats_json().is_none());
+        assert!(idle("stats-idle", Config::default()).stats_json().is_none());
     }
 
     /// `stats_seconds = 0` disables the periodic log line, not a subscriber's
     /// events — a client that asked to be told is told once a second.
     #[test]
     fn a_zero_stats_interval_still_ticks_for_a_subscriber() {
-        let daemon = Daemon::new(Config { stats_seconds: 0, ..Config::default() });
+        let daemon = idle("stats-zero", Config { stats_seconds: 0, ..Config::default() });
         assert_eq!(daemon.stats_interval(), Duration::from_secs(1));
 
-        let daemon = Daemon::new(Config { stats_seconds: 5, ..Config::default() });
+        let daemon = idle("stats-five", Config { stats_seconds: 5, ..Config::default() });
         assert_eq!(daemon.stats_interval(), Duration::from_secs(5), "an explicit interval wins");
     }
 
@@ -1289,7 +1317,7 @@ mod tests {
     /// the wire behaviour and the "wrote nothing" half.
     #[test]
     fn an_out_of_range_value_is_refused_with_the_range_in_the_message() {
-        let daemon = Daemon::new_at(Config::default(), None);
+        let daemon = idle("range", Config::default());
         let mut values = Map::new();
         values.insert("replay_seconds".to_string(), Value::from(u32::MAX));
 
@@ -1307,7 +1335,7 @@ mod tests {
     /// `"sixty"`. The two messages must not swap places.
     #[test]
     fn a_wrong_type_value_still_gets_the_type_error_not_a_range_error() {
-        let daemon = Daemon::new_at(Config::default(), None);
+        let daemon = idle("wrong-type", Config::default());
         let mut values = Map::new();
         values.insert("fps".to_string(), Value::from("sixty"));
 
@@ -1326,7 +1354,7 @@ mod tests {
     /// "no engine" condition — this string is what a user sees.
     #[test]
     fn clipping_while_idle_names_the_missing_step() {
-        let daemon = Daemon::new(Config::default());
+        let daemon = idle("clip-idle", Config::default());
         let error = match daemon.clip() {
             Ok(_) => panic!("an idle daemon has no ring to clip from"),
             Err(e) => format!("{e:#}"),

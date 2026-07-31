@@ -325,14 +325,38 @@ mod tests {
             std::fs::write(trix_core::library::mp4_path(&dir, id), b"video").unwrap();
         }
         let config = Config { clip_dir: dir.to_string_lossy().into_owned(), ..Config::default() };
-        (Daemon::new(config), dir)
+        // `new_at(.., None)` rather than `new`: `new` would resolve
+        // `config_path` from the developer's real `%APPDATA%	rix\config.toml`.
+        // These tests never call `config.set`, so nothing would have been
+        // written -- but nothing here needs a config path at all, and the
+        // safest place for that to be true is the constructor.
+        (Daemon::new_at(config, None), dir)
     }
 
     /// Everything below runs against an idle daemon: arming needs real
     /// hardware, so the armed branches are covered by the hand verification in
     /// this task and the end-to-end gate in Task 8.
-    fn idle() -> Daemon {
-        Daemon::new(Config::default())
+    ///
+    /// Idle does not mean "over the real machine". This used to be
+    /// `Daemon::new(Config::default())`, which resolves `config_path` from
+    /// `Config::path()` — the developer's live `%APPDATA%\trix\config.toml` —
+    /// and runs the startup library scan against their real `Videos\Trix`. So
+    /// every `cargo test --workspace` walked the user's actual footage, and the
+    /// `config.set` tests below were pointed at their actual settings; they
+    /// happen to reject before writing, which is one careless test away from
+    /// rewriting them for real. Both seams to avoid that already existed in
+    /// this crate (`Daemon::new_at`, `with_scratch_config`) and this helper
+    /// simply did not use them.
+    ///
+    /// `config_path` is `None`, so there is nowhere for a `config.set` to
+    /// write at all. `clip_dir` names a scratch path that is deliberately
+    /// *never created*: `library::scan` reports a missing directory as an empty
+    /// library, so this costs no filesystem access and leaves nothing behind to
+    /// clean up.
+    fn idle(name: &str) -> Daemon {
+        let dir = std::env::temp_dir().join(format!("trix-idle-{name}-{}", std::process::id()));
+        let config = Config { clip_dir: dir.to_string_lossy().into_owned(), ..Config::default() };
+        Daemon::new_at(config, None)
     }
 
     /// A daemon whose `config.set` writes to a scratch file rather than the
@@ -353,7 +377,7 @@ mod tests {
 
     #[test]
     fn status_is_answered_without_an_engine() {
-        let response = idle().dispatch(1, &request(1, "status"));
+        let response = idle("status").dispatch(1, &request(1, "status"));
         assert_eq!(response.id, 1);
         assert!(response.ok, "status must answer on an idle daemon: {:?}", response.error);
         let data = response.data.expect("status carries data");
@@ -364,7 +388,7 @@ mod tests {
     /// "no engine" condition — a user reads this string.
     #[test]
     fn clip_while_idle_names_the_missing_step() {
-        let response = idle().dispatch(1, &request(9, "clip"));
+        let response = idle("clip").dispatch(1, &request(9, "clip"));
         assert_eq!(response.id, 9);
         assert!(!response.ok);
         assert_eq!(response.error.as_deref(), Some("not armed — send arm first"));
@@ -374,7 +398,7 @@ mod tests {
     /// against an already-idle daemon all the time.
     #[test]
     fn disarm_while_idle_succeeds_and_broadcasts_nothing() {
-        let daemon = idle();
+        let daemon = idle("disarm");
         let (tx, rx) = std::sync::mpsc::sync_channel(crate::clients::OUTBOUND_QUEUE_DEPTH);
         daemon.client_connected(tx);
 
@@ -390,7 +414,7 @@ mod tests {
     /// sent it (spec §4.4).
     #[test]
     fn a_failed_clip_broadcasts_an_error_event() {
-        let daemon = idle();
+        let daemon = idle("error-event");
         let (tx, rx) = std::sync::mpsc::sync_channel(crate::clients::OUTBOUND_QUEUE_DEPTH);
         daemon.client_connected(tx);
 
@@ -522,7 +546,8 @@ mod tests {
     /// notices it missing from the UI.
     #[test]
     fn config_get_returns_every_config_key_plus_the_resolved_clip_dir() {
-        let response = idle().dispatch(1, &request(1, "config.get"));
+        let daemon = idle("config-get");
+        let response = daemon.dispatch(1, &request(1, "config.get"));
         assert!(response.ok, "config.get must be answered now: {:?}", response.error);
         let data = response.data.expect("config.get carries data");
         let object = data.as_object().expect("config.get answers with an object");
@@ -540,13 +565,26 @@ mod tests {
             "config.get must round-trip every Config key, plus clip_dir_resolved and nothing else"
         );
 
-        // The empty default is exactly the case a UI cannot render on its own,
-        // which is why the resolved path is sent alongside it.
-        assert_eq!(object.get("clip_dir").and_then(Value::as_str), Some(""));
+        // `clip_dir_resolved` is `clip_dir` put through `Config::clip_dir_path`,
+        // which is the one thing about this payload a UI cannot compute for
+        // itself. Asserted against the daemon's own config rather than a
+        // literal, so it stays true whatever `idle` points the scratch dir at.
+        let clip_dir = object.get("clip_dir").and_then(Value::as_str).unwrap_or_default();
         let resolved = object.get("clip_dir_resolved").and_then(Value::as_str).unwrap_or_default();
+        assert!(!clip_dir.is_empty(), "this fixture configures a clip_dir");
+        assert_eq!(resolved, clip_dir, "a configured clip_dir resolves to itself");
+
+        // The case that actually needs the resolver — an empty `clip_dir`,
+        // which is the shipping default — is asserted on `Config` directly.
+        // Routing it through a `Daemon` would mean constructing one over the
+        // default clip dir, i.e. scanning the developer's real `Videos\Trix` on
+        // every `cargo test --workspace`, which is exactly what `idle` exists
+        // to stop. The claim is unchanged; only what has to be built to make it
+        // is.
+        let default_resolved = Config::default().clip_dir_path().to_string_lossy().into_owned();
         assert!(
-            resolved.ends_with(r"Videos\Trix"),
-            "an empty clip_dir must resolve to the default: {resolved}"
+            default_resolved.ends_with(r"Videos\Trix"),
+            "an empty clip_dir must resolve to the default: {default_resolved}"
         );
     }
 
@@ -759,7 +797,7 @@ mod tests {
     /// object, and `index` really is a `config.monitor_index` value.
     #[test]
     fn monitors_list_answers_with_the_data_the_probe_prints() {
-        let response = idle().dispatch(1, &request(2, "monitors.list"));
+        let response = idle("monitors").dispatch(1, &request(2, "monitors.list"));
         assert!(response.ok, "monitors.list must be answered now: {:?}", response.error);
         let data = response.data.expect("monitors.list carries data");
         let monitors = data.get("monitors").and_then(Value::as_array).expect("monitors is an array");
@@ -781,7 +819,7 @@ mod tests {
     /// user needs to see before they wonder why their game got slower.
     #[test]
     fn encoders_list_names_the_real_mfts() {
-        let response = idle().dispatch(1, &request(3, "encoders.list"));
+        let response = idle("encoders").dispatch(1, &request(3, "encoders.list"));
         assert!(response.ok, "encoders.list must be answered now: {:?}", response.error);
         let data = response.data.expect("encoders.list carries data");
         let encoders = data.get("encoders").and_then(Value::as_array).expect("encoders is an array");
@@ -808,7 +846,7 @@ mod tests {
     /// command that needs to know *which* client sent it.
     #[test]
     fn stats_subscribe_flips_only_the_asking_clients_flag() {
-        let daemon = idle();
+        let daemon = idle("stats-subscribe");
         let (subscriber_tx, subscriber_rx) =
             std::sync::mpsc::sync_channel(crate::clients::OUTBOUND_QUEUE_DEPTH);
         let subscriber = daemon.client_connected(subscriber_tx);
@@ -849,7 +887,7 @@ mod tests {
     /// place that could get wrong, so they are where it is checked.
     #[test]
     fn a_new_command_with_bad_arguments_answers_with_an_error() {
-        let daemon = idle();
+        let daemon = idle("bad-args");
 
         let empty = daemon.dispatch(1, &request(11, "config.set"));
         assert_eq!(empty.id, 11, "the caller needs its id back to match the reply");
@@ -877,7 +915,7 @@ mod tests {
 
     #[test]
     fn an_unknown_command_keeps_its_id() {
-        let response = idle().dispatch(1, &request(77, "launch_missiles"));
+        let response = idle("unknown-cmd").dispatch(1, &request(77, "launch_missiles"));
         assert_eq!(response.id, 77, "the caller needs its id back to match the reply");
         assert!(!response.ok);
         assert!(
