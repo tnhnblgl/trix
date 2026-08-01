@@ -14,3 +14,4 @@ pub mod probe;
 pub mod record;
 pub mod replay;
 pub mod stats;
+pub mod thumb;

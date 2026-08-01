@@ -19,8 +19,16 @@ GPU framebuffer → capture texture (VRAM) → hardware encoder (VRAM) → tiny 
 ```
 
 Only *encoded* packets (~1 MB/s at 8 Mbps) ever enter system memory. This single
-decision is what makes the < 30 MB RAM target and the "no micro-stutter" promise
+decision is what makes the RAM target and the "no micro-stutter" promise
 achievable on low-end machines.
+
+**Exception (stage 3, spec §5.3):** clip thumbnails stage exactly one frame to
+CPU memory per clip — roughly 9 MB at 1920x1200, freed immediately. This is a
+deliberate, bounded exception: it is paid once per clip rather than once per
+frame, it happens on the frame *after* the button press so the steady-state
+capture path is unchanged, and the alternative (decoding the finished MP4)
+would cost a decoder the engine does not otherwise need. Measured across ten
+back-to-back clips on the QuickSync path it cost **zero** dropped frames.
 
 ### Decision 2 — Media Foundation first, FFmpeg never (for the MVP)
 Instead of FFmpeg bindings, use **Windows Media Foundation (MF)** via the official

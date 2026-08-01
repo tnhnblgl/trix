@@ -17,8 +17,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result, anyhow, bail};
 use trix_proto::ClipMeta;
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_STAGING, ID3D11Device, ID3D11Texture2D,
+};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows_capture::{
     capture::{CaptureControl, Context, GraphicsCaptureApiHandler},
     frame::Frame,
@@ -44,11 +49,18 @@ use crate::{
     engine::{EngineCommand, EngineStatus},
     library,
     stats::{LatencyHistogram, StatsReporter, mb},
+    thumb,
 };
 
 /// Extra ring depth beyond the clip length so a clip can always start on the
 /// keyframe *before* its nominal start (hardware GOPs are ~2.3 s here).
 const KEYFRAME_MARGIN_100NS: i64 = 30_000_000; // 3 s
+
+/// How long `save_clip` waits for the capture thread to stage its thumbnail
+/// frame. Fifteen frames at 60 fps — long enough to cover a mux that finished
+/// unusually fast, short enough that a frozen screen does not visibly delay
+/// the clip the user is waiting for.
+const THUMB_STAGE_WAIT: Duration = Duration::from_millis(250);
 
 pub struct ReplayOptions {
     /// Testing hook: save a clip automatically N seconds after start.
@@ -118,6 +130,16 @@ struct ReplaySession {
     /// mode change at the new size; the blit scales it into the encoder's
     /// fixed resolution, and this only exists to log the transition once.
     input_size: (u32, u32),
+
+    /// Set when a clip is requested; the next frame stages itself and clears
+    /// it. Deliberately *not* a copy of every frame — a per-frame 9 MB GPU
+    /// blit would cost exactly the gameplay impact this project exists to
+    /// avoid. The cost is a thumbnail one frame (~16 ms) after the button
+    /// press, which nobody can perceive.
+    thumb_wanted: bool,
+    /// The frame staged on the tick after a clip request, waiting for
+    /// `save_clip` to encode it.
+    thumb_staged: Option<StagedFrame>,
 
     /// Wall time spent inside the capture callback per frame (convert +
     /// encode submit + drain) — the gameplay-impact number.
@@ -314,6 +336,98 @@ impl ReplaySession {
     }
 }
 
+/// One frame copied out of VRAM, tightly packed, waiting to become a JPEG.
+struct StagedFrame {
+    bgra: Vec<u8>,
+    width: u32,
+    height: u32,
+    /// Row pitch of `bgra`, not of the texture it came from — the driver's
+    /// padding is dropped during the copy.
+    stride: usize,
+}
+
+impl ReplaySession {
+    /// Asks the next frame to stage itself. Called from the control thread.
+    ///
+    /// Any frame left over from a previous clip is dropped first. A staging
+    /// frame that lands *after* its own clip has given up waiting would
+    /// otherwise be served to the next clip, putting a preview from seconds
+    /// ago — a different moment entirely — on it.
+    fn request_thumbnail(&mut self) {
+        self.thumb_staged = None;
+        self.thumb_wanted = true;
+    }
+
+    /// Takes whatever the last request produced, if anything.
+    fn take_staged_thumbnail(&mut self) -> Option<StagedFrame> {
+        self.thumb_staged.take()
+    }
+
+    /// Copies one capture frame out of VRAM into a tightly packed BGRA buffer.
+    ///
+    /// The `Map` below waits for the GPU to finish the copy, so this stalls the
+    /// capture callback for a few milliseconds — once, on the frame after a
+    /// clip request. That is the deliberate trade: the alternative is either a
+    /// per-frame copy (the gameplay cost this project exists to avoid) or
+    /// decoding the finished MP4 (a decoder the engine does not otherwise
+    /// need). A single dropped frame at the exact moment of a button press is
+    /// the worst case, and the ring already holds the seconds before it.
+    fn stage_thumbnail(&self, source: &ID3D11Texture2D) -> Result<StagedFrame> {
+        unsafe {
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            source.GetDesc(&mut desc);
+            if desc.Width == 0 || desc.Height == 0 {
+                bail!("capture frame is {}x{}", desc.Width, desc.Height);
+            }
+            // WGC hands us BGRA. Refusing anything else is what stops a
+            // surprising format from becoming a silently wrong-coloured
+            // thumbnail rather than a log line.
+            if desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
+                bail!("capture frame is DXGI format {}, expected BGRA", desc.Format.0);
+            }
+
+            // From the texture rather than from `self.converter`, which holds
+            // only the *video* device and context. Same underlying device.
+            let device: ID3D11Device =
+                source.GetDevice().context("the capture texture has no device")?;
+            let context = device.GetImmediateContext().context("no immediate context")?;
+
+            let staging_desc = D3D11_TEXTURE2D_DESC {
+                Usage: D3D11_USAGE_STAGING,
+                BindFlags: 0,
+                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                MiscFlags: 0,
+                ..desc
+            };
+            let mut staging: Option<ID3D11Texture2D> = None;
+            device
+                .CreateTexture2D(&staging_desc, None, Some(&mut staging))
+                .context("CreateTexture2D(staging)")?;
+            let staging = staging.context("no staging texture")?;
+
+            context.CopyResource(&staging, source);
+
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            context
+                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .context("mapping the staged frame")?;
+
+            // Copied row by row: the driver's `RowPitch` is usually larger
+            // than `width * 4`, and handing that padding to the JPEG encoder
+            // as if it were pixels is what produces a sheared image.
+            let row = desc.Width as usize * 4;
+            let mut bgra = vec![0u8; row * desc.Height as usize];
+            for y in 0..desc.Height as usize {
+                let src = (mapped.pData as *const u8).add(y * mapped.RowPitch as usize);
+                std::ptr::copy_nonoverlapping(src, bgra.as_mut_ptr().add(y * row), row);
+            }
+            context.Unmap(&staging, 0);
+
+            Ok(StagedFrame { bgra, width: desc.Width, height: desc.Height, stride: row })
+        }
+    }
+}
+
 impl GraphicsCaptureApiHandler for ReplaySession {
     type Flags = ReplayFlags;
     type Error = anyhow::Error;
@@ -358,6 +472,8 @@ impl GraphicsCaptureApiHandler for ReplaySession {
             frames_dropped: 0,
             frames_paced: 0,
             input_size: (flags.settings.width, flags.settings.height),
+            thumb_wanted: false,
+            thumb_staged: None,
             frame_latency: LatencyHistogram::new(),
             stats,
             _manager: manager,
@@ -414,6 +530,17 @@ impl GraphicsCaptureApiHandler for ReplaySession {
             self.frames_dropped += 1;
         }
         self.last_frame_qpc = frame_qpc;
+
+        // After the encode, so a thumbnail never delays the frame that the
+        // clip is actually made of.
+        if std::mem::take(&mut self.thumb_wanted) {
+            match self.stage_thumbnail(frame.as_raw_texture()) {
+                Ok(staged) => self.thumb_staged = Some(staged),
+                // A thumbnail is a nicety; the clip is the product. This must
+                // never fail a capture callback.
+                Err(e) => tracing::warn!(error = %format!("{e:#}"), "could not stage a thumbnail"),
+            }
+        }
 
         self.pump_audio_to(frame_qpc - SILENCE_GRACE_100NS);
 
@@ -488,12 +615,59 @@ fn save_clip(
     encoder_name: &str,
 ) -> Result<Option<SavedClip>> {
     let started = Instant::now();
-    let snapshot = capture.callback().lock().snapshot_clip()?;
+    let callback = capture.callback();
+    let snapshot = {
+        let mut session = callback.lock();
+        // Requested before the snapshot and read after the mux, so the capture
+        // thread has the whole write to produce a frame. Ordering matters: ask
+        // afterwards and the answer is always "not yet".
+        session.request_thumbnail();
+        session.snapshot_clip()?
+    };
     let Some(snapshot) = snapshot else { return Ok(None) };
 
     let id = library::allocate_clip_id(clip_dir)?;
     let path = library::mp4_path(clip_dir, &id);
     write_clip(&snapshot, &path)?;
+
+    // A thumbnail is never allowed to cost the clip: every failure here is a
+    // warning over an MP4 that is already safely on disk. `library::scan`
+    // treats a missing `.jpg` as a clip without a preview, not as a broken one.
+    // The mux usually outlasts the capture thread's next frame, so the first
+    // poll almost always succeeds. Almost: a fast mux on a quiet screen can
+    // overtake it, and measured over ten back-to-back clips that cost two of
+    // them their preview. Waiting a few frames is free when the frame is
+    // already there and is the difference between a full library grid and one
+    // with holes in it.
+    let deadline = Instant::now() + THUMB_STAGE_WAIT;
+    let staged = loop {
+        if let Some(staged) = callback.lock().take_staged_thumbnail() {
+            break Some(staged);
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+
+    if let Some(staged) = staged {
+        match thumb::encode_jpeg(&staged.bgra, staged.width, staged.height, staged.stride) {
+            Ok(jpeg) => {
+                let thumb_path = library::thumb_path(clip_dir, &id);
+                match std::fs::write(&thumb_path, &jpeg) {
+                    Ok(()) => tracing::debug!(clip = %id, bytes = jpeg.len(), "thumbnail written"),
+                    Err(e) => {
+                        tracing::warn!(path = %thumb_path.display(), %e, "thumbnail not written")
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(error = %format!("{e:#}"), "thumbnail encode failed"),
+        }
+    } else {
+        // Not an error: nothing was delivered in the whole window, which means
+        // a genuinely frozen screen.
+        tracing::debug!(clip = %id, "no frame was staged for a thumbnail");
+    }
 
     let last = &snapshot.video[snapshot.video.len() - 1];
     let video_100ns = last.pts_100ns + last.duration_100ns - snapshot.base_pts;
