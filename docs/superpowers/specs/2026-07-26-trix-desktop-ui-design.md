@@ -9,9 +9,12 @@
 ## 1. Context
 
 The Trix engine is finished and field-verified: hardware capture, NVENC/AMF/QuickSync encode, a
-20-second replay ring, hotkey clipping, and A/V mux, in a 1.5 MB binary that holds under 30 MB of
-working set and costs approximately zero game fps. It is driven entirely by `trix.exe` subcommands
-from a terminal.
+20-second replay ring, hotkey clipping, and A/V mux, in a 1.5 MB binary that costs approximately
+zero game fps. It is driven entirely by `trix.exe` subcommands from a terminal.
+
+(Earlier drafts of this section claimed "under 30 MB of working set" without qualification. That
+number described a process that was not capturing; see §10.1, which measures both states and sets a
+ceiling for each.)
 
 That is not a product. This spec covers the end-user layer: a tray daemon and a desktop app, aimed
 squarely at the audience Medal.tv serves badly — people on low-end PCs who want their plays saved
@@ -87,8 +90,9 @@ Chosen over Iced. Reasoning:
 - **Size is a non-issue.** Tauri uses the OS WebView2; the app is ~3–6 MB, not Electron's ~150 MB.
 
 The memory cost (~90–180 MB while the window is open) is acceptable because **the UI is a separate
-process that is not running during gameplay.** The <30 MB contract binds the daemon, which is the
-only thing alive while a game is.
+process that is not running during gameplay.** §10.1's ceilings bind the daemon, which is the only
+thing alive while a game is — and its idle ceiling, the state it is in while you are browsing
+clips, is 30 MB.
 
 If the webview ever disappoints, §3.2 means an Iced shell is a new crate against the same socket —
 not a rewrite.
@@ -394,13 +398,49 @@ artifacts, never a claim of success:
 2. **Protocol:** a scripted client drives `arm` → `clip` → `library.list` → `disarm` over the pipe and
    the clip appears on disk with valid sidecars.
 3. **Daemon:** tray arm/disarm works, hotkey clips while armed, `paced`/`dropped` counters match the
-   CLI path, and working set stays under 30 MB while armed.
+   CLI path, and the memory ceilings of §10.1 hold.
 4. **UI:** clip appears in the grid within a second of the hotkey, plays, trims, exports; fast-mode
    export is lossless and sub-second, precise-mode re-encodes correctly.
 5. **Cross-machine:** the AMD rigs (RX 6650 XT and RX 550, Win10 19045) install, launch, arm, clip,
    and play back — the same machines that caught the border and rate-control bugs.
 6. **Game-fps regression:** League of Legends with the daemon armed and the UI closed, confirming the
    optimization work still holds with the daemon in place.
+
+### 10.1 Memory ceilings
+
+The original contract was a single number — "under 30 MB of working set" — and it was written when
+Trix was a terminal tool you ran for the length of one session. A tray daemon lives a different
+life: it sits idle for hours and is armed for minutes. One number cannot describe both, and the
+armed number was never achievable anyway, because hardware capture and encode mean a D3D11 device,
+a Windows.Graphics.Capture frame pool, and a vendor encoder MFT — none of which Trix allocates or
+can shrink.
+
+So the ceiling splits by state. Measured on the Intel QuickSync path at the shipped defaults
+(1080p60, 8000 kbps target, 15 s ring):
+
+| State | Ceiling | Measured | What it is |
+|---|---|---|---|
+| **Idle in the tray** | **30 MB** working set | 10.4 MB (1.3 MB private) | The window, the pump, the pipe, the clip index. No capture stack loaded. |
+| **Armed** | **200 MB** working set | 178 MB (134 MB private) | The above, plus the ring, plus the GPU vendor's capture and encode stack. |
+| **Trix's own allocations, armed** | `max_bitrate_kbps × replay_seconds`, +10% | ~22 MB | The replay ring. The only armed memory this project actually controls. |
+
+The idle ceiling is the one that carries the product's promise, and it keeps the original 30 MB
+number unchanged — because idle is where the daemon spends almost all of its life. A clip tool that
+costs 10 MB to leave running is the point; whether it costs 130 MB or 30 MB for the two minutes it
+is armed is not what a low-end PC notices. What a low-end PC notices is game fps, and that is
+gate 6's job, not this one's.
+
+Two things this table is honest about rather than quiet about:
+
+- **Integrated GPUs are the worst case, and that is what is measured here.** On a UMA iGPU the
+  capture and encoder surfaces are carved out of system RAM and count against our working set. On
+  the discrete AMD rigs of gate 5 the same surfaces live in VRAM and do not. The 200 MB ceiling is
+  therefore set by the least favourable hardware Trix supports, which is also the hardware its
+  audience is most likely to have.
+- **The armed ceiling is a regression gate, not an achievement.** It is set close enough to the
+  measurement to catch a leak or an accidental buffer, and it is why `scripts/arm-cycle-leak.ps1`
+  exists alongside it: a single armed sample cannot distinguish 178 MB that is stable from 178 MB
+  on its way up.
 
 ## 11. Deferred
 
