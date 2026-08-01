@@ -127,7 +127,7 @@ pub(crate) fn apply_rate_control(transform: &IMFTransform, settings: &RecorderSe
     );
 }
 
-unsafe fn set_codec_u32(codec: &ICodecAPI, key: &GUID, value: u32, what: &str) {
+pub(crate) unsafe fn set_codec_u32(codec: &ICodecAPI, key: &GUID, value: u32, what: &str) {
     let var = variant_u32(value);
     if let Err(e) = unsafe { codec.SetValue(key, &var) } {
         tracing::warn!(%e, what, "ICodecAPI SetValue failed");

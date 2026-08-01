@@ -23,8 +23,23 @@ use windows::Win32::Media::MediaFoundation::{
 };
 use windows::core::Interface;
 
-use crate::encode::mf::{RecorderSettings, allocated_string, apply_rate_control, video_type};
-use windows::Win32::Media::MediaFoundation::MFT_FRIENDLY_NAME_Attribute;
+use crate::encode::mf::{
+    RecorderSettings, allocated_string, apply_rate_control, set_codec_u32, video_type,
+};
+use windows::Win32::Media::MediaFoundation::{
+    CODECAPI_AVEncMPVGOPSize, ICodecAPI, MFT_FRIENDLY_NAME_Attribute,
+};
+
+/// Keyframe interval for the replay encoder, in frames — one second's worth.
+///
+/// A named function rather than an inline `fps.max(1)` so there is something a
+/// test can actually break. The two failures worth guarding are a hardcoded
+/// interval (which stops tracking `fps` and makes the ring overshoot again at
+/// any other frame rate) and a zero, which means "driver default" on some
+/// encoders and "every frame is a keyframe" on others.
+fn gop_size(fps: u32) -> u32 {
+    fps.max(1)
+}
 
 /// One encoded H.264 access unit, CPU-resident (the only pixels-derived bytes
 /// that ever touch system RAM in the replay pipeline).
@@ -103,6 +118,33 @@ impl H264Encoder {
             // streaming — the media-type hint alone lets AMF overshoot ~4×,
             // which would also blow the replay ring's RAM budget.
             apply_rate_control(&transform, settings);
+
+            // Pin the GOP to one second of frames (spec §6.3). Two things
+            // depend on it: fast-mode trim snaps the in/out handles to
+            // keyframes, so a 1 s GOP caps snap error at ~1 s; and the replay
+            // ring starts at the previous keyframe, so an unpinned GOP made a
+            // configured 20 s ring hand back 21.4 s and report
+            // `ring_seconds_used` above `ring_seconds_total` — an invariant
+            // violation the UI's progress bar divides by.
+            //
+            // Deliberately NOT inside `apply_rate_control`: that function is
+            // shared with `MfRecorder` (`mf.rs`), the `trix record` path, whose
+            // output §6.3 does not cover and whose long GOP is correct for a
+            // file written straight to disk rather than held in a ring.
+            //
+            // Best-effort, like every other codec property here: an encoder
+            // that rejects it keeps running on its default GOP. `max(1)` because
+            // a zero GOP means "driver default" on some encoders and
+            // "every frame is a keyframe" on others — either would silently
+            // undo this.
+            if let Ok(codec) = transform.cast::<ICodecAPI>() {
+                set_codec_u32(
+                    &codec,
+                    &CODECAPI_AVEncMPVGOPSize,
+                    gop_size(settings.fps),
+                    "GOP size",
+                );
+            }
 
             let info = transform.GetOutputStreamInfo(0)?;
             if info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 == 0 {
@@ -352,5 +394,34 @@ fn activate_hardware_encoder(device: &ID3D11Device) -> Result<(IMFTransform, IMF
 
         let transform = activate.ActivateObject::<IMFTransform>().context("ActivateObject")?;
         Ok((transform, activate, name))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The keyframe interval must track the configured frame rate, because it
+    /// is what makes a `replay_seconds` ring come back at roughly
+    /// `replay_seconds` (spec §6.3): the ring starts at the previous keyframe,
+    /// so a GOP longer than a second is the overshoot.
+    ///
+    /// The interesting failure is not arithmetic — it is someone hardcoding
+    /// 60, which looks correct on this machine and silently reintroduces the
+    /// overshoot at 30 or 144 fps.
+    #[test]
+    fn the_keyframe_interval_is_one_second_at_any_frame_rate() {
+        assert_eq!(gop_size(60), 60);
+        assert_eq!(gop_size(30), 30, "a hardcoded 60 would pass at 60 fps and fail here");
+        assert_eq!(gop_size(144), 144);
+    }
+
+    /// Zero is the one value that must never reach the encoder: it means
+    /// "driver default" on some and "all-intra" on others, either of which
+    /// undoes the pin without any error being reported — `set_codec_u32` is
+    /// best-effort and logs nothing on success.
+    #[test]
+    fn a_zero_frame_rate_never_reaches_the_encoder_as_a_zero_gop() {
+        assert_eq!(gop_size(0), 1);
     }
 }
