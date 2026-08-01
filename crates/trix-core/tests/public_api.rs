@@ -114,11 +114,14 @@ fn engine_handle_is_public() {
     let _: fn(&EngineHandle) -> EngineStatus = EngineHandle::status;
     let _: fn(&EngineHandle) -> anyhow::Result<Option<trix_proto::ClipMeta>> = EngineHandle::clip;
     let _: fn(EngineHandle) -> anyhow::Result<()> = EngineHandle::stop;
+    // The readiness channel carries the first session's `EngineStatus`, not a
+    // unit: `EngineHandle::spawn` publishes it before returning so an `arm`
+    // response can name its encoder without a follow-up poll.
     let _: fn(
         &Config,
         Receiver<EngineCommand>,
         Arc<Mutex<EngineStatus>>,
-        Option<Sender<anyhow::Result<()>>>,
+        Option<Sender<anyhow::Result<EngineStatus>>>,
     ) -> anyhow::Result<()> = trix_core::replay::run_driven;
 
     // Plain CPU-side data — safe to actually construct.

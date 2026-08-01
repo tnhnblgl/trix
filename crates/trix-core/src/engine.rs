@@ -60,7 +60,10 @@ impl EngineHandle {
     /// synchronously instead of optimistically claiming success.
     pub fn spawn(config: Config) -> Result<Self> {
         let (tx, rx) = channel();
-        let (ready_tx, ready_rx) = channel::<Result<()>>();
+        // The readiness channel carries the first session's status, not just a
+        // unit: it already fires at exactly the moment capture goes live, and
+        // widening it is cheaper and less racy than a second handshake.
+        let (ready_tx, ready_rx) = channel::<Result<EngineStatus>>();
         let status = Arc::new(Mutex::new(EngineStatus {
             monitor_index: config.monitor_index,
             fps: config.fps,
@@ -77,7 +80,15 @@ impl EngineHandle {
         // A failure before the first session starts arrives here; a failure
         // after it is handled by the rebuild loop and surfaces on stop().
         match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Self { tx, status, join: Some(join) }),
+            Ok(Ok(first)) => {
+                // Publish before returning. The control loop's own first tick
+                // is up to 250 ms away and `arm` answers immediately, so
+                // without this the caller reads the all-zero default: a null
+                // encoder, a 0x0 geometry, and — during a rebuild — a stale
+                // snapshot in which a dead ring looks fully buffered.
+                *status.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = first;
+                Ok(Self { tx, status, join: Some(join) })
+            }
             Ok(Err(e)) => Err(e),
             // The channel closed without a message: the thread ended before it
             // could report. Its own Result is the better error.
@@ -145,6 +156,32 @@ mod tests {
         assert_eq!(status.ring_seconds_used, 0.0);
         assert_eq!(status.ring_seconds_total, 0);
         assert_eq!((status.frames, status.dropped, status.paced), (0, 0, 0));
+    }
+
+    /// `arm` must answer with the encoder it got, not `null`.
+    ///
+    /// `spawn` used to return as soon as the first session was live but before
+    /// the control loop's first 250 ms tick had published anything, so a UI had
+    /// to poll `status` for up to 3 s to learn which encoder it was using — and
+    /// during a display-change rebuild that poll returned the *stale* snapshot,
+    /// making a dead ring read as fully buffered.
+    ///
+    /// Needs a real encoder, so it is ignored by default and run explicitly;
+    /// the stage-3 gate runs it too.
+    #[test]
+    #[ignore = "needs a real encoder; run with --ignored"]
+    fn spawn_returns_a_status_that_already_names_the_encoder() {
+        let engine = EngineHandle::spawn(Config::default()).expect("arm on real hardware");
+        let status = engine.status();
+        assert!(!status.encoder.is_empty(), "arm must not answer with a null encoder");
+        assert!(
+            status.width > 0 && status.height > 0,
+            "geometry must be live too, got {}x{}",
+            status.width,
+            status.height
+        );
+        assert_eq!(status.fps, Config::default().fps, "the configured fps must be published");
+        engine.stop().expect("clean stop");
     }
 
     /// `arm` has to be able to answer "that monitor does not exist" instead of

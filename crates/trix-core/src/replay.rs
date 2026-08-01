@@ -576,7 +576,7 @@ pub fn run_driven(
     config: &Config,
     commands: Receiver<EngineCommand>,
     status: Arc<Mutex<EngineStatus>>,
-    ready: Option<Sender<Result<()>>>,
+    ready: Option<Sender<Result<EngineStatus>>>,
 ) -> Result<()> {
     if config.gpu_priority_low() {
         crate::capture::lower_gpu_priority();
@@ -593,7 +593,7 @@ fn run_driven_inner(
     config: &Config,
     commands: &Receiver<EngineCommand>,
     status: &Arc<Mutex<EngineStatus>>,
-    ready: &mut Option<Sender<Result<()>>>,
+    ready: &mut Option<Sender<Result<EngineStatus>>>,
     hotkey: Option<&control::Hotkey>,
     options: ReplayOptions,
 ) -> Result<()> {
@@ -757,7 +757,7 @@ fn run_session(
     hotkey: Option<&control::Hotkey>,
     commands: &Receiver<EngineCommand>,
     status: &Arc<Mutex<EngineStatus>>,
-    ready: &mut Option<Sender<Result<()>>>,
+    ready: &mut Option<Sender<Result<EngineStatus>>>,
     run_started: Instant,
     auto_clip_fired: &mut bool,
 ) -> Result<SessionEnd> {
@@ -779,7 +779,25 @@ fn run_session(
     };
     let LiveSession { capture, encoder_name, audio_handle, clip_dir, width, height } = live;
     if let Some(tx) = ready.take() {
-        let _ = tx.send(Ok(()));
+        // Carries the session's facts, not just "ready": `EngineHandle::spawn`
+        // returns the instant this lands, and the 250 ms tick below that would
+        // otherwise fill them in has not run yet. Without this an `arm`
+        // response reports a null encoder and a 0x0 frame.
+        //
+        // The counters are genuinely zero here — no frame has been encoded —
+        // so this is the true state of a just-started session, not a placeholder.
+        let _ = tx.send(Ok(EngineStatus {
+            encoder: encoder_name.clone(),
+            monitor_index: config.monitor_index,
+            width,
+            height,
+            fps: config.fps,
+            ring_seconds_used: 0.0,
+            ring_seconds_total: config.replay_seconds,
+            frames: 0,
+            dropped: 0,
+            paced: 0,
+        }));
     }
 
     let mut session_died = false;
