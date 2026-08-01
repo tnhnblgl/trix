@@ -77,7 +77,11 @@ impl ClientHandler for Daemon {
                 Err(e) => Response::err(request.id, format!("{e:#}")),
             },
             Ok(Command::ConfigSet(values)) => config_set(self, request.id, &values),
-            Ok(Command::MonitorsList) => match trix_core::probe::monitors() {
+            // `monitors_true_pixels`, not `monitors`: DXGI's sizes are
+            // DPI-virtualised and a settings dropdown must offer the resolution
+            // clips actually come out at. `trix probe` keeps using `monitors`,
+            // because its stdout is a frozen contract.
+            Ok(Command::MonitorsList) => match trix_core::probe::monitors_true_pixels() {
                 Ok(found) => named_array(request.id, "monitors", serde_json::to_value(&found)),
                 Err(e) => Response::err(request.id, format!("{e:#}")),
             },

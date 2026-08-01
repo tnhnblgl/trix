@@ -29,6 +29,7 @@ use windows::{
     },
     core::{GUID, PWSTR, s, w},
 };
+use windows_capture::monitor::Monitor;
 
 pub fn run() -> Result<()> {
     println!("trix probe — platform capability report");
@@ -123,6 +124,53 @@ struct AdapterReport {
 /// Every desktop-attached monitor, flat, in `config.monitor_index` order.
 pub fn monitors() -> Result<Vec<MonitorInfo>> {
     Ok(adapters()?.into_iter().flat_map(|adapter| adapter.monitors).collect())
+}
+
+/// [`monitors`], with `width`/`height` replaced by each monitor's actual
+/// display mode instead of DXGI's DPI-virtualised desktop rectangle.
+///
+/// `DesktopCoordinates` is scaled by the display's DPI setting — a 1920x1200
+/// screen at 125% enumerates as 1536x960 — while the capture path sizes its
+/// encoder from `Monitor::width()`/`height()` (`EnumDisplaySettingsW`) and
+/// records real pixels. A settings dropdown fed the DXGI numbers would offer a
+/// resolution no clip ever comes out at.
+///
+/// This is a sibling of [`monitors`] rather than a fix inside it because
+/// [`print_monitors`] prints what `monitors` returns and `trix probe`'s stdout
+/// is a frozen contract. DXGI still supplies enumeration order, index, device
+/// name, adapter, and position; only the size comes from the display mode.
+///
+/// Making the process DPI-aware would fix this at the source, but it is a
+/// process-wide behaviour change that would move `trix probe`'s output too —
+/// so the narrow fix is the correct one here.
+///
+/// A monitor that fails to resolve keeps its DXGI size and is **not** dropped:
+/// a shorter list would silently renumber every `monitor_index` after it, which
+/// would repoint a user's configured screen.
+pub fn monitors_true_pixels() -> Result<Vec<MonitorInfo>> {
+    let mut found = monitors()?;
+    for info in &mut found {
+        // `Monitor::from_index` counts from 1, `MonitorInfo::index` from 0 —
+        // the same conversion `replay.rs`'s `start_session` performs.
+        let resolved = Monitor::from_index(info.index as usize + 1)
+            .map_err(|e| e.to_string())
+            .and_then(|m| match (m.width(), m.height()) {
+                (Ok(w), Ok(h)) => Ok((w, h)),
+                _ => Err("no display mode".to_string()),
+            });
+        match resolved {
+            Ok((w, h)) => {
+                info.width = w as i32;
+                info.height = h as i32;
+            }
+            Err(e) => tracing::warn!(
+                index = info.index,
+                error = %e,
+                "monitor did not resolve to a display mode; keeping the DXGI size"
+            ),
+        }
+    }
+    Ok(found)
 }
 
 /// One pass over DXGI: every adapter, and the desktop-attached outputs of each.
@@ -403,6 +451,60 @@ mod tests {
             assert!(monitor.width > 0 && monitor.height > 0, "monitor {position} has no size");
             assert!(!monitor.name.is_empty(), "monitor {position} has no device name");
             assert!(!monitor.adapter.is_empty(), "monitor {position} names no adapter");
+        }
+    }
+
+    /// Resolving real sizes must not disturb the enumeration itself.
+    ///
+    /// A monitor whose display mode cannot be read is deliberately kept at its
+    /// DXGI size rather than dropped, because a shorter list silently renumbers
+    /// every `monitor_index` after it and repoints the user's configured screen.
+    /// That is what this test guards.
+    ///
+    /// It deliberately does **not** claim to guard the sizes: the `>=` below
+    /// holds when the two are equal, so it still passes against a
+    /// `monitors_true_pixels` that does nothing at all — verified by making it
+    /// a passthrough, which this test survived and
+    /// `published_sizes_match_what_the_engine_would_capture` caught. That one is
+    /// the real guard; this one covers the list shape.
+    #[test]
+    fn resolving_real_sizes_preserves_the_enumeration() {
+        let virtualised = monitors().expect("DXGI monitor enumeration must succeed");
+        let real = monitors_true_pixels().expect("same enumeration, real sizes");
+        assert_eq!(real.len(), virtualised.len(), "the two must enumerate identically");
+
+        for (r, v) in real.iter().zip(virtualised.iter()) {
+            assert_eq!(r.index, v.index, "order and index must be preserved");
+            assert_eq!(r.name, v.name, "only the size may differ");
+            assert!(
+                r.width >= v.width && r.height >= v.height,
+                "DPI scaling only ever shrinks what DXGI reports: real {}x{} vs dxgi {}x{}",
+                r.width,
+                r.height,
+                v.width,
+                v.height
+            );
+        }
+    }
+
+    /// What the fix is actually for: the size `monitors.list` publishes must be
+    /// the size the engine captures at. `replay.rs` sizes the encoder from
+    /// `Monitor::width()`/`height()`, so a dropdown offering anything else is
+    /// offering a resolution no clip will ever come out at.
+    #[test]
+    fn published_sizes_match_what_the_engine_would_capture() {
+        for info in monitors_true_pixels().expect("enumeration must succeed") {
+            let monitor = Monitor::from_index(info.index as usize + 1)
+                .expect("the engine resolves this same index");
+            let (w, h) = (monitor.width().expect("width"), monitor.height().expect("height"));
+            assert_eq!(
+                (info.width, info.height),
+                (w as i32, h as i32),
+                "monitor {} is published at {}x{} but captured at {w}x{h}",
+                info.index,
+                info.width,
+                info.height
+            );
         }
     }
 
