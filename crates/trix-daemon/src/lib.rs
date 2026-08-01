@@ -18,6 +18,7 @@
 //! `trix-proto` are libraries with a thin consumer (`trix-cli`); this gives the
 //! daemon binary the same shape.
 
+pub mod autostart;
 pub mod clients;
 pub mod dispatch;
 pub mod pipe;

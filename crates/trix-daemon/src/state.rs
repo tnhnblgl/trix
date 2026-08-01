@@ -554,6 +554,13 @@ impl Daemon {
             "clip_dir_resolved".to_string(),
             Value::from(config.clip_dir_path().to_string_lossy().as_ref()),
         );
+        // Overridden, not read from the file: the registry is the source of
+        // truth for autostart (spec §7.3). A user who removed the Run entry in
+        // regedit or a startup manager has disabled autostart, and a settings
+        // page still showing the toggle on would be telling them otherwise.
+        // The key exists in `Config` so it round-trips through `config.set`
+        // and survives in the file; what it holds is advisory.
+        object.insert("autostart".to_string(), Value::Bool(crate::autostart::is_enabled()));
         Ok(Value::Object(object))
     }
 
@@ -624,6 +631,25 @@ impl Daemon {
             .config_path
             .as_deref()
             .context("there is nowhere to save the config — APPDATA is not set")?;
+
+        // Before the file, not after. `autostart` lives in the registry
+        // (spec §7.3), so this is the one key whose real write is not
+        // `save_to`, and it can fail on its own. Doing it first keeps this
+        // function's all-or-nothing contract: a registry failure here means
+        // nothing was written and nothing was applied, exactly like a value
+        // that failed validation. Writing the file first would instead leave
+        // every *other* key in this call persisted to disk while the caller
+        // was told the call failed — and live after the next restart.
+        //
+        // The residue if the file write below fails is the registry entry
+        // alone, which is harmless: the registry is the source of truth, so
+        // `config.get` reports what actually happened rather than a stale
+        // file value.
+        if values.contains_key("autostart") {
+            crate::autostart::set_enabled(updated.autostart)
+                .with_context(|| format!("could not set autostart to {}", updated.autostart))?;
+        }
+
         updated.save_to(path).context("config.set could not save the config")?;
 
         let after = config_object(&updated)?;
@@ -1040,6 +1066,28 @@ mod tests {
     fn idle(name: &str, config: Config) -> Daemon {
         let dir = std::env::temp_dir().join(format!("trix-idle-{name}-{}", std::process::id()));
         Daemon::new_at(Config { clip_dir: dir.to_string_lossy().into_owned(), ..config }, None)
+    }
+
+    /// `config.get` must report the registry, not the file (spec §7.3).
+    ///
+    /// Loads the daemon with the *opposite* of whatever the registry actually
+    /// says, so the two disagree and only one answer can be right. Asserting
+    /// against `is_enabled()` alone would re-implement the override in its own
+    /// assertion and pass no matter what `config_json` did; this fails the
+    /// moment the override line is dropped, on a machine in either state.
+    ///
+    /// Read-only — it never writes a Run entry.
+    #[test]
+    fn config_get_reports_the_registry_and_not_the_config_file() {
+        let truth = crate::autostart::is_enabled();
+        let daemon = idle("autostart", Config { autostart: !truth, ..Config::default() });
+
+        let json = daemon.config_json().unwrap();
+        assert_eq!(
+            json.get("autostart"),
+            Some(&Value::Bool(truth)),
+            "the Run entry decides, whatever the config file holds"
+        );
     }
 
     #[test]
