@@ -172,6 +172,87 @@ fn created_from_id(id: &str) -> String {
     format!("{}-{}-{}T{}:{}:{}", &d[..4], &d[4..6], &d[6..8], &t[..2], &t[2..4], &t[4..6])
 }
 
+/// Deletes the oldest non-favorite clips until the library fits under
+/// `max_gb`, returning the ids removed, oldest first (spec §5.4).
+///
+/// `max_gb == 0` disables the ceiling and deletes nothing.
+///
+/// Favorites are never deleted, even if the favorites alone exceed the
+/// ceiling — starring a clip is the user saying "keep this", and the ceiling
+/// is a convenience, not a quota. When that happens the library is left over
+/// budget and this logs it; the alternative is deleting the one clip the user
+/// explicitly protected.
+///
+/// A clip that fails to delete is logged and skipped rather than aborting the
+/// prune: this runs immediately after a clip save, and one locked file must
+/// not stop the ceiling from doing its job for every other clip. The `.mp4` is
+/// what decides — same rule as the daemon's `delete`. If it will not go, the
+/// clip still holds its bytes and is not reported as removed; only once it is
+/// gone are the sidecar and thumbnail cleaned up best-effort. Counting a clip
+/// as freed while its `.mp4` is still on disk would have the ceiling stop
+/// pruning against space it never actually reclaimed.
+pub fn prune_to_ceiling(dir: &Path, max_gb: u32) -> Result<Vec<String>> {
+    if max_gb == 0 {
+        return Ok(Vec::new());
+    }
+    let ceiling = u64::from(max_gb).saturating_mul(1_000_000_000);
+
+    // `scan` returns newest first; the ceiling deletes oldest first.
+    let mut clips = scan(dir)?;
+    clips.reverse();
+
+    let mut held: u64 = clips.iter().map(|c| c.bytes).sum();
+    let mut deleted = Vec::new();
+
+    for clip in &clips {
+        if held <= ceiling {
+            break;
+        }
+        if clip.favorite {
+            continue;
+        }
+
+        match std::fs::remove_file(mp4_path(dir, &clip.id)) {
+            Ok(()) => {}
+            // Already gone: it is not holding those bytes either, and its
+            // companions are litter `scan` would never surface again.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(
+                    clip = clip.id,
+                    error = %e,
+                    "ceiling could not delete a clip; keeping it and moving on"
+                );
+                continue;
+            }
+        }
+
+        for path in [sidecar_path(dir, &clip.id), thumb_path(dir, &clip.id)] {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "the ceiling deleted a clip but not one of its companion files"
+                ),
+            }
+        }
+
+        held = held.saturating_sub(clip.bytes);
+        deleted.push(clip.id.clone());
+    }
+
+    if held > ceiling {
+        tracing::warn!(
+            held_bytes = held,
+            ceiling_bytes = ceiling,
+            "the clip library is over its ceiling and nothing left is safe to delete"
+        );
+    }
+    Ok(deleted)
+}
+
 /// Local-time RFC 3339 stamp for a clip being saved now.
 pub fn now_rfc3339_local() -> String {
     let now = unsafe { GetLocalTime() };
@@ -286,6 +367,49 @@ mod tests {
         let clips = scan(&dir).unwrap();
         let ids: Vec<&str> = clips.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, ["20260726_110000", "20260726_100000"], "newest first");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The ceiling deletes oldest-first and never touches a favorite, even
+    /// when the favorites alone exceed it — a user who starred a clip has
+    /// said "keep this", and silently deleting it is the one unrecoverable
+    /// mistake this feature could make.
+    #[test]
+    fn the_ceiling_deletes_oldest_first_and_never_a_favorite() {
+        let dir = std::env::temp_dir().join(format!("trix-ceiling-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Four clips of 1 GB each; the second-oldest is a favorite.
+        let gb = 1_000_000_000u64;
+        for (id, favorite) in [
+            ("20260726_100000", false),
+            ("20260726_110000", true),
+            ("20260726_120000", false),
+            ("20260726_130000", false),
+        ] {
+            std::fs::write(mp4_path(&dir, id), b"video").unwrap();
+            let mut meta = sample_meta(id);
+            meta.bytes = gb;
+            meta.favorite = favorite;
+            write_sidecar(&dir, &meta).unwrap();
+        }
+
+        // A 2 GB ceiling against 4 GB held: two must go.
+        let deleted = prune_to_ceiling(&dir, 2).unwrap();
+        assert_eq!(
+            deleted,
+            ["20260726_100000", "20260726_120000"],
+            "oldest first, skipping the favorite"
+        );
+        assert!(!mp4_path(&dir, "20260726_100000").exists());
+        assert!(!sidecar_path(&dir, "20260726_100000").exists(), "the sidecar goes with it");
+        assert!(mp4_path(&dir, "20260726_110000").exists(), "a favorite is never deleted");
+        assert!(mp4_path(&dir, "20260726_130000").exists(), "the newest survives");
+
+        // A ceiling of 0 disables the feature outright.
+        assert!(prune_to_ceiling(&dir, 0).unwrap().is_empty());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

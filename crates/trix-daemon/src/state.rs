@@ -486,6 +486,7 @@ impl Daemon {
             // the incremental update that keeps `library.list` off the disk
             // after startup (spec §5.2).
             self.lock_library().insert(0, meta.clone());
+            self.enforce_library_ceiling();
         }
         Ok(saved)
     }
@@ -700,6 +701,41 @@ impl Daemon {
     // concerned (spec §5.2): `list` never touches the disk, and every mutation
     // writes the disk first and then updates the cache, so a failed write never
     // leaves a client believing something happened that did not.
+
+    /// Deletes the oldest non-favorite clips until the library fits under
+    /// `max_library_gb`, and evicts whatever went from the cache (spec §5.4).
+    ///
+    /// Runs *after* a save, never before: the clip the user just asked for is
+    /// never the one deleted to make room for itself. That means the library
+    /// can sit one clip over the ceiling until the next save, which is the
+    /// right trade — a ceiling is a housekeeping convenience, and losing the
+    /// clip you just pressed the hotkey for is the product failing at its job.
+    ///
+    /// A failed prune never fails the clip that triggered it. The clip is on
+    /// disk and in the cache by the time this runs; reporting an error now
+    /// would tell the user their clip did not save when it did.
+    ///
+    /// The cache eviction is not optional bookkeeping. `library.list` reads the
+    /// cache and never the disk, so a pruned clip left in it would be a row
+    /// whose file cannot be opened, that `total` still counts, and that
+    /// `rename` would happily write an orphan sidecar for — the same ghost-row
+    /// failure [`Daemon::delete`] evicts to prevent.
+    fn enforce_library_ceiling(&self) {
+        let (dir, max_gb) = {
+            let config = self.lock_config();
+            (config.clip_dir_path(), config.max_library_gb)
+        };
+        match library::prune_to_ceiling(&dir, max_gb) {
+            Ok(removed) if removed.is_empty() => {}
+            Ok(removed) => {
+                self.lock_library().retain(|clip| !removed.contains(&clip.id));
+                tracing::info!(count = removed.len(), "the clip library ceiling pruned old clips");
+            }
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "the clip library ceiling failed")
+            }
+        }
+    }
 
     /// Re-reads the clip directory and replaces the cache.
     ///
