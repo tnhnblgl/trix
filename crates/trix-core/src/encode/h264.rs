@@ -424,4 +424,68 @@ mod tests {
     fn a_zero_frame_rate_never_reaches_the_encoder_as_a_zero_gop() {
         assert_eq!(gop_size(0), 1);
     }
+
+    /// Attribution probe for the per-cycle handle leak, not an assertion about
+    /// behaviour: it activates and shuts down the hardware MFT with *nothing*
+    /// else attached — no D3D manager, no media types, no streaming messages,
+    /// no frames. Whatever handles still accumulate here are the driver's
+    /// activation cost, not something this crate's usage can give back.
+    ///
+    /// Lives inside the crate because `activate_hardware_encoder` is private,
+    /// and stays `#[ignore]`d because it needs a real hardware encoder.
+    #[test]
+    #[ignore = "needs a real encoder; run with --ignored"]
+    fn bare_mft_activation_cycles() {
+        use windows::Win32::Foundation::HMODULE;
+        use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice,
+        };
+        use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+
+        crate::encode::mf::ensure_mf_started().expect("MFStartup");
+        let mut device: Option<ID3D11Device> = None;
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                None,
+            )
+        }
+        .expect("D3D11 device");
+        let device = device.expect("D3D11 device");
+
+        let handles = || {
+            let mut n = 0u32;
+            unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut n) }.expect("handle count");
+            n
+        };
+
+        let mut samples = Vec::new();
+        for _ in 0..8 {
+            let (transform, activate, _name) =
+                activate_hardware_encoder(&device).expect("hardware encoder");
+            // The teardown H264Encoder::drop performs, and nothing more.
+            unsafe { activate.ShutdownObject() }.expect("ShutdownObject");
+            drop(transform);
+            drop(activate);
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            samples.push(handles());
+        }
+        println!("\n[bare MFT activation]");
+        for (i, n) in samples.iter().enumerate() {
+            println!("  after cycle {:<2} handles {n}", i + 1);
+        }
+        let span = (samples.len() - 1) as f64;
+        println!(
+            "  bare activation slope: {:.2} handles/cycle (excluding the first)",
+            f64::from(samples[samples.len() - 1] - samples[0]) / span
+        );
+    }
 }

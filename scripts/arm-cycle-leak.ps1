@@ -31,6 +31,43 @@
     +2 threads per cycle long before the byte count was conclusive, because
     thread counts do not oscillate the way working set does.
 
+    Handles are gated loosely, and the reason matters. Measured 2026-08-01, an
+    arm/disarm cycle leaks ~6 handles that never come back, and almost none of
+    them are ours to give back:
+
+      ~3.0/cycle  activating the hardware encoder MFT and shutting it down
+                  again -- with no D3D manager, no media types, no streaming
+                  messages and no frames attached. Proven by the ignored test
+                  `bare_mft_activation_cycles` in encode/h264.rs, which does
+                  nothing but ActivateObject/ShutdownObject in a loop and still
+                  climbs by exactly 3 every cycle. This is the Intel Quick Sync
+                  driver's activation cost; ShutdownObject is already called.
+      ~2.3/cycle  ALPC ports from one WGC capture session. `windows-capture`
+                  does remove its FrameArrived/Closed handlers and Close() both
+                  the frame pool and the session, and RoUninitialize()s its
+                  thread, so these are the platform's side of the DWM channel.
+      ~1.0/cycle  the remainder of the arm path (device manager, ring setup).
+      ~0.1/cycle  audio -- flat within noise across 8 cycles.
+
+    Attribution came from `crates/trix-core/tests/handle_leak.rs`, which cycles
+    one subsystem at a time in-process. Do not re-derive it by staring at
+    HandleCount: a process-wide number cannot say which half of an arm leaks,
+    and the object-type histogram (ALPC Port / Event / WaitCompletionPacket /
+    Key) is what made the split obvious.
+
+    The one change that would reclaim these is keeping the encoder and capture
+    session alive across a disarm -- which is exactly the thing whose removal
+    gave back ~50 MB of GPU memory and ~73 MB of private bytes per cycle. Trix
+    is a tool that sits idle at ~10 MB waiting for a game; paying 130 MB of
+    permanent idle footprint to avoid 6 handles is the wrong trade, so the
+    floor stays and this gate guards the ceiling above it instead.
+
+    The limit therefore sits well above the platform floor: it exists to catch
+    a *new* leak of Trix's own making (the ShutdownObject bug was ~37/cycle),
+    not to fail on the ~6 the driver stack keeps. A different GPU vendor will
+    have a different floor -- if this fails on an AMD or NVIDIA machine, verify
+    with the tests above before believing it.
+
     Requires a freshly built daemon:
         cargo build --release --workspace
     The binary's timestamp is checked against the newest source file, for the
@@ -49,6 +86,12 @@
 .PARAMETER MaxThreadsPerCycle
     Thread growth per cycle that fails the gate. Default 1.0, against a
     measured post-fix figure of ~0 and a pre-fix figure of 2.
+
+.PARAMETER MaxHandlesPerCycle
+    Handle growth per cycle that fails the gate. Default 15, against a measured
+    platform floor of ~6 (see above) and the ~37 the pre-ShutdownObject leak
+    produced. Chosen to sit between the two rather than snugly above the floor,
+    so the gate is not a tripwire for driver-version noise.
 #>
 [CmdletBinding()]
 param(
@@ -57,7 +100,8 @@ param(
     [int]$SettleSeconds = 12,
     [string]$DaemonPath,
     [double]$MaxMbPerCycle = 20,
-    [double]$MaxThreadsPerCycle = 1.0
+    [double]$MaxThreadsPerCycle = 1.0,
+    [double]$MaxHandlesPerCycle = 15
 )
 
 Set-StrictMode -Version Latest
@@ -229,7 +273,7 @@ $handlesPerCycle = [math]::Round(($last.Handles - $first.Handles) / $span, 2)
 "measured over $span cycles (excluding the first):"
 "  private bytes  {0,8} MB/cycle   (limit {1})" -f $mbPerCycle, $MaxMbPerCycle
 "  threads        {0,8} /cycle     (limit {1})" -f $threadsPerCycle, $MaxThreadsPerCycle
-"  handles        {0,8} /cycle     (reported, not gated)" -f $handlesPerCycle
+"  handles        {0,8} /cycle     (limit {1}, platform floor ~6)" -f $handlesPerCycle, $MaxHandlesPerCycle
 ''
 
 $failures = New-Object System.Collections.Generic.List[string]
@@ -238,6 +282,11 @@ if ($mbPerCycle -gt $MaxMbPerCycle) {
 }
 if ($threadsPerCycle -gt $MaxThreadsPerCycle) {
     $failures.Add("thread count grew $threadsPerCycle /cycle (limit $MaxThreadsPerCycle)")
+}
+if ($handlesPerCycle -gt $MaxHandlesPerCycle) {
+    $failures.Add(("handle count grew $handlesPerCycle /cycle (limit $MaxHandlesPerCycle). " +
+                   'The ~6/cycle floor is the driver stack; this is above it, so suspect ' +
+                   'Trix. crates/trix-core/tests/handle_leak.rs attributes it by subsystem.'))
 }
 
 if ($failures.Count -gt 0) {
