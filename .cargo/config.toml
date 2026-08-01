@@ -1,0 +1,12 @@
+# Link the C runtime statically, so the shipped .exe files run on a machine
+# that has never installed the Visual C++ Redistributable.
+#
+# Without this the binaries import VCRUNTIME140.dll, which is not part of
+# Windows — it arrives with the VC++ redist that games and apps happen to
+# install. On a clean PC the exe then dies at launch with an opaque
+# "VCRUNTIME140.dll was not found" dialog, which is the single most common
+# way a small Windows tool fails on someone else's computer. The UCRT
+# (api-ms-win-crt-*) is part of Windows 10+ itself and stays dynamic either
+# way. Cost: roughly +0.3 MB of binary.
+[target.'cfg(target_env = "msvc")']
+rustflags = ["-C", "target-feature=+crt-static"]
