@@ -49,6 +49,24 @@ pub struct Config {
     /// Directory clips are written to. Empty (the default) resolves to
     /// `%USERPROFILE%\Videos\Trix`.
     pub clip_dir: String,
+    /// Disk ceiling for the clip library, in GB (spec §5.4). When the library
+    /// exceeds it the daemon deletes the oldest clips that are **not** marked
+    /// `favorite`. `0` disables the ceiling entirely.
+    ///
+    /// Clip recorders are notorious for silently eating a drive; this is the
+    /// few dozen lines that prevent the most common complaint about the
+    /// category.
+    pub max_library_gb: u32,
+    /// Start the daemon at login (spec §7.3). Opt-in and off by default —
+    /// adding yourself to startup uninvited is the behaviour people resent most
+    /// in this category.
+    ///
+    /// **The registry is the source of truth, not this field.** A user who
+    /// deletes the `HKCU\…\Run` entry by hand has disabled autostart whatever
+    /// this file says, so `config.get` reports the registry and `config.set`
+    /// writes it. The key exists here so it round-trips and so a third-party UI
+    /// can offer the toggle.
+    pub autostart: bool,
 }
 
 impl Default for Config {
@@ -64,6 +82,8 @@ impl Default for Config {
             gpu_priority: "low".into(),
             stats_seconds: 0,
             clip_dir: String::new(),
+            max_library_gb: 20,
+            autostart: false,
         }
     }
 }
@@ -191,6 +211,23 @@ mod tests {
         assert_eq!(config.fps, 30);
         assert_eq!(config.replay_seconds, 20);
         assert_eq!(config.clip_dir, "");
+    }
+
+    /// Stage 3's two new keys (spec §5.4, §7.3). `deny_unknown_fields` is set,
+    /// so the upgrade path matters: a `config.toml` written before these
+    /// existed must still load rather than being reported malformed and
+    /// silently replaced by defaults — which would discard the user's whole
+    /// configuration on first run of a new build.
+    #[test]
+    fn the_stage_three_keys_default_and_an_older_config_still_loads() {
+        let config = Config::default();
+        assert_eq!(config.max_library_gb, 20, "spec §5.4 default");
+        assert!(!config.autostart, "spec §7.3: opt-in, off by default");
+
+        let older: Config = toml::from_str("fps = 30\nreplay_seconds = 20\n").unwrap();
+        assert_eq!(older.fps, 30, "the user's real settings must survive");
+        assert_eq!(older.max_library_gb, 20);
+        assert!(!older.autostart);
     }
 
     #[test]

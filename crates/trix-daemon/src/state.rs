@@ -234,6 +234,10 @@ pub(crate) const REQUIRES_REARM: [&str; 7] = [
 ///   drives, and an out-of-range index only fails at `arm` anyway.
 /// - `stats_seconds` 0..=86_400 — 0 stays legal because it is the documented
 ///   "no periodic log line", and is the default; a day is the outer bound.
+/// - `max_library_gb` 0..=10_000 — 0 stays legal because it is the documented
+///   "no ceiling"; 10 TB is past any drive this is likely to run on, and the
+///   ceiling only ever *deletes*, so an absurdly large value is inert while an
+///   absurdly small one is already handled (favorites are never pruned).
 ///
 /// The keys deliberately absent are the non-numeric ones. `rate_control` and
 /// `gpu_priority` both document falling back on an unknown value
@@ -243,13 +247,14 @@ pub(crate) const REQUIRES_REARM: [&str; 7] = [
 /// do is fall silently behind `Config`, so
 /// `every_numeric_config_key_is_range_checked` fails the build the day a
 /// numeric key is added without a bound here.
-const NUMERIC_BOUNDS: [(&str, u64, u64); 6] = [
+const NUMERIC_BOUNDS: [(&str, u64, u64); 7] = [
     ("fps", 1, 480),
     ("bitrate_kbps", 1, 200_000),
     ("max_bitrate_kbps", 0, 200_000),
     ("replay_seconds", 1, 600),
     ("monitor_index", 0, 63),
     ("stats_seconds", 0, 86_400),
+    ("max_library_gb", 0, 10_000),
 ];
 
 /// Refuses the whole request if any bounded key is out of range.
