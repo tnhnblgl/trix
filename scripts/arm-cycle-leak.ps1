@@ -11,6 +11,15 @@
     Every sample is taken while DISARMED and settled. Memory a live ring is
     holding is not a leak; memory still held with nothing armed is.
 
+    "Settled" is load-bearing and was measured, not guessed. After a disarm the
+    Intel graphics/Media Foundation stack holds its allocations on a plateau for
+    5-10 seconds and then releases them in one step. Sampling inside that
+    plateau charges ~76 MB of driver memory to Trix: at a 2 s settle this daemon
+    reads 105 MB private, and at 12 s the same daemon reads 19 MB. The default
+    below therefore sits past the cliff. Anyone shortening it is measuring the
+    driver, not a leak -- which is exactly what the numbers recorded on
+    2026-08-01 (97-101 MB disarmed) turned out to be.
+
     What it caught when it was written: the hardware encoder MFT was created
     with IMFActivate::ActivateObject and never shut down with ShutdownObject.
     Releasing the IMFTransform is not enough -- the MFT kept its D3D device
@@ -45,7 +54,7 @@
 param(
     [ValidateRange(4, 200)][int]$Cycles = 10,
     [int]$ArmSeconds = 2,
-    [int]$SettleSeconds = 2,
+    [int]$SettleSeconds = 12,
     [string]$DaemonPath,
     [double]$MaxMbPerCycle = 20,
     [double]$MaxThreadsPerCycle = 1.0
