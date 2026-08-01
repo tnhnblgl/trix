@@ -52,6 +52,7 @@ features = [
     "Win32_System_Time",
     "Win32_System_Variant",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ]
 

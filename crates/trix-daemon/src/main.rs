@@ -89,7 +89,10 @@ const SHUTDOWN_DISARM_BUDGET: std::time::Duration = std::time::Duration::from_se
 /// library off the disk, and a slow or unresponsive clip directory must not be
 /// a window in which Ctrl+C does nothing. Until the slot is filled there is
 /// nothing armed to disarm, so shutting down during the scan simply exits.
-fn spawn_shutdown_watcher(daemon: Arc<OnceLock<Arc<Daemon>>>) -> anyhow::Result<()> {
+fn spawn_shutdown_watcher(
+    daemon: Arc<OnceLock<Arc<Daemon>>>,
+    window: Arc<OnceLock<window::WindowHandle>>,
+) -> anyhow::Result<()> {
     use anyhow::Context as _;
     std::thread::Builder::new()
         .name("trix-shutdown-watcher".into())
@@ -97,8 +100,27 @@ fn spawn_shutdown_watcher(daemon: Arc<OnceLock<Arc<Daemon>>>) -> anyhow::Result<
             loop {
                 if control::shutdown_requested() {
                     tracing::info!("shutdown requested, exiting");
+                    // First, and without waiting: `process::exit` below does
+                    // not run destructors, so the tray icon's `NIM_DELETE`
+                    // has to be asked for here or the icon lingers in the
+                    // tray until the user hovers it — which is exactly what a
+                    // crashed app looks like. Asking before the disarm also
+                    // means the icon vanishes the instant the user picks Quit
+                    // rather than seconds later, and the disarm's own budget
+                    // doubles as the pump's time to act.
+                    if let Some(window) = window.get() {
+                        window.request_exit();
+                    }
                     if let Some(daemon) = daemon.get() {
                         disarm_within_budget(Arc::clone(daemon));
+                    }
+                    // By now the pump has almost always finished; this is the
+                    // residual wait for an idle daemon, whose disarm returned
+                    // immediately and gave it no time at all.
+                    if let Some(window) = window.get()
+                        && !window.wait_for_exit(std::time::Duration::from_millis(500))
+                    {
+                        tracing::warn!("the tray icon may not have been removed before exit");
                     }
                     control::mark_finalized();
                     std::process::exit(0);
@@ -153,7 +175,11 @@ fn main() -> anyhow::Result<()> {
     // spun-down drive) would be startup time in which Ctrl+C does nothing at
     // all. The daemon is handed over through the slot once it exists.
     let slot = Arc::new(OnceLock::new());
-    spawn_shutdown_watcher(Arc::clone(&slot))?;
+    // The window arrives through a slot of its own for the same reason the
+    // daemon does: the watcher is installed before either exists, and a
+    // shutdown during startup must still work.
+    let window_slot: Arc<OnceLock<window::WindowHandle>> = Arc::new(OnceLock::new());
+    spawn_shutdown_watcher(Arc::clone(&slot), Arc::clone(&window_slot))?;
 
     // Deliberately not `control::acquire_single_instance()` here: that mutex
     // is the capture-session slot, taken on `arm` and released on `disarm`
@@ -180,11 +206,11 @@ fn main() -> anyhow::Result<()> {
     // `ACTION_QUEUE_DEPTH` so a user mashing the hotkey during a mux drops
     // requests instead of stalling the pump; the drop is logged.
     //
-    // The handle is held for the rest of `main` (it is never dropped in
-    // practice — `pipe::serve` does not return, and shutdown is a
-    // `process::exit`) purely so the pump thread outlives this scope.
+    // The pump also owns the tray icon, so the handle goes into the slot the
+    // shutdown watcher reads: `process::exit` runs no destructors, and the
+    // icon has to be removed deliberately.
     let (actions_tx, actions_rx) = std::sync::mpsc::sync_channel(window::ACTION_QUEUE_DEPTH);
-    let _window = window::spawn(actions_tx, &daemon.clip_hotkey())?;
+    let _ = window_slot.set(window::spawn(actions_tx, &daemon.clip_hotkey())?);
 
     let worker_daemon = Arc::clone(&daemon);
     std::thread::Builder::new().name("trix-tray-worker".into()).spawn(move || {

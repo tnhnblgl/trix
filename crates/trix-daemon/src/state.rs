@@ -429,6 +429,11 @@ impl Daemon {
         // CLI locked out.
         let engine = EngineHandle::spawn(config)?;
         *armed = Some(Armed { engine, _slot: slot });
+        // Here rather than in the tray's own handler: `arm` is reached from the
+        // tray menu, the control socket, and the desktop UI in stage 4, and an
+        // icon that only tracked its own menu would show "idle" through a
+        // UI-initiated recording. A no-op when there is no window.
+        crate::window::publish_armed(true);
         Ok(ArmOutcome { newly_armed: true, status: self.status_of(armed.as_ref()) })
     }
 
@@ -468,6 +473,9 @@ impl Daemon {
         // was holding is genuinely free.
         drop(_slot);
         drop(armed);
+        // After the slot is back, so the icon never says "idle" about a daemon
+        // that is still holding the encoder. See the note in `arm`.
+        crate::window::publish_armed(false);
         Ok(true)
     }
 
@@ -547,6 +555,11 @@ impl Daemon {
     /// is empty by default and means "wherever the default is", and a settings
     /// page cannot show a user where their clips actually land without the
     /// daemon resolving it for them.
+    /// Where clips are written, resolved. For the tray's "Open clips folder".
+    pub fn clip_dir(&self) -> std::path::PathBuf {
+        self.lock_config().clip_dir_path()
+    }
+
     /// The configured clip hotkey, for `window::spawn`.
     ///
     /// Deliberately this one key rather than a whole-`Config` snapshot: a

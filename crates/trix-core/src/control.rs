@@ -51,6 +51,16 @@ pub fn shutdown_requested() -> bool {
     SHUTDOWN.load(Ordering::Acquire)
 }
 
+/// Requests shutdown from inside the process — the daemon tray's Quit item.
+///
+/// Sets the same flag the console handler sets, so the existing watcher does
+/// the same budgeted disarm and the same `mark_finalized`. A tray Quit that
+/// called `process::exit` directly would drop an in-flight mux, which is the
+/// one clip the user is most likely to care about.
+pub fn request_shutdown() {
+    SHUTDOWN.store(true, Ordering::Release);
+}
+
 /// Signals the ctrl handler that on-disk state is consistent; a blocked
 /// console-close handler returns (and lets Windows kill us) once this is set.
 pub fn mark_finalized() {
