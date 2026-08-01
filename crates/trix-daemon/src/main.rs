@@ -17,7 +17,7 @@ use std::sync::{Arc, OnceLock};
 use trix_core::config::Config;
 use trix_core::control;
 use trix_daemon::stats::{STATS_POLL, spawn_stats_thread};
-use trix_daemon::{pipe, state::Daemon};
+use trix_daemon::{pipe, state::Daemon, window};
 
 /// Mirrors `trix-cli`'s `tracing_subscriber` setup (`crates/trix-cli/src/main.rs`):
 /// `trix=info` by default, `trix=debug` under `-v`/`--verbose`, `RUST_LOG`
@@ -172,6 +172,26 @@ fn main() -> anyhow::Result<()> {
     // the library half (`stats.rs`) so it can be tested at a millisecond poll;
     // the production interval is passed here and nowhere else.
     spawn_stats_thread(Arc::clone(&daemon), STATS_POLL)?;
+
+    // The window is the daemon's only message pump: it owns the clip hotkey
+    // now and the tray icon next. It is deliberately kept off `Daemon` — the
+    // pump must never block, and every `Daemon` call can — so the two talk
+    // over this bounded channel with a worker thread in between. Bound to
+    // `ACTION_QUEUE_DEPTH` so a user mashing the hotkey during a mux drops
+    // requests instead of stalling the pump; the drop is logged.
+    //
+    // The handle is held for the rest of `main` (it is never dropped in
+    // practice — `pipe::serve` does not return, and shutdown is a
+    // `process::exit`) purely so the pump thread outlives this scope.
+    let (actions_tx, actions_rx) = std::sync::mpsc::sync_channel(window::ACTION_QUEUE_DEPTH);
+    let _window = window::spawn(actions_tx, &daemon.clip_hotkey())?;
+
+    let worker_daemon = Arc::clone(&daemon);
+    std::thread::Builder::new().name("trix-tray-worker".into()).spawn(move || {
+        for action in actions_rx {
+            window::handle_action(&worker_daemon, action);
+        }
+    })?;
 
     // `pipe::serve` logs "listening on {PIPE_NAME}" itself, once the first
     // pipe instance is actually bound — see the comment in `pipe.rs`.

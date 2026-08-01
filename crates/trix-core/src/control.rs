@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND};
 use windows::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -153,6 +153,26 @@ impl Hotkey {
         pretty.push(key.to_ascii_uppercase());
 
         Ok(Self { modifiers, vk, pretty: pretty.join("+") })
+    }
+
+    /// Registers this combination against `hwnd`, so `WM_HOTKEY` arrives at
+    /// that window's procedure rather than on a bare thread queue.
+    ///
+    /// [`start_hotkey`] exists for `trix replay`, which has no window and
+    /// wants a channel. The daemon has a window already (for its tray icon)
+    /// and must not run a second message pump, so it registers directly.
+    ///
+    /// # Safety
+    /// `hwnd` must belong to the calling thread — `RegisterHotKey` binds the
+    /// registration to that thread's queue.
+    pub unsafe fn register(&self, hwnd: HWND, id: i32) -> Result<()> {
+        unsafe { RegisterHotKey(Some(hwnd), id, self.modifiers | MOD_NOREPEAT, self.vk) }
+            .with_context(|| {
+                format!(
+                    "RegisterHotKey {self} failed — another program already owns this \
+                     combination; pick a different clip_hotkey in config.toml"
+                )
+            })
     }
 }
 

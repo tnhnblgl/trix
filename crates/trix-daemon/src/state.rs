@@ -547,6 +547,17 @@ impl Daemon {
     /// is empty by default and means "wherever the default is", and a settings
     /// page cannot show a user where their clips actually land without the
     /// daemon resolving it for them.
+    /// The configured clip hotkey, for `window::spawn`.
+    ///
+    /// Deliberately this one key rather than a whole-`Config` snapshot: a
+    /// snapshot invites callers to read the other keys long after they have
+    /// gone stale, and `config.set` can change any of them at any time. The
+    /// hotkey is registered once at startup and re-reading it would not
+    /// re-register it, so a copy is honest here in a way a snapshot is not.
+    pub fn clip_hotkey(&self) -> String {
+        self.lock_config().clip_hotkey.clone()
+    }
+
     pub fn config_json(&self) -> Result<Value> {
         let config = self.lock_config();
         let mut object = config_object(&config)?;

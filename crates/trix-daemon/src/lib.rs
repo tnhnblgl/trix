@@ -24,3 +24,4 @@ pub mod dispatch;
 pub mod pipe;
 pub mod state;
 pub mod stats;
+pub mod window;
