@@ -460,6 +460,28 @@ pub(crate) struct SavedClip {
 
 /// Saves a clip and its sidecar. `None` means nothing is buffered yet — a
 /// legitimate outcome moments after arming, not an error.
+/// Bounds the published ring occupancy to `0 ..= total`.
+///
+/// The ring evicts whole GOPs, because it cannot start a clip mid-GOP — so it
+/// genuinely holds somewhere between `replay_seconds` and `replay_seconds` plus
+/// one keyframe interval. Pinning the GOP to a second (see `encode/h264.rs`)
+/// bounds that to under a second, but does not remove it: a 20 s ring really
+/// does hand back 20.9 s.
+///
+/// `ring_seconds_used > ring_seconds_total` is nonetheless an invariant
+/// violation for every consumer — a progress bar divides one by the other and
+/// renders past 100%. The extra footage is a gift, so the fix is to report the
+/// bound rather than to throw the footage away by evicting a GOP early, which
+/// would make clips come out *short* of what the user configured.
+///
+/// `min` before `max` is deliberate and load-bearing for the non-finite cases:
+/// Rust's `f64::min` returns the *other* operand when one is NaN, so a NaN span
+/// reports as `total` rather than serializing to JSON `null` and silently
+/// changing the wire type of this field.
+fn clamped_ring_seconds(span: f64, total: u32) -> f64 {
+    span.min(f64::from(total)).max(0.0)
+}
+
 fn save_clip(
     capture: &CaptureControl<ReplaySession, anyhow::Error>,
     clip_dir: &Path,
@@ -851,7 +873,8 @@ fn run_session(
                         status.height = height;
                         status.fps = config.fps;
                         status.ring_seconds_total = config.replay_seconds;
-                        status.ring_seconds_used = session.ring_span_secs();
+                        status.ring_seconds_used =
+                            clamped_ring_seconds(session.ring_span_secs(), config.replay_seconds);
                         status.frames = session.frames;
                         status.dropped = session.frames_dropped;
                         status.paced = session.frames_paced;
@@ -899,4 +922,40 @@ fn run_session(
         }
     }
     Ok(if session_died { SessionEnd::Died } else { SessionEnd::Shutdown })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `ring_seconds_used` must never exceed `ring_seconds_total`: plan 4's
+    /// progress bar divides one by the other, and a third-party UI binding to
+    /// spec §4.3 is entitled to assume the ratio is at most 1.
+    ///
+    /// The ring really does hold more than its nominal length — it evicts whole
+    /// GOPs, so a 20 s ring measured 20.9 s on real hardware. Reporting the
+    /// bound is the fix; evicting early would make clips come out short.
+    #[test]
+    fn published_ring_occupancy_never_exceeds_the_configured_length() {
+        assert_eq!(clamped_ring_seconds(20.9, 20), 20.0, "the measured overshoot must be capped");
+        assert_eq!(clamped_ring_seconds(21.5, 20), 20.0);
+        // Under the bound is reported honestly — a filling ring must still
+        // animate rather than pinning to full.
+        assert_eq!(clamped_ring_seconds(7.5, 20), 7.5);
+        assert_eq!(clamped_ring_seconds(0.0, 20), 0.0);
+    }
+
+    /// A non-finite span must not reach the wire. `Value::from(f64)` maps NaN
+    /// and infinities to JSON `null`, which would change this field's wire
+    /// *type* — exactly the drift the frozen-shape test exists to prevent, and
+    /// that test only covers `0.0`.
+    #[test]
+    fn a_non_finite_span_is_sanitised_rather_than_serialised_as_null() {
+        assert_eq!(clamped_ring_seconds(f64::NAN, 20), 20.0, "NaN must not become null");
+        assert_eq!(clamped_ring_seconds(f64::INFINITY, 20), 20.0);
+        assert_eq!(clamped_ring_seconds(f64::NEG_INFINITY, 20), 0.0);
+        for span in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(clamped_ring_seconds(span, 20).is_finite(), "{span} leaked a non-finite value");
+        }
+    }
 }
