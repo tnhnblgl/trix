@@ -39,6 +39,10 @@ pub struct EncodedPacket {
 pub struct H264Encoder {
     transform: IMFTransform,
     events: IMFMediaEventGenerator,
+    /// The activate that created `transform`, kept solely so [`Drop`] can call
+    /// `ShutdownObject` on it. See the `Drop` impl for why releasing the
+    /// transform is not enough.
+    activate: IMFActivate,
     /// NeedInput credits granted by the MFT that we haven't spent yet.
     input_credits: u32,
     /// The MFT's friendly name, e.g. "Intel® Quick Sync Video H.264 Encoder MFT".
@@ -46,6 +50,22 @@ pub struct H264Encoder {
     name: String,
     pub frames_in: u64,
     pub packets_out: u64,
+}
+
+impl Drop for H264Encoder {
+    /// `IMFActivate::ActivateObject` must be paired with `ShutdownObject`.
+    /// Dropping the `IMFTransform` only releases *our* reference: a hardware
+    /// MFT keeps its D3D device reference, its async work queue and its driver
+    /// allocations alive until the activate is shut down. Without this, every
+    /// arm/disarm cycle left ~50 MB of GPU memory, one Media Foundation
+    /// work-queue thread and ~37 handles behind for the life of the process.
+    fn drop(&mut self) {
+        // Best effort: a failure here is not actionable by the caller, and a
+        // disarm must not fail because teardown was untidy.
+        if let Err(e) = unsafe { self.activate.ShutdownObject() } {
+            tracing::warn!("encoder MFT ShutdownObject failed: {e}");
+        }
+    }
 }
 
 // SAFETY: same contract as MfRecorder — the encoder is moved into the capture
@@ -61,7 +81,7 @@ impl H264Encoder {
     ) -> Result<Self> {
         crate::encode::mf::ensure_mf_started()?;
         unsafe {
-            let (transform, name) = activate_hardware_encoder(device)?;
+            let (transform, activate, name) = activate_hardware_encoder(device)?;
 
             // Async MFTs refuse ProcessInput/Output until unlocked.
             let attrs = transform.GetAttributes().context("MFT attributes")?;
@@ -95,7 +115,15 @@ impl H264Encoder {
             let events: IMFMediaEventGenerator =
                 transform.cast().context("encoder MFT is not async")?;
 
-            Ok(Self { transform, events, input_credits: 0, name, frames_in: 0, packets_out: 0 })
+            Ok(Self {
+                transform,
+                events,
+                activate,
+                input_credits: 0,
+                name,
+                frames_in: 0,
+                packets_out: 0,
+            })
         }
     }
 
@@ -260,7 +288,9 @@ fn extract_sps_pps(au: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-fn activate_hardware_encoder(device: &ID3D11Device) -> Result<(IMFTransform, String)> {
+/// Returns the transform *and* the activate that produced it — the caller owns
+/// both, because shutting the MFT down requires the activate, not the transform.
+fn activate_hardware_encoder(device: &ID3D11Device) -> Result<(IMFTransform, IMFActivate, String)> {
     unsafe {
         // Pin enumeration to the capture adapter so hybrid-GPU machines
         // encode on the GPU that already holds the frames (no PCIe copies).
@@ -321,6 +351,6 @@ fn activate_hardware_encoder(device: &ID3D11Device) -> Result<(IMFTransform, Str
         tracing::info!(encoder = %name, "hardware H.264 MFT activated");
 
         let transform = activate.ActivateObject::<IMFTransform>().context("ActivateObject")?;
-        Ok((transform, name))
+        Ok((transform, activate, name))
     }
 }
