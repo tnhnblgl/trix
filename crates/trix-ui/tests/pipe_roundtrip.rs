@@ -1,12 +1,11 @@
-//! Does one command actually round-trip over the real control pipe?
+//! Does one command actually round-trip over a real Windows named pipe?
 //!
 //! `pipe.rs`'s unit tests prove the framing and the correlation against
 //! in-memory channels, and they pass whether or not the transport underneath
-//! works at all. These two tests are the other half: a real
-//! `\\.\pipe\trix-control`, a real daemon, and the exact handle layout
-//! `daemon.rs::connect` uses — one `File` opened read+write, a `try_clone` for
-//! the reader thread, the request written from another thread while that reader
-//! is parked.
+//! works at all. These two tests are the other half: a real named pipe and the
+//! exact handle layout `daemon.rs::connect` uses — one `File` opened
+//! read+write, a `try_clone` for the reader thread, the request written from
+//! another thread while that reader is parked.
 //!
 //! That layout is the whole point. A named pipe opened without
 //! `FILE_FLAG_OVERLAPPED` carries `FO_SYNCHRONOUS_IO` on its *file object*, and
@@ -14,157 +13,276 @@
 //! object. The I/O manager serializes every operation on it, so a blocking read
 //! pending on one handle stalls a write issued on the other, and the app
 //! deadlocks on its first command: the write cannot finish until the read does,
-//! the read cannot finish until the daemon replies, and the daemon cannot reply
+//! the read cannot finish until the server replies, and the server cannot reply
 //! until it receives the request. Nothing short of a real pipe reproduces that.
 //!
-//! [`the_naive_layout_deadlocks_the_write_behind_the_read`] pins that platform
+//! The server on the other end is [`StubDaemon`], forty lines of
+//! `CreateNamedPipeW` in this file, and it is deliberately *not*
+//! `trix-daemon.exe`. The serialization under test is a property of the
+//! **client's** file object, so the server's identity contributes nothing to
+//! either result — while starting the real daemon would load the developer's
+//! `%APPDATA%\trix\config.toml`, scan their real clip library, register their
+//! real global clip hotkey and put a tray icon in their notification area, all
+//! to answer one `status`. Worse, the only way to stop it again is
+//! `Child::kill`, which is `TerminateProcess` and runs no destructors, so a
+//! test run could leave a ghost tray icon behind. Every integration test in
+//! `trix-daemon/tests/` binds a private pipe name for the same family of
+//! reasons; this follows them.
+//!
+//! [`the_naive_layout_deadlocks_the_write_behind_the_read`] pins the platform
 //! behaviour, and is the reason `src/pipe_reader.rs` exists.
 //! [`a_request_written_while_the_reader_is_parked_is_still_answered`] is the fix
 //! working. It pulls the app's own reader in with `#[path]` rather than
 //! reimplementing it, so the day somebody reverts the fix this test fails
 //! instead of passing against a copy that is still correct.
 //!
-//! Both are ignored by default because they need a daemon; `cargo test
-//! --workspace` stays green and unattended. Run them with:
-//!
-//! ```text
-//! cargo test -p trix-ui --test pipe_roundtrip -- --ignored --nocapture
-//! ```
-//!
-//! `status` is the only command either one sends, deliberately: it is
-//! read-only, so these tests can never touch the user's real clip library or
-//! config.
+//! Neither test is `#[ignore]`d: with no daemon to find, no config to read and
+//! no library to scan, both belong in a plain `cargo test --workspace`, which
+//! is the only run anybody is guaranteed to do.
 
 #[path = "../src/pipe_reader.rs"]
 mod pipe_reader;
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex, Weak};
+use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use serde_json::Map;
-use trix_proto::{Request, Response, encode_line};
+use serde_json::{Map, json};
+use trix_proto::{RESERVED_ID, Request, Response, decode_request, encode_line};
+use windows::Win32::Foundation::{ERROR_PIPE_CONNECTED, HANDLE};
+use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+use windows::Win32::System::Pipes::{
+    ConnectNamedPipe, CreateNamedPipeW, NAMED_PIPE_MODE, PIPE_READMODE_BYTE,
+    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, PeekNamedPipe,
+};
+use windows::core::HSTRING;
 
 use pipe_reader::PeekingPipeReader;
 
-/// Same constant as `daemon.rs::PIPE_PATH`, spelled out rather than shared:
-/// these tests exist to check that the *published* socket path works for an
-/// outside client, and importing the constant from the code under test would
-/// make a typo in it invisible here.
-const PIPE_PATH: &str = r"\\.\pipe\trix-control";
-
 /// How long a test waits for the write to complete, and then for the reply.
-/// Generous next to a `status` the daemon answers out of memory in
+/// Generous next to a `status` the stub answers out of a literal in
 /// microseconds — if either wait runs out, the transport is wedged, not slow.
 const WAIT: Duration = Duration::from_secs(5);
 
-/// Kills the daemon *only* if a test started it.
-///
-/// A daemon the developer already had running is theirs: it may be armed, and
-/// killing it would throw away a replay ring nobody asked to lose.
-struct DaemonGuard(Option<Child>);
+/// How often the stub looks for a request, and how quickly it notices it has
+/// been told to stop. The same 25 ms the daemon and `pipe_reader.rs` both use.
+const STUB_POLL: Duration = Duration::from_millis(25);
 
-impl Drop for DaemonGuard {
-    fn drop(&mut self) {
-        if let Some(child) = self.0.as_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+/// The same byte-mode, no-remote-clients pipe the daemon creates
+/// (`trix-daemon/src/pipe.rs::PIPE_MODE`). Byte mode matters here: newline
+/// framing and the partial reads `PeekingPipeReader` performs are only correct
+/// against a stream, so a message-mode stub would be testing a pipe the app
+/// never talks to.
+const PIPE_MODE: NAMED_PIPE_MODE = NAMED_PIPE_MODE(
+    PIPE_TYPE_BYTE.0 | PIPE_READMODE_BYTE.0 | PIPE_WAIT.0 | PIPE_REJECT_REMOTE_CLIENTS.0,
+);
+
+const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
+
+/// A private pipe name for one test. Qualified by pid *and* by the caller's
+/// label so the two tests in this binary cannot collide when cargo runs them on
+/// threads of their own, and so neither can ever be `\\.\pipe\trix-control` —
+/// binding that would fight a real `trix-daemon.exe` for the live socket.
+fn private_pipe_name(label: &str) -> String {
+    format!(r"\\.\pipe\trix-ui-{label}-test-{}", std::process::id())
+}
+
+/// One raw HANDLE value borrowed from a `&File` for the duration of one call.
+fn handle_of(file: &File) -> HANDLE {
+    HANDLE(file.as_raw_handle().cast())
+}
+
+/// Bytes the OS is holding on `pipe` right now. `Err` means the pipe is gone.
+fn available(pipe: &File) -> Result<u32, windows::core::Error> {
+    let mut available = 0u32;
+    // SAFETY: the handle is borrowed from `pipe`, which owns it and keeps it
+    // open for the whole call; the only non-`None` pointer argument is a live
+    // local.
+    unsafe {
+        PeekNamedPipe(handle_of(pipe), None, 0, None, Some(&mut available), None)?;
     }
+    Ok(available)
 }
 
-/// One connect attempt, exactly as `daemon.rs::connect` makes it.
-fn open_pipe() -> std::io::Result<File> {
-    OpenOptions::new().read(true).write(true).open(PIPE_PATH)
-}
-
-/// `open_pipe`, retrying while every instance is busy.
+/// A single-client control-socket server, bound to a private pipe name.
 ///
-/// The daemon creates the next pipe instance only *after* `ConnectNamedPipe`
-/// hands it the previous one, so there is a sub-millisecond window after any
-/// connect in which the name exists with no free instance and the open fails
-/// with `ERROR_PIPE_BUSY` (231). These tests connect twice in a row — once to
-/// find out whether a daemon is there, once for real — and land in that window
-/// almost every time. The app needs no such helper: its supervisor already
-/// treats a failed connect as "try again shortly".
-fn connect(within: Duration) -> std::io::Result<File> {
-    const ERROR_PIPE_BUSY: i32 = 231;
-    let deadline = Instant::now() + within;
-    loop {
-        match open_pipe() {
-            Ok(pipe) => return Ok(pipe),
-            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(20));
+/// It answers any decodable request with an `ok` carrying an `armed` field, so
+/// the round-trip test can assert it got a *reply to its request* rather than
+/// merely some bytes. That is the entire protocol surface these tests need: the
+/// question under test is whether the request ever reaches the far end, not
+/// what the far end does with it.
+///
+/// The worker stops on [`Self::stop`], which it checks once per [`STUB_POLL`].
+/// A blocking read would be simpler and wrong — nothing would ever unblock it,
+/// because the client handles outlive the test body inside the reader thread.
+struct StubDaemon {
+    stop: Arc<AtomicBool>,
+    stopped: Receiver<()>,
+    name: String,
+}
+
+impl StubDaemon {
+    /// Binds `name` and starts serving. The instance is created on *this*
+    /// thread, before the worker starts, so a bind failure surfaces as a panic
+    /// in the test body rather than as a connect timeout thirty lines later.
+    fn start(label: &str) -> Self {
+        let name = private_pipe_name(label);
+        let instance = create_instance(&name);
+        let stop = Arc::new(AtomicBool::new(false));
+        let (stopped_tx, stopped) = mpsc::channel();
+        let worker_stop = Arc::clone(&stop);
+        std::thread::Builder::new()
+            .name("stub-daemon".into())
+            .spawn(move || {
+                serve_one(instance, &worker_stop);
+                let _ = stopped_tx.send(());
+            })
+            .expect("could not spawn the stub daemon thread");
+        Self { stop, stopped, name }
+    }
+
+    /// One connect attempt, exactly as `daemon.rs::connect` makes it.
+    fn open(&self) -> std::io::Result<File> {
+        OpenOptions::new().read(true).write(true).open(&self.name)
+    }
+
+    /// `open`, retrying until the worker has reached `ConnectNamedPipe`.
+    ///
+    /// The instance exists before `start` returns, but a client that opens it
+    /// in the window before the worker accepts can still see `ERROR_PIPE_BUSY`
+    /// (231), so every error is retried until the deadline. The app needs no
+    /// such helper: its supervisor already treats a failed connect as "try
+    /// again shortly".
+    fn connect(&self) -> File {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            match self.open() {
+                Ok(pipe) => return pipe,
+                Err(_) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
+                Err(e) => panic!("could not connect to the stub daemon at {}: {e}", self.name),
             }
-            Err(e) => return Err(e),
         }
     }
 }
 
-fn daemon_exe() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/release/trix-daemon.exe")
+impl Drop for StubDaemon {
+    /// Ends the worker, and with it the connection.
+    ///
+    /// This is what bounds the threads
+    /// [`the_naive_layout_deadlocks_the_write_behind_the_read`] deliberately
+    /// leaves stuck. Closing the server's handle breaks the pipe, which
+    /// completes the client's pending `ReadFile` with an error; that releases
+    /// the file object, which lets the write queued behind it fail too. Both
+    /// client threads then fall out of their loops on their own. Nothing is
+    /// left running past this drop except in the failure case below.
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        // Bounded, not infinite: if the worker is still parked in
+        // `ConnectNamedPipe` because a test panicked before it ever connected,
+        // it cannot see the flag, and joining would turn a clear test failure
+        // into a hung suite. In that case one thread and one private pipe
+        // instance outlive this drop and die with the test binary.
+        let _ = self.stopped.recv_timeout(WAIT);
+    }
 }
 
-/// The daemon these tests run against, started at most once per test binary.
+/// Creates one pipe instance on `name`, with default security.
 ///
-/// `cargo test` runs the two tests on threads of their own, and without this
-/// they would race: both would find no daemon, both would spawn one — the
-/// second losing the `FILE_FLAG_FIRST_PIPE_INSTANCE` bind and exiting — and
-/// whichever test finished first would kill the survivor out from under the
-/// other. A `Weak` rather than a `OnceLock` because this slot owns a *process*:
-/// statics are never dropped, so a `OnceLock` would leave a daemon (and its
-/// tray icon, and its hotkey registration) running after the test binary exits.
-/// Here the child dies with the last test that was using it.
-static DAEMON: Mutex<Option<Weak<DaemonGuard>>> = Mutex::new(None);
-
-fn ensure_daemon() -> Arc<DaemonGuard> {
-    // Poisoning is ignored on purpose: it only means some other test panicked,
-    // which says nothing about whether this slot's contents are usable.
-    let mut slot = DAEMON.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(daemon) = slot.as_ref().and_then(Weak::upgrade) {
-        return daemon;
-    }
-    let daemon = Arc::new(start_daemon());
-    *slot = Some(Arc::downgrade(&daemon));
-    daemon
+/// The daemon builds a user-only DACL here (`trix-daemon/src/pipe.rs`) and
+/// `trix-daemon/tests` has a test for it. This is not that test: nothing
+/// reaches this pipe but the client fifteen lines below it, so the descriptor
+/// is left at the default and `Win32_Security` stays out of the dev-dependency.
+fn create_instance(name: &str) -> File {
+    // SAFETY: the name is a live `HSTRING` for the duration of the call, and
+    // the security-attributes argument is `None`, so no pointer outlives it.
+    let handle = unsafe {
+        CreateNamedPipeW(
+            &HSTRING::from(name),
+            PIPE_ACCESS_DUPLEX,
+            PIPE_MODE,
+            PIPE_UNLIMITED_INSTANCES,
+            PIPE_BUFFER_BYTES,
+            PIPE_BUFFER_BYTES,
+            0,
+            None,
+        )
+    };
+    assert!(
+        !handle.is_invalid(),
+        "could not create the stub pipe {name}: {}",
+        windows::core::Error::from_thread()
+    );
+    // SAFETY: `CreateNamedPipeW` returned a valid, unowned handle, and this is
+    // the only thing that ever takes ownership of it.
+    unsafe { File::from_raw_handle(handle.0.cast()) }
 }
 
-/// Returns once `PIPE_PATH` is connectable, starting a daemon if there is none.
-fn start_daemon() -> DaemonGuard {
-    if connect(Duration::from_secs(1)).is_ok() {
-        return DaemonGuard(None);
+/// Accepts one client and answers its requests until `stop` is set or the
+/// client goes away.
+///
+/// Read-then-write on one thread, like the daemon's `serve_one` and for the
+/// same reason: the server's own pipe instance is synchronous too, so a reply
+/// written from a second thread while this one held a read would queue behind
+/// it exactly the way the bug under test does.
+fn serve_one(instance: File, stop: &AtomicBool) {
+    // ERROR_PIPE_CONNECTED means the client got there between the create and
+    // this call — already connected, not a failure.
+    // SAFETY: the handle is borrowed from `instance`, which outlives the call.
+    let connected = unsafe { ConnectNamedPipe(handle_of(&instance), None) };
+    if let Err(e) = connected
+        && e.code() != ERROR_PIPE_CONNECTED.to_hresult()
+    {
+        return;
     }
 
-    let exe = daemon_exe();
-    assert!(
-        exe.exists(),
-        "no daemon is running and {} does not exist -- build it first: \
-         cargo build --release -p trix-daemon",
-        exe.display()
-    );
+    let Ok(reader) = instance.try_clone() else { return };
+    let Ok(mut writer) = instance.try_clone() else { return };
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
 
-    // stdout/stderr to null: the daemon's `tracing` output would otherwise be
-    // interleaved into the test's own, and none of it is evidence of anything
-    // these tests assert.
-    let child = Command::new(&exe)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("could not start trix-daemon.exe");
-    let guard = DaemonGuard(Some(child));
-
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline {
-        if connect(Duration::from_secs(1)).is_ok() {
-            return guard;
+    while !stop.load(Ordering::Acquire) {
+        // The OS is asked only when the reader has nothing of its own: a
+        // `BufReader` drains the whole pipe buffer on its first read, so a peek
+        // after that would correctly report zero and park this loop while it
+        // was holding a request. Same ordering as the daemon's session loop.
+        if reader.buffer().is_empty() {
+            match available(&instance) {
+                Ok(0) => {
+                    std::thread::sleep(STUB_POLL);
+                    continue;
+                }
+                Ok(_) => {}
+                Err(_) => return, // the client is gone
+            }
         }
-        std::thread::sleep(Duration::from_millis(100));
+
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let response = match decode_request(&line) {
+            // A `status` payload in the shape `daemon.rs::on_connected` reads:
+            // enough for the round-trip test to prove it is holding the answer
+            // to its own request, and no more.
+            Ok(Request { id, .. }) => Response::ok(id, json!({ "armed": false })),
+            Err(e) => Response::err(RESERVED_ID, e),
+        };
+        let Ok(text) = encode_line(&response) else { return };
+        if writer.write_all(text.as_bytes()).is_err() || writer.flush().is_err() {
+            return;
+        }
     }
-    panic!("trix-daemon did not publish {PIPE_PATH} within 15s");
 }
 
 /// Reads lines off `reader` on its own thread, exactly as
@@ -206,15 +324,15 @@ fn write_status(pipe: &Arc<File>, id: u64) -> Receiver<Result<(), String>> {
     wrote_rx
 }
 
-/// Waits for the daemon's answer to `id`, skipping anything unsolicited — an
-/// event is not a reply, and the daemon may send one at any moment.
+/// Waits for the answer to `id`, skipping anything unsolicited — an event is
+/// not a reply, and a server may send one at any moment.
 fn await_response(lines: &Receiver<String>, id: u64) -> Response {
     let deadline = Instant::now() + WAIT;
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         let line = lines.recv_timeout(left).unwrap_or_else(|_| {
             panic!(
-                "the daemon never answered the `status` request within {}s -- the write \
+                "the stub never answered the `status` request within {}s -- the write \
                  completed, so the reply is what is missing",
                 WAIT.as_secs()
             )
@@ -228,7 +346,7 @@ fn await_response(lines: &Receiver<String>, id: u64) -> Response {
 }
 
 fn assert_is_a_status_payload(response: Response) {
-    assert!(response.ok, "the daemon rejected `status`: {:?}", response.error);
+    assert!(response.ok, "the stub rejected `status`: {:?}", response.error);
     let data = response.data.expect("an ok `status` response carries data");
     assert!(
         data.get("armed").is_some(),
@@ -246,11 +364,10 @@ fn assert_is_a_status_payload(response: Response) {
 /// `Connection::start`. If it ever starts failing, the write it expects to be
 /// stuck is completing, and the peek-then-read wrapper has become removable.
 #[test]
-#[ignore = "needs a running trix-daemon"]
 fn the_naive_layout_deadlocks_the_write_behind_the_read() {
-    let _daemon = ensure_daemon();
+    let stub = StubDaemon::start("naive");
 
-    let pipe = connect(WAIT).expect("could not open the control pipe");
+    let pipe = stub.connect();
     let read_half = pipe.try_clone().expect("could not duplicate the pipe handle");
     let write_half = Arc::new(pipe);
 
@@ -261,27 +378,39 @@ fn the_naive_layout_deadlocks_the_write_behind_the_read() {
     std::thread::sleep(Duration::from_millis(200));
 
     let wrote = write_status(&write_half, 1);
-    assert!(
-        wrote.recv_timeout(WAIT).is_err(),
-        "the `status` write completed in under {}s with a blocking read pending on a duplicate \
-         of the same handle. That is the serialization `src/pipe_reader.rs` exists to work \
-         around, and this platform no longer appears to do it -- re-check whether the wrapper \
-         is still needed before trusting this",
-        WAIT.as_secs()
-    );
+    // Matched rather than tested with `is_err()`: `Disconnected` is also an
+    // `Err`, so a writer thread that panicked would have made this assertion
+    // pass instantly having proven nothing at all.
+    match wrote.recv_timeout(WAIT) {
+        Err(RecvTimeoutError::Timeout) => {}
+        Err(RecvTimeoutError::Disconnected) => {
+            panic!("the writer thread died before reporting, so this test proved nothing")
+        }
+        Ok(result) => panic!(
+            "the `status` write completed in under {}s ({result:?}) with a blocking read pending \
+             on a duplicate of the same handle. That is the serialization `src/pipe_reader.rs` \
+             exists to work around, and this platform no longer appears to do it -- re-check \
+             whether the wrapper is still needed before trusting this",
+            WAIT.as_secs()
+        ),
+    }
+
+    // Dropping `stub` here is what unwedges the two threads this test leaves
+    // stuck; see `StubDaemon::drop`. Explicit rather than implicit because the
+    // cleanup is the point, not an afterthought.
+    drop(stub);
 }
 
-/// The fix, working: the app's own reader, the app's own handle layout, a real
-/// daemon, and a command that comes back.
+/// The fix, working: the app's own reader, the app's own handle layout, and a
+/// command that comes back.
 #[test]
-#[ignore = "needs a running trix-daemon"]
 fn a_request_written_while_the_reader_is_parked_is_still_answered() {
-    let _daemon = ensure_daemon();
+    let stub = StubDaemon::start("roundtrip");
 
     // Exactly `daemon.rs::connect`: one read+write handle, one duplicate for
     // the reader thread, and `PeekingPipeReader` between that duplicate and the
     // `BufReader`.
-    let pipe = connect(WAIT).expect("could not open the control pipe");
+    let pipe = stub.connect();
     let read_half = pipe.try_clone().expect("could not duplicate the pipe handle");
     let write_half = Arc::new(pipe);
 
