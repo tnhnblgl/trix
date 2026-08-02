@@ -15,6 +15,7 @@
 mod commands;
 mod daemon;
 mod pipe;
+mod pipe_reader;
 
 use tauri::Manager as _;
 

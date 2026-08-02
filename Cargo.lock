@@ -4128,6 +4128,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-single-instance",
  "trix-proto",
+ "windows 0.62.2",
 ]
 
 [[package]]

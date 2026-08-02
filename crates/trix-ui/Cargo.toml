@@ -21,6 +21,13 @@ trix-proto = { path = "../trix-proto" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+# `PeekNamedPipe` (Win32_System_Pipes) and `HANDLE` (Win32_Foundation), for the
+# non-blocking pipe reader in `src/pipe_reader.rs` -- see the long comment there.
+# Declared exactly as `trix-daemon` declares it: the workspace already owns the
+# version and the feature list, and an inherited dependency can only add
+# features to that list, never take any away, so this is the narrowest form
+# available. Both features it needs are already in it.
+windows.workspace = true
 
 # DELIBERATELY ABSENT: trix-core. See spec 3.2 and scripts/ui-isolation.ps1.
 # The UI's every capability arrives over the control socket, which is the only
