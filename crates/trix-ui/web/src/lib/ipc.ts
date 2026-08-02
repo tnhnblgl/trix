@@ -11,6 +11,11 @@ export async function startDaemon(): Promise<void> {
   await invoke('start_daemon');
 }
 
+/** Whether the supervisor is connected right now, asked rather than awaited. */
+export async function daemonConnected(): Promise<boolean> {
+  return await invoke<boolean>('daemon_connected');
+}
+
 export function onDaemonEvent(handler: (event: DaemonEvent) => void) {
   return listen<DaemonEvent>('trix-event', (e) => handler(e.payload));
 }

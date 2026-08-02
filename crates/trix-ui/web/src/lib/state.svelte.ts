@@ -1,4 +1,4 @@
-import { call, onConnected, onDaemonEvent, onDisconnected } from './ipc';
+import { call, daemonConnected, onConnected, onDaemonEvent, onDisconnected } from './ipc';
 import type { ClipMeta, Status } from './types';
 
 export type View = 'grid' | 'clip' | 'settings' | 'firstrun';
@@ -57,28 +57,40 @@ class AppState {
 
 export const app = new AppState();
 
+/** Everything the app does the moment it has a daemon to talk to. */
+async function onDaemonUp() {
+  app.connected = true;
+  await app.refreshStatus();
+  // Stats drive the ring meter; per spec §4.4 the daemon measures nothing
+  // until a client asks, so nobody pays for this while no UI is open.
+  try {
+    await call('stats.subscribe', { enabled: true });
+  } catch {
+    // A daemon that will not subscribe is still a usable daemon; the meter
+    // just falls back to the value `status` reported.
+  }
+}
+
 /** Subscribes the store to the daemon. Call once, from App.svelte. */
 export function wireDaemon() {
-  onConnected(async () => {
-    app.connected = true;
-    await app.refreshStatus();
-    // Stats drive the ring meter; per spec §4.4 the daemon measures nothing
-    // until a client asks, so nobody pays for this while no UI is open.
-    try {
-      await call('stats.subscribe', { enabled: true });
-    } catch {
-      // A daemon that will not subscribe is still a usable daemon; the meter
-      // just falls back to the value `status` reported.
-    }
-  });
+  onConnected(() => void onDaemonUp());
 
   onDisconnected(() => {
     app.connected = false;
     app.status = null;
   });
 
+  // The supervisor connects from Tauri's setup hook and usually wins the race
+  // against the webview booting, and Tauri replays nothing to a listener that
+  // registered late. Without asking once at startup the app would sit on
+  // "Trix isn't running" whenever the daemon was already up -- which, for a
+  // daemon that lives in the tray, is the normal way it gets opened.
+  void daemonConnected().then((up) => {
+    if (up && !app.connected) void onDaemonUp();
+  });
+
   onDaemonEvent((event) => {
-    const data = event.data as Record<string, never>;
+    const data = event.data as Record<string, unknown>;
     switch (event.event) {
       case 'armed':
       case 'disarmed':
