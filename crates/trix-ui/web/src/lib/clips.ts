@@ -1,9 +1,20 @@
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type { ClipMeta } from './types';
 
-/** The library is flat (spec §5.1), so every sidecar is the id plus a suffix. */
+/**
+ * The library is flat (spec §5.1), so every sidecar is the id plus a suffix.
+ *
+ * The trailing separator is stripped first because `clip_dir` is a config key
+ * a person types. A drive root (`D:\`) has one by necessity and a hand-typed
+ * path often picks one up, and either produced `D:\\20260726_143012.jpg` —
+ * which can miss the asset-scope glob Tauri builds from the same directory, and
+ * then every thumbnail in the grid is a broken image with nothing logged and
+ * nothing on screen to say why. `D:\` strips to `D:`, which rejoins to
+ * `D:\<id>.jpg`, so the drive root stays correct rather than becoming a special
+ * case.
+ */
 function clipFile(clipDir: string, id: string, ext: string): string {
-  return `${clipDir}\\${id}.${ext}`;
+  return `${clipDir.replace(/[\\/]+$/, '')}\\${id}.${ext}`;
 }
 
 /**

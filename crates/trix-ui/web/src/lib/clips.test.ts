@@ -1,6 +1,16 @@
-import { describe, expect, it } from 'vitest';
-import { formatBytes, formatDuration, mergeSaved, counterLabel } from './clips';
+import { describe, expect, it, vi } from 'vitest';
 import type { ClipMeta } from './types';
+
+// The real `convertFileSrc` reads `window.__TAURI_INTERNALS__`, which does not
+// exist outside the webview. Returning the path it was handed is what makes the
+// assertions below about the *path* rather than about Tauri's URL scheme, which
+// is Tauri's to change.
+vi.mock('@tauri-apps/api/core', () => ({
+  convertFileSrc: (path: string) => path,
+}));
+
+const { clipUrl, thumbUrl, formatBytes, formatDuration, mergeSaved, counterLabel } =
+  await import('./clips');
 
 const clip = (id: string, favorite = false): ClipMeta => ({
   id,
@@ -14,6 +24,33 @@ const clip = (id: string, favorite = false): ClipMeta => ({
   encoder: 'NVENC H.264',
   has_audio: true,
   favorite,
+});
+
+describe('clipUrl and thumbUrl', () => {
+  const id = '20260726_143012';
+
+  it('put the sidecar beside its clip, flat', () => {
+    expect(clipUrl('C:\\Users\\me\\Videos\\Trix', id)).toBe(
+      `C:\\Users\\me\\Videos\\Trix\\${id}.mp4`,
+    );
+    expect(thumbUrl('C:\\Users\\me\\Videos\\Trix', id)).toBe(
+      `C:\\Users\\me\\Videos\\Trix\\${id}.jpg`,
+    );
+  });
+
+  it('does not double the separator on a clip_dir that ends in one', () => {
+    // `clip_dir` is typed into settings, and a doubled separator can miss the
+    // asset-scope glob -- which shows up as every thumbnail in the grid being
+    // broken, with no error anywhere.
+    expect(thumbUrl('D:\\clips\\', id)).toBe(`D:\\clips\\${id}.jpg`);
+    expect(thumbUrl('D:/clips/', id)).toBe(`D:/clips\\${id}.jpg`);
+    expect(clipUrl('D:\\clips\\', id)).toBe(`D:\\clips\\${id}.mp4`);
+  });
+
+  it('handles a drive root, whose trailing separator is not optional', () => {
+    expect(thumbUrl('D:\\', id)).toBe(`D:\\${id}.jpg`);
+    expect(clipUrl('D:\\', id)).toBe(`D:\\${id}.mp4`);
+  });
 });
 
 describe('formatDuration', () => {
