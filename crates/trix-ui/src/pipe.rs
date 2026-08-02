@@ -133,6 +133,21 @@ impl Connection {
             Err(_) => return Err("the socket client is poisoned".to_string()),
         }
 
+        // `close()` sets `closed` *before* it clears `pending`. If this
+        // re-check reads `false`, then `close()`'s store has not happened
+        // yet, so its clear has not either — and since our insert has
+        // already completed, that clear will drop our sender and wake
+        // `recv_timeout` immediately with a disconnect. If this re-check
+        // reads `true`, we bail out right here. There is no third case.
+        // Without this, a `close()` that runs entirely between the entry
+        // check above and the insert leaves our sender in `pending` with
+        // nothing left to ever drop it, and this caller would serve out the
+        // full `timeout` before line ~157 finally notices `closed`.
+        if self.closed.load(Ordering::Acquire) {
+            self.forget(id);
+            return Err("not connected to the Trix daemon".to_string());
+        }
+
         let written = match self.writer.lock() {
             Ok(mut writer) => writer.write_all(line.as_bytes()).and_then(|()| writer.flush()),
             Err(_) => {
@@ -409,5 +424,18 @@ mod tests {
             .call("status", Map::new(), FAST)
             .expect_err("a closed connection cannot carry a call");
         assert!(err.contains("not connected"), "{err}");
+    }
+
+    /// A daemon that dies mid-write leaves a final line with no trailing
+    /// `\n`. That line fails JSON parsing and is dropped by `deliver`, and
+    /// the next `read_line` then sees the real EOF — the connection must
+    /// close cleanly rather than panic or wedge.
+    #[test]
+    fn a_truncated_final_line_closes_the_connection_cleanly() {
+        let h = harness();
+        h.to_client.send(b"{\"id\":1,\"ok\":tr".to_vec()).unwrap(); // no trailing \n
+        drop(h.to_client); // EOF right behind the partial line
+        h.closed.recv_timeout(FAST).expect("on_close should fire after the truncated line");
+        assert!(h.conn.is_closed(), "the connection should report itself closed");
     }
 }
