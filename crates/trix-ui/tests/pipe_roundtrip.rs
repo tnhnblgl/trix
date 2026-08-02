@@ -36,12 +36,15 @@
 //! reimplementing it, so gutting `PeekingPipeReader` fails this test instead of
 //! leaving it passing against a mirror that is still correct.
 //!
-//! Note what that does not reach: `daemon.rs::connect` is where the wrapper is
-//! actually put on the socket, and this test builds its own handle layout
-//! rather than asking for that one. Revert
+//! That test also calls `pipe_reader::open_halves` — the same function
+//! `daemon.rs::connect` calls — against this file's stub, rather than
+//! building `OpenOptions` + `try_clone` + `PeekingPipeReader` by hand. The
+//! pairing that puts the wrapper on the socket used to live only in
+//! `daemon.rs`, unreached by anything here: reverting
 //! `BufReader::new(PeekingPipeReader::new(read_half))` to
-//! `BufReader::new(read_half)` and both tests here still pass. Nothing
-//! automated guards that line.
+//! `BufReader::new(read_half)` there left both tests in this file green.
+//! Hoisting that pairing into `open_halves` and calling it from here closes
+//! that gap — the wiring under test is now the wiring that ships.
 //!
 //! Neither test is `#[ignore]`d: with no daemon to find, no config to read and
 //! no library to scan, both belong in a plain `cargo test --workspace`, which
@@ -51,7 +54,7 @@
 mod pipe_reader;
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -169,6 +172,28 @@ impl StubDaemon {
         loop {
             match self.open() {
                 Ok(pipe) => return pipe,
+                Err(_) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
+                Err(e) => panic!("could not connect to the stub daemon at {}: {e}", self.name),
+            }
+        }
+    }
+
+    /// `pipe_reader::open_halves`, retrying for the same `ERROR_PIPE_BUSY`
+    /// window and on the same schedule as `connect`.
+    ///
+    /// This is what makes `a_request_written_while_the_reader_is_parked_is_still_answered`
+    /// exercise the shipped pairing rather than a hand-built mirror of it: the
+    /// round-trip test calls the app's own `open_halves` against this stub's
+    /// private pipe name instead of assembling `OpenOptions` + `try_clone` +
+    /// `PeekingPipeReader` itself, so gutting the pairing in `daemon.rs` fails
+    /// this test instead of leaving it green.
+    fn connect_paired(&self) -> (BufReader<PeekingPipeReader>, File) {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            match pipe_reader::open_halves(&self.name) {
+                Ok(halves) => return halves,
                 Err(_) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(20))
                 }
@@ -294,10 +319,15 @@ fn serve_one(instance: File, stop: &AtomicBool) {
 
 /// Reads lines off `reader` on its own thread, exactly as
 /// `Connection::start`'s reader thread does, and publishes each one.
-fn spawn_reader<R: Read + Send + 'static>(reader: R) -> Receiver<String> {
+///
+/// Takes `BufRead` rather than `Read` and wrapping internally, so that a
+/// caller passing `open_halves`'s own `BufReader<PeekingPipeReader>` (the
+/// round-trip test) hands over exactly what `Connection::start` receives, not
+/// a second `BufReader` stacked on top of it.
+fn spawn_reader<R: BufRead + Send + 'static>(reader: R) -> Receiver<String> {
     let (lines_tx, lines_rx) = mpsc::channel::<String>();
     std::thread::spawn(move || {
-        let mut reader = BufReader::new(reader);
+        let mut reader = reader;
         let mut line = String::new();
         loop {
             line.clear();
@@ -380,7 +410,7 @@ fn the_naive_layout_deadlocks_the_write_behind_the_read() {
 
     // A plain blocking read on the duplicated handle: the reader thread is
     // inside `ReadFile` and stays there until something arrives.
-    let _lines = spawn_reader(read_half);
+    let _lines = spawn_reader(BufReader::new(read_half));
     // Long enough that the reader is certainly parked.
     std::thread::sleep(Duration::from_millis(200));
 
@@ -414,14 +444,13 @@ fn the_naive_layout_deadlocks_the_write_behind_the_read() {
 fn a_request_written_while_the_reader_is_parked_is_still_answered() {
     let stub = StubDaemon::start("roundtrip");
 
-    // Exactly `daemon.rs::connect`: one read+write handle, one duplicate for
-    // the reader thread, and `PeekingPipeReader` between that duplicate and the
-    // `BufReader`.
-    let pipe = stub.connect();
-    let read_half = pipe.try_clone().expect("could not duplicate the pipe handle");
-    let write_half = Arc::new(pipe);
+    // `daemon.rs::connect`'s own pairing, via `pipe_reader::open_halves` —
+    // see `StubDaemon::connect_paired`. Not hand-assembled here: the point of
+    // this test is that it exercises the pairing that ships, not a copy of it.
+    let (reader, write_half) = stub.connect_paired();
+    let write_half = Arc::new(write_half);
 
-    let lines = spawn_reader(PeekingPipeReader::new(read_half));
+    let lines = spawn_reader(reader);
     // Long enough that the reader is certainly parked in `read_line` — the
     // state the app is always in between commands, and the state that made this
     // a deadlock rather than a race.

@@ -1,24 +1,27 @@
 //! Reading the control pipe without holding it against the writer.
 //!
-//! One type, and the only Windows-specific code in this crate. It is a module
-//! of its own rather than a private item in `daemon.rs` for one reason:
-//! `trix-ui` is a `[[bin]]`-only crate, so an integration test cannot import
-//! anything from it, and `tests/pipe_roundtrip.rs` pulls this file in with
-//! `#[path]`. That makes the test compile *this* source rather than a copy of
-//! it, so gutting the wrapper itself fails the test instead of quietly leaving
-//! it passing against a mirror that is still correct. `daemon.rs` cannot be
-//! included that way: it needs `tauri` and `crate::pipe`.
+//! Two things live here: the reader wrapper, and the pairing that puts it on
+//! the socket. Both belong in a module of their own rather than as private
+//! items in `daemon.rs` for one reason: `trix-ui` is a `[[bin]]`-only crate,
+//! so an integration test cannot import anything from it, and
+//! `tests/pipe_roundtrip.rs` pulls this file in with `#[path]`. That makes the
+//! test compile *this* source rather than a copy of it, so gutting either the
+//! wrapper or the pairing fails the test instead of quietly leaving it passing
+//! against a mirror that is still correct. `daemon.rs` cannot be included that
+//! way: it needs `tauri` and `crate::pipe`.
 //!
-//! What that does *not* cover is the one line that puts this type on the
-//! socket. `daemon.rs::connect` builds
-//! `BufReader::new(PeekingPipeReader::new(read_half))`; change it back to
-//! `BufReader::new(read_half)` and every test in the workspace still passes,
-//! because `pipe_roundtrip.rs` constructs its own handle layout and never asks
-//! `daemon.rs` for one. Nothing automated stands behind that line, and nothing
-//! can while `daemon.rs` needs a `tauri::AppHandle` to be built at all.
+//! [`open_halves`] used to be hand-assembled inline in `daemon.rs::connect` —
+//! an `OpenOptions` open, a `try_clone`, and
+//! `BufReader::new(PeekingPipeReader::new(read_half))` built next to them.
+//! Reverting that last line to `BufReader::new(read_half)` used to leave the
+//! whole workspace green, because `pipe_roundtrip.rs` built its own handle
+//! layout by hand and never asked `daemon.rs` for one. Now
+//! `a_request_written_while_the_reader_is_parked_is_still_answered` calls this
+//! function the same way `daemon.rs::connect` does, so `daemon.rs` has nothing
+//! left to revert: the pairing under test is the pairing that ships.
 
-use std::fs::File;
-use std::io::Read;
+use std::fs::{File, OpenOptions};
+use std::io::{BufReader, Read};
 use std::time::Duration;
 
 use windows::Win32::Foundation::{
@@ -123,6 +126,21 @@ impl Read for PeekingPipeReader {
             }
         }
     }
+}
+
+/// Opens both halves of the control pipe the way the app always does: one
+/// handle opened for read and write, and a `try_clone` of it — wrapped in
+/// [`PeekingPipeReader`] — for the reader thread.
+///
+/// This is the pairing `daemon.rs::connect` hands to `Connection::start`, and
+/// it lives here rather than there so `tests/pipe_roundtrip.rs` can call the
+/// exact same function against its stub's private pipe name. Before this it
+/// hand-built the layout instead, which meant it tested that the wrapper
+/// works, not that `daemon.rs` actually uses it — see the module docs above.
+pub(crate) fn open_halves(path: &str) -> std::io::Result<(BufReader<PeekingPipeReader>, File)> {
+    let write_half = OpenOptions::new().read(true).write(true).open(path)?;
+    let read_half = write_half.try_clone()?;
+    Ok((BufReader::new(PeekingPipeReader::new(read_half)), write_half))
 }
 
 /// The three `PeekNamedPipe` failures that mean "there is no daemon on the

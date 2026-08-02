@@ -6,7 +6,6 @@
 //! dialog. So this module always has an answer — connected, or connecting, or
 //! "not running" with a button — and never a stack trace.
 
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -15,7 +14,7 @@ use serde_json::{Map, Value};
 use tauri::{AppHandle, Emitter as _, Manager as _};
 
 use crate::pipe::{CALL_TIMEOUT, Connection};
-use crate::pipe_reader::PeekingPipeReader;
+use crate::pipe_reader::open_halves;
 
 /// The daemon's published socket. Byte-mode, newline-framed, ACL'd to the
 /// current user (spec §4.1) — a plain `File` open is a complete client.
@@ -137,17 +136,17 @@ impl Supervisor {
     }
 
     fn connect(&self) -> Result<Arc<Connection>, ()> {
-        // Read+write on the same handle, then a duplicate for the reader. The
-        // duplicate is *not* an independent channel — see [`PeekingPipeReader`],
-        // which is what makes using the two from different threads work at all.
-        let write_half =
-            std::fs::OpenOptions::new().read(true).write(true).open(PIPE_PATH).map_err(|_| ())?;
-        let read_half = write_half.try_clone().map_err(|_| ())?;
+        // Read+write on one handle, a duplicate for the reader, and
+        // `PeekingPipeReader` between that duplicate and the `BufReader` — see
+        // `pipe_reader::open_halves`, which is what makes using the two from
+        // different threads work at all and is the same call
+        // `tests/pipe_roundtrip.rs` makes against its stub.
+        let (reader, write_half) = open_halves(PIPE_PATH).map_err(|_| ())?;
 
         let app = self.app.clone();
         let closed_app = self.app.clone();
         let connection = Connection::start(
-            BufReader::new(PeekingPipeReader::new(read_half)),
+            reader,
             write_half,
             move |event| {
                 // One channel for every daemon event; the frontend switches on
