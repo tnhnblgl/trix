@@ -1,0 +1,27 @@
+[package]
+name = "trix-ui"
+version.workspace = true
+edition.workspace = true
+description = "Trix desktop app"
+
+[[bin]]
+name = "trix-ui"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# `protocol-asset` is what makes `asset:` available, and with it
+# `Manager::asset_protocol_scope()` — the runtime hook Task 5 needs, because
+# `clip_dir` is a config key and cannot be a static scope in tauri.conf.json.
+tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
+tauri-plugin-single-instance = "2"
+trix-proto = { path = "../trix-proto" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+
+# DELIBERATELY ABSENT: trix-core. See spec 3.2 and scripts/ui-isolation.ps1.
+# The UI's every capability arrives over the control socket, which is the only
+# thing that keeps that socket good enough for a third-party UI to use.

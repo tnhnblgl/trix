@@ -1,0 +1,20 @@
+:root {
+  --bg: #16181d;
+  --panel: #1e2128;
+  --line: #2b2f39;
+  --text: #e8eaee;
+  --dim: #99a0ad;
+  --accent: #4a9eff;
+  --danger: #ff5c5c;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  user-select: none;
+}

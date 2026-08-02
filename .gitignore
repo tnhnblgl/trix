@@ -7,3 +7,12 @@
 *.mp4
 *.wav
 *.png
+
+# the trix-ui app icon and its generated icon set are shipped, not probed --
+# un-ignore them from the *.png rule above.
+!/crates/trix-ui/icon-source.png
+!/crates/trix-ui/icons/**/*.png
+
+/crates/trix-ui/web/node_modules
+/crates/trix-ui/web/dist
+/crates/trix-ui/gen

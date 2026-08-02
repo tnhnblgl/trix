@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/trix-core", "crates/trix-cli", "crates/trix-daemon", "crates/trix-proto"]
+members = ["crates/trix-core", "crates/trix-cli", "crates/trix-daemon", "crates/trix-proto", "crates/trix-ui"]
 # No `default-members`. It once named `crates/trix-cli` alone, to make bare
 # `cargo run` pick the CLI instead of erroring on ambiguity — and it silently
 # cost far more than it bought: bare `cargo test` ran 5 of 99 tests and bare

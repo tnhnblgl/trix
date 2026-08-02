@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Trix's main window. Everything it can do to the machine, it does through the control socket; these are only the core APIs the shell itself needs.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
