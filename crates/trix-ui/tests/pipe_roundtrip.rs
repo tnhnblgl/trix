@@ -33,8 +33,15 @@
 //! behaviour, and is the reason `src/pipe_reader.rs` exists.
 //! [`a_request_written_while_the_reader_is_parked_is_still_answered`] is the fix
 //! working. It pulls the app's own reader in with `#[path]` rather than
-//! reimplementing it, so the day somebody reverts the fix this test fails
-//! instead of passing against a copy that is still correct.
+//! reimplementing it, so gutting `PeekingPipeReader` fails this test instead of
+//! leaving it passing against a mirror that is still correct.
+//!
+//! Note what that does not reach: `daemon.rs::connect` is where the wrapper is
+//! actually put on the socket, and this test builds its own handle layout
+//! rather than asking for that one. Revert
+//! `BufReader::new(PeekingPipeReader::new(read_half))` to
+//! `BufReader::new(read_half)` and both tests here still pass. Nothing
+//! automated guards that line.
 //!
 //! Neither test is `#[ignore]`d: with no daemon to find, no config to read and
 //! no library to scan, both belong in a plain `cargo test --workspace`, which

@@ -8,8 +8,17 @@
 //! `\\.\pipe\trix-control` exists.
 //!
 //! No `windows` crate anywhere in here: the daemon's pipe is byte-mode
-//! (`PIPE_TYPE_BYTE | PIPE_READMODE_BYTE`) with newline framing, so a plain
-//! `File` opened on the pipe path is a complete client.
+//! (`PIPE_TYPE_BYTE | PIPE_READMODE_BYTE`) with newline framing, so nothing in
+//! this file needs to know it is talking to a pipe at all.
+//!
+//! That is not the same as saying a plain `File` is a complete client, which
+//! this comment used to claim and which is the opposite of true. The pipe is
+//! opened without `FILE_FLAG_OVERLAPPED`, so a blocking read parked on one
+//! handle stalls a write issued on any other handle onto the same file object —
+//! and `Connection::start` is handed exactly that pair. Reading through a plain
+//! `File` deadlocks the app on its first command. `pipe_reader.rs` is what
+//! makes the transport underneath this module work, and carries the long
+//! version of why.
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};

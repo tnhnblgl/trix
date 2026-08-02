@@ -3,11 +3,19 @@
 //! One type, and the only Windows-specific code in this crate. It is a module
 //! of its own rather than a private item in `daemon.rs` for one reason:
 //! `trix-ui` is a `[[bin]]`-only crate, so an integration test cannot import
-//! anything from it, and `tests/pipe_roundtrip.rs` — the test that proves this
-//! against a real daemon — pulls this file in with `#[path]`. That makes the
-//! test compile *this* source rather than a copy of it, so reverting the fix
-//! breaks the test instead of quietly leaving it passing. `daemon.rs` cannot be
+//! anything from it, and `tests/pipe_roundtrip.rs` pulls this file in with
+//! `#[path]`. That makes the test compile *this* source rather than a copy of
+//! it, so gutting the wrapper itself fails the test instead of quietly leaving
+//! it passing against a mirror that is still correct. `daemon.rs` cannot be
 //! included that way: it needs `tauri` and `crate::pipe`.
+//!
+//! What that does *not* cover is the one line that puts this type on the
+//! socket. `daemon.rs::connect` builds
+//! `BufReader::new(PeekingPipeReader::new(read_half))`; change it back to
+//! `BufReader::new(read_half)` and every test in the workspace still passes,
+//! because `pipe_roundtrip.rs` constructs its own handle layout and never asks
+//! `daemon.rs` for one. Nothing automated stands behind that line, and nothing
+//! can while `daemon.rs` needs a `tauri::AppHandle` to be built at all.
 
 use std::fs::File;
 use std::io::Read;
