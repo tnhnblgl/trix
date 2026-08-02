@@ -1,7 +1,7 @@
 <script lang="ts">
   import ClipCard from '../components/ClipCard.svelte';
   import { app } from '../lib/state.svelte';
-  import { moveSelection } from '../lib/keys';
+  import { isInteractiveTarget, moveSelection } from '../lib/keys';
   import { clipUrl } from '../lib/clips';
 
   /** Kept in sync with the CSS grid below so ArrowDown moves one visual row. */
@@ -20,7 +20,19 @@
   });
 
   function onkeydown(e: KeyboardEvent) {
+    // `<svelte:window>` is global for as long as the grid is mounted, so a key
+    // meant for a control anywhere in the app arrives here too. Anything that
+    // handles Space and Enter itself keeps them — see `isInteractiveTarget`,
+    // which exists because this handler was silently eating the rail's Arm
+    // button.
+    if (isInteractiveTarget(e.target)) return;
+
     if (e.key === 'Enter') {
+      // Nothing to open. `App.svelte` renders branches for `grid` and
+      // `settings` only, so switching to `clip` with no clip would paint an
+      // empty <main> and unmount this grid — taking this handler with it, and
+      // leaving the rail's "Clips" button as the only way back out.
+      if (app.clips.length === 0) return;
       app.view = 'clip';
       return;
     }

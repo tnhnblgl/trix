@@ -1,5 +1,31 @@
 import { describe, expect, it } from 'vitest';
-import { moveSelection } from './keys';
+import { isInteractiveTarget, moveSelection } from './keys';
+
+/** An event target, as much of one as a DOM-less suite needs. */
+const target = (props: Record<string, unknown>) => props as unknown as EventTarget;
+
+describe('isInteractiveTarget', () => {
+  it('leaves Space and Enter to the control they landed on', () => {
+    // The rail's Arm button. Grid.svelte listens on <svelte:window>, so
+    // without this a keyboard user could not arm at all (Space was
+    // preventDefault'ed out from under the button) and Enter both toggled arm
+    // and navigated away.
+    expect(isInteractiveTarget(target({ tagName: 'BUTTON' }))).toBe(true);
+    expect(isInteractiveTarget(target({ tagName: 'INPUT' }))).toBe(true);
+    expect(isInteractiveTarget(target({ tagName: 'TEXTAREA' }))).toBe(true);
+    expect(isInteractiveTarget(target({ tagName: 'SELECT' }))).toBe(true);
+    expect(isInteractiveTarget(target({ tagName: 'DIV', isContentEditable: true }))).toBe(true);
+  });
+
+  it('lets the grid keep the keys nothing else wanted', () => {
+    expect(isInteractiveTarget(target({ tagName: 'DIV' }))).toBe(false);
+    expect(isInteractiveTarget(target({ tagName: 'BODY', isContentEditable: false }))).toBe(false);
+    // `window` itself is the target when nothing is focused, and it has no
+    // tagName at all — the case every grid shortcut actually runs in.
+    expect(isInteractiveTarget(target({}))).toBe(false);
+    expect(isInteractiveTarget(null)).toBe(false);
+  });
+});
 
 describe('moveSelection', () => {
   it('walks the grid by one and by a row', () => {
