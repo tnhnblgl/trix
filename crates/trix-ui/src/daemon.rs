@@ -82,7 +82,11 @@ impl Supervisor {
                     if let Ok(mut current) = self.current.lock() {
                         *current = None;
                     }
-                    let _ = self.app.emit("trix-disconnected", ());
+                    // No `trix-disconnected` here: the reader thread's
+                    // `on_close` already emitted one for this same drop, up to
+                    // a poll interval earlier. Emitting again would double
+                    // every disconnect the frontend sees, which is fine for a
+                    // flag and wrong for anything counted or shown once.
                 }
                 Err(()) => {
                     std::thread::sleep(delay);
