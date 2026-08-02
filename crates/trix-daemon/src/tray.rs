@@ -27,6 +27,7 @@ pub const ID_TOGGLE: usize = 1;
 pub const ID_OPEN_UI: usize = 2;
 pub const ID_OPEN_FOLDER: usize = 3;
 pub const ID_QUIT: usize = 4;
+pub const ID_CHANGE_FOLDER: usize = 5;
 
 /// Icon edge in pixels. 32 is the large-DPI tray size; Windows downscales to
 /// 16 cleanly and asking for a 16 would look soft at 150% scaling.
@@ -184,6 +185,16 @@ pub unsafe fn show_menu(hwnd: HWND, armed: bool) -> Option<usize> {
         let _ = AppendMenuW(menu, MF_STRING, ID_TOGGLE, &HSTRING::from(toggle));
         let _ = AppendMenuW(menu, MF_STRING, ID_OPEN_UI, &HSTRING::from("Open Trix"));
         let _ = AppendMenuW(menu, MF_STRING, ID_OPEN_FOLDER, &HSTRING::from("Open clips folder"));
+        // Directly under "Open clips folder": the two are the same subject, and
+        // a user who just looked at where clips land is the one who wants to
+        // move them. The ellipsis is the Windows convention for "this opens a
+        // dialog rather than doing something now".
+        let _ = AppendMenuW(
+            menu,
+            MF_STRING,
+            ID_CHANGE_FOLDER,
+            &HSTRING::from("Change clips folder..."),
+        );
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, ID_QUIT, &HSTRING::from("Quit"));
 

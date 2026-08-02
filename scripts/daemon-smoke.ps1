@@ -499,6 +499,41 @@ try {
     Check 'no Run value is left behind' `
         (-not (Get-ItemProperty -Path $RunKey -Name 'Trix' -ErrorAction SilentlyContinue))
 
+    # --- the clip directory is proved, not assumed ----------------------------
+    # `clip_dir` is the one setting whose value can be wrong in a way that
+    # checking the *string* would never catch: a typo and an unplugged drive
+    # are both perfectly well-formed paths. Accepting one aims every future
+    # clip at a folder that swallows it, and the user finds out at the moment
+    # they wanted the clip. So the daemon proves the folder by writing to it.
+    $moved = Join-Path $scratch 'moved-clips\Trix'
+    Check 'the new clips folder does not exist yet' (-not (Test-Path -LiteralPath $moved))
+    $set = Invoke-Ok $conn 'config.set' @{ values = @{ clip_dir = $moved } }
+    Check 'config.set creates the clip directory it accepted' (Test-Path -LiteralPath $moved) $moved
+    Check 'changing clip_dir needs no re-arm' ($set.requires_rearm.Count -eq 0) `
+        'clip_dir is read per clip; a UI must not prompt to restart capture for it'
+    $probes = @(Get-ChildItem -LiteralPath $moved -Force -ErrorAction SilentlyContinue)
+    # Piped rather than `$probes.Name`: `Check`'s detail argument is evaluated
+    # on the passing path too, and member enumeration over an empty array is an
+    # error under `Set-StrictMode -Version Latest`.
+    $probeNames = ($probes | ForEach-Object { $_.Name }) -join ', '
+    Check 'the writability probe is cleaned up' ($probes.Count -eq 0) "left behind: $probeNames"
+
+    # A directory whose parent is a *file* can never be created. It is the
+    # portable stand-in for the real cases -- an unplugged drive, a folder that
+    # needs admin -- neither of which a gate can conjure on demand.
+    $blocker = Join-Path $scratch 'blocker'
+    'not a directory' | Out-File -FilePath $blocker -Encoding utf8
+    $refused = Send-TrixCommand $conn 'config.set' `
+        @{ values = @{ clip_dir = (Join-Path $blocker 'clips') } }
+    Check 'config.set refuses a clip directory it cannot create' (-not $refused.ok) `
+        ($refused | ConvertTo-Json -Compress)
+    $cfg = Invoke-Ok $conn 'config.get'
+    Check 'a refused clip_dir leaves the working one in force' ($cfg.clip_dir -eq $moved) `
+        "config.get reports $($cfg.clip_dir); a half-applied settings write is the bug this guards"
+
+    # Back to the scratch library: the receipt below reads clips out of it.
+    $null = Invoke-Ok $conn 'config.set' @{ values = @{ clip_dir = $clipDir } }
+
     $receiptClip = $clip
 }
 finally {

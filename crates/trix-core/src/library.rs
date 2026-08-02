@@ -49,6 +49,38 @@ pub fn is_valid_id(id: &str) -> bool {
     }
 }
 
+/// Proves `dir` can actually take clips: creates it if missing, then writes a
+/// probe file and removes it.
+///
+/// The probe write is the whole point, and the reason this is not simply
+/// `create_dir_all`. That call returns `Ok` for a directory that already exists
+/// and cannot be written to — `C:\`, `C:\Program Files`, a read-only network
+/// share — so a create-only check would accept a folder and leave the user to
+/// discover the truth when a clip fails to save, which is the one moment they
+/// least want to read an error. Roughly a millisecond, and it answers the
+/// question that was actually asked.
+///
+/// Called when the clip directory *changes* and before an `arm`, never per
+/// clip: [`allocate_clip_id`] below stays a bare `create_dir_all` because the
+/// save path is already writing an MP4 and a probe would tell it nothing the
+/// write itself will not.
+pub fn ensure_writable(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("could not create clip directory {}", dir.display()))?;
+    // Named per process so a daemon and a `trix replay` pointed at one folder
+    // cannot race on a single name and delete each other's probe.
+    let probe = dir.join(format!(".trix-write-test-{}", std::process::id()));
+    std::fs::write(&probe, b"trix")
+        .with_context(|| format!("clip directory {} is not writable", dir.display()))?;
+    // Removal is cleanup, not the check. A probe left behind is untidy — it
+    // would sit in Explorer beside the clips — but the write already proved
+    // what the caller asked, so failing to remove it must not fail the call.
+    if let Err(error) = std::fs::remove_file(&probe) {
+        tracing::warn!(path = %probe.display(), %error, "could not remove the clip directory probe");
+    }
+    Ok(())
+}
+
 /// Picks an unused id for a clip being saved now, creating `dir` if needed.
 pub fn allocate_clip_id(dir: &Path) -> Result<String> {
     std::fs::create_dir_all(dir)
@@ -332,6 +364,58 @@ mod tests {
         ] {
             assert!(!is_valid_id(bad), "{bad:?} must be rejected");
         }
+    }
+
+    /// The check behind "change clips folder" and the pre-arm preflight.
+    ///
+    /// Creating the directory is the easy half. The half that matters is the
+    /// probe write: `create_dir_all` returns `Ok` for a directory that already
+    /// exists and cannot be written to, so a create-only check would accept
+    /// `C:\`, `C:\Program Files`, or a read-only share and hand the user back
+    /// exactly the failure this function exists to prevent — one discovered at
+    /// clip time.
+    #[test]
+    fn ensure_writable_creates_the_directory_and_leaves_nothing_behind() {
+        let root = std::env::temp_dir().join(format!("trix-ensure-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        // Missing, and nested: the whole chain gets created.
+        let nested = root.join("a").join("b");
+        ensure_writable(&nested).expect("a fresh nested path must be created");
+        assert!(nested.is_dir(), "the directory must exist afterwards");
+
+        // The probe must not survive. A stray file in the clip directory would
+        // show up in Explorer and in `scan`.
+        let left: Vec<_> = std::fs::read_dir(&nested).unwrap().map(|e| e.unwrap().path()).collect();
+        assert!(left.is_empty(), "the probe file must be cleaned up: {left:?}");
+
+        // Idempotent: an existing writable directory passes.
+        ensure_writable(&nested).expect("an existing writable directory must pass");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A path that cannot be a directory must be refused rather than reported
+    /// usable. Pointing the parent at a *file* forces the failure portably —
+    /// no admin rights, no unplugged drive, no network share needed.
+    #[test]
+    fn ensure_writable_refuses_a_path_that_cannot_be_a_directory() {
+        let root = std::env::temp_dir().join(format!("trix-ensure-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let file = root.join("not-a-directory");
+        std::fs::write(&file, b"x").unwrap();
+
+        // The clip directory itself is a file.
+        assert!(ensure_writable(&file).is_err(), "an existing file is not a usable clip directory");
+        // The clip directory's parent is a file.
+        assert!(
+            ensure_writable(&file.join("child")).is_err(),
+            "a directory under a file cannot be created"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

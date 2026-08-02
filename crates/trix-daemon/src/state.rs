@@ -381,9 +381,25 @@ impl Daemon {
     /// without it, a test that exercises `config.set` at all would rewrite the
     /// settings of whoever ran `cargo test`.
     pub(crate) fn new_at(config: Config, config_path: Option<PathBuf>) -> Self {
+        let clip_dir = config.clip_dir_path();
+        // Best-effort, deliberately not fatal. On a fresh install
+        // `%USERPROFILE%\Videos\Trix` does not exist yet, and creating it here
+        // is what stops the tray's "Open clips folder" launching Explorer at a
+        // path that is not there. On a machine whose clips live on an external
+        // drive the directory may be genuinely absent right now and back in a
+        // minute — refusing to start over that would be absurd. [`Self::arm`]
+        // is where an unusable clip directory becomes an error, because that is
+        // where the user is present and can act on it.
+        if let Err(e) = library::ensure_writable(&clip_dir) {
+            tracing::warn!(
+                dir = %clip_dir.display(),
+                error = %format!("{e:#}"),
+                "the clip directory is not usable yet; arming will refuse until it is"
+            );
+        }
         // One scan, at startup. A failure here is not fatal: an unreadable clip
         // directory must not stop the daemon from arming and capturing.
-        let library = match scan_and_log(&config.clip_dir_path()) {
+        let library = match scan_and_log(&clip_dir) {
             Ok(clips) => clips,
             Err(e) => {
                 tracing::warn!(
@@ -411,6 +427,24 @@ impl Daemon {
         if armed.is_some() {
             return Ok(ArmOutcome { newly_armed: false, status: self.status_of(armed.as_ref()) });
         }
+
+        // Before the slot and before the engine. An unusable clip directory is
+        // the one arm failure a user fixes in ten seconds — plug the drive back
+        // in, or pick another folder — and arming is the moment they are
+        // present and paying attention. The alternative is a green tray icon
+        // over a replay ring whose clips can never be saved, discovered an hour
+        // later at the exact moment they wanted one. `clip_dir` is read per
+        // clip rather than baked into the engine, so this is the last check
+        // that happens before the ring starts filling.
+        //
+        // Cheap enough to be unconditional: one directory create and one probe
+        // file against an `arm` that takes seconds to bring a hardware encoder
+        // up. Taking `config` under `armed` keeps the documented lock order.
+        // Bare "cannot arm", not a second sentence naming the directory:
+        // `ensure_writable` already names it and gives the OS's reason, and
+        // repeating it produced "cannot arm: the clip directory D:\x is not
+        // usable: could not create clip directory D:\x: …".
+        library::ensure_writable(&self.lock_config().clip_dir_path()).context("cannot arm")?;
 
         // The slot first, then the engine. With a `trix replay` session holding
         // the slot, "another trix capture session … is already running" is the
@@ -647,6 +681,28 @@ impl Daemon {
                 bail!("config.set: {e}");
             }
         };
+
+        // The last gate, and the only one that touches the filesystem. A
+        // `clip_dir` naming somewhere that cannot take clips is refused here,
+        // before the registry and before the file, so the all-or-nothing
+        // contract holds: the caller is told no, the old directory is still in
+        // force, and nothing was written. A settings page or the tray's folder
+        // picker therefore cannot leave the user pointed at a folder that
+        // silently swallows every clip.
+        //
+        // Guarded on the key being present, not run every time: this writes a
+        // probe file, and five unrelated keys should not wake a possibly-absent
+        // drive to save a bitrate. `updated` rather than the raw value, so an
+        // empty string is checked as the default it resolves to.
+        //
+        // Not wrapped in a `config.set:` context like the errors above.
+        // `ensure_writable` already names the directory and the OS's reason,
+        // and this message is shown verbatim in the tray's folder-picker
+        // message box, where "config.set" is jargon about a protocol the user
+        // has never heard of.
+        if values.contains_key("clip_dir") {
+            library::ensure_writable(&updated.clip_dir_path())?;
+        }
 
         // Disk first, then memory — the same order the clip library uses. A
         // failed write leaves the daemon agreeing with the file rather than

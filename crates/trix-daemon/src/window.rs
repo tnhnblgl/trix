@@ -56,6 +56,10 @@ pub enum Action {
     /// Tray menu: toggle depending on current state.
     ToggleArmed,
     OpenClipsFolder,
+    /// Tray menu: pick a new clips folder. Handled on the worker thread
+    /// because a modal dialog lasts as long as the user takes to browse, and
+    /// the pump thread must stay free to keep the tray icon alive.
+    ChangeClipsFolder,
     Quit,
 }
 
@@ -229,6 +233,7 @@ unsafe extern "system" fn wnd_proc(
                         Some(tray::ID_TOGGLE) => Some(Action::ToggleArmed),
                         Some(tray::ID_OPEN_UI) => Some(Action::OpenClipsFolder),
                         Some(tray::ID_OPEN_FOLDER) => Some(Action::OpenClipsFolder),
+                        Some(tray::ID_CHANGE_FOLDER) => Some(Action::ChangeClipsFolder),
                         Some(tray::ID_QUIT) => Some(Action::Quit),
                         _ => None,
                     }
@@ -415,12 +420,64 @@ pub fn handle_action(daemon: &Arc<Daemon>, action: Action) {
             let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
             tracing::debug!(dir = %dir.display(), "opened the clips folder");
         }
+        Action::ChangeClipsFolder => change_clips_folder(daemon),
         Action::Quit => {
             // The same path Ctrl+C takes, so a tray Quit finalizes an
             // in-flight mux exactly like a console close does rather than
             // dropping the clip the user just asked for.
             tracing::info!("quit requested from the tray");
             trix_core::control::request_shutdown();
+        }
+    }
+}
+
+/// The tray's "Change clips folder…", end to end. Worker thread, where the
+/// modal dialog is free to block for as long as the user browses.
+///
+/// The chosen path goes through [`Daemon::set_config`] rather than being
+/// applied here, and that is the point of the whole feature: the tray inherits
+/// the control protocol's validation, its all-or-nothing write to
+/// `config.toml`, and its live in-memory apply. A second path that wrote the
+/// setting itself would be a second set of rules to keep true, and the one that
+/// drifted would be this one — it has no tests, because it is a dialog.
+fn change_clips_folder(daemon: &Arc<Daemon>) {
+    let current = daemon.clip_dir();
+
+    let chosen = match crate::folder::pick(&current) {
+        Ok(Some(path)) => path,
+        // Cancelled. Not a failure, and deliberately silent: answering a
+        // dialog the user dismissed on purpose with a message box is the
+        // behaviour that makes people stop opening menus.
+        Ok(None) => return,
+        Err(e) => {
+            let detail = format!("{e:#}");
+            tracing::warn!(error = %detail, "the folder picker failed");
+            crate::folder::report_error(&format!("Could not open the folder picker.\n\n{detail}"));
+            return;
+        }
+    };
+
+    let mut values = serde_json::Map::new();
+    values
+        .insert("clip_dir".to_string(), serde_json::Value::from(chosen.to_string_lossy().as_ref()));
+    match daemon.set_config(&values) {
+        // No re-arm: `clip_dir` is read per clip, so a running capture keeps
+        // its ring and the very next clip lands in the new folder.
+        Ok(_) => tracing::info!(dir = %chosen.display(), "clips folder changed from the tray"),
+        Err(e) => {
+            let detail = format!("{e:#}");
+            tracing::warn!(
+                error = %detail,
+                dir = %chosen.display(),
+                "the chosen clips folder was refused"
+            );
+            // Says where clips are still going, not just what failed. A user
+            // told only "that didn't work" does not know whether they are now
+            // recording to nowhere.
+            crate::folder::report_error(&format!(
+                "That folder can't be used:\n\n{detail}\n\nClips are still being saved to:\n{}",
+                current.display()
+            ));
         }
     }
 }

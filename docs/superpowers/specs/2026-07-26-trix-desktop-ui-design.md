@@ -338,8 +338,22 @@ choice rather than a dead end.
 ### 7.2 Tray
 
 Icon reflects state — hollow when idle, filled when armed. Menu: Arm/Disarm, Open Trix, Open clips
-folder, Quit. Left-click opens the UI. Closing the UI window leaves the daemon running; Quit is the
-only action that stops capture.
+folder, Change clips folder…, Quit. Left-click opens the UI. Closing the UI window leaves the daemon
+running; Quit is the only action that stops capture.
+
+**Change clips folder…** opens the standard Windows folder picker and applies the result through
+`config.set clip_dir`, so it inherits that command's validation and its all-or-nothing write. It
+needs no re-arm: `clip_dir` is read per clip, so a running capture keeps its ring and the next clip
+lands in the new folder. The item exists because the tray is the only surface a v1 user has —
+without it, changing where clips go means hand-editing `config.toml`.
+
+**The clip directory is proved, never assumed.** A `clip_dir` is accepted only if it can be created
+*and written to* — the daemon creates it and writes a probe file. `create_dir_all` alone would
+accept `C:\`, `C:\Program Files`, or a read-only share, all of which fail later at clip time, which
+is the one moment a user cannot afford an error. The same check runs at `arm` (an unusable directory
+refuses the arm, rather than filling a ring whose clips can never be saved) and best-effort at
+startup, which is what gives a fresh install an existing `%USERPROFILE%\Videos\Trix` for "Open clips
+folder" to open.
 
 ### 7.3 Autostart
 

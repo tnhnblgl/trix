@@ -353,10 +353,12 @@ mod tests {
     /// simply did not use them.
     ///
     /// `config_path` is `None`, so there is nowhere for a `config.set` to
-    /// write at all. `clip_dir` names a scratch path that is deliberately
-    /// *never created*: `library::scan` reports a missing directory as an empty
-    /// library, so this costs no filesystem access and leaves nothing behind to
-    /// clean up.
+    /// write at all. `clip_dir` names a scratch path under `%TEMP%`, which the
+    /// constructor's clip-directory preflight creates — the same
+    /// best-effort create that gives a real user an existing `Videos\Trix` on
+    /// first launch. It is left behind empty, exactly as `with_two_clips` and
+    /// `with_scratch_config` leave theirs; what matters is that it is scratch
+    /// rather than the developer's real clip folder.
     fn idle(name: &str) -> Daemon {
         let dir = std::env::temp_dir().join(format!("trix-idle-{name}-{}", std::process::id()));
         let config = Config { clip_dir: dir.to_string_lossy().into_owned(), ..Config::default() };
@@ -785,6 +787,71 @@ mod tests {
             "clip_dir is read per clip and needs no re-arm: {data}"
         );
         assert!(path.exists(), "an accepted config.set writes the file");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The contract behind the tray's "Change clips folder…", both ways round:
+    /// an accepted directory exists afterwards, and a refused one leaves
+    /// *nothing* changed.
+    ///
+    /// The refusal half is the one that matters. `clip_dir` is the only setting
+    /// whose value can be wrong in a way the daemon cannot detect later — a
+    /// mistyped path or an unplugged drive is a perfectly well-formed string —
+    /// and accepting one would point every future clip at a folder that
+    /// swallows it. So the check is a real write, and on failure the old
+    /// directory must still be in force in memory *and* on disk.
+    #[test]
+    fn config_set_creates_the_clip_directory_and_refuses_one_it_cannot_use() {
+        let (daemon, path, dir) = with_scratch_config("clipdir");
+
+        // Accepted: a nested path that does not exist yet is created.
+        let clips = dir.join("Recordings").join("Trix");
+        let response = daemon.dispatch(
+            1,
+            &request_with(
+                1,
+                "config.set",
+                &[("clip_dir", Value::from(clips.to_string_lossy().as_ref()))],
+            ),
+        );
+        assert!(response.ok, "a usable directory must be accepted: {:?}", response.error);
+        assert!(clips.is_dir(), "config.set must create the directory it accepted");
+        let left: Vec<_> = std::fs::read_dir(&clips).unwrap().map(|e| e.unwrap().path()).collect();
+        assert!(left.is_empty(), "the writability probe must not survive: {left:?}");
+        let saved = std::fs::read_to_string(&path).unwrap();
+
+        // Refused: a directory whose parent is a file can never be created.
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        let bad = blocker.join("clips");
+        let response = daemon.dispatch(
+            1,
+            &request_with(
+                2,
+                "config.set",
+                &[("clip_dir", Value::from(bad.to_string_lossy().as_ref()))],
+            ),
+        );
+        assert!(!response.ok, "a directory that cannot be created is not a usable clip_dir");
+        let error = response.error.unwrap_or_default();
+        assert!(error.contains("clip"), "the error must say what it refused: {error}");
+
+        // The old directory still stands — in memory…
+        let after = daemon.dispatch(1, &request(3, "config.get")).data.unwrap();
+        assert_eq!(
+            after.get("clip_dir").and_then(Value::as_str),
+            Some(clips.to_string_lossy().as_ref()),
+            "a refused clip_dir must leave the working directory alone"
+        );
+        // …and on disk. A settings page that showed the old value while the
+        // file held the new one would "fix itself" into the bad path at the
+        // next restart.
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            saved,
+            "a refused config.set must not have rewritten the file"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
