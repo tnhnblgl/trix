@@ -1,0 +1,231 @@
+//! Finding the daemon, connecting to it, launching it, and reconnecting when
+//! it goes away.
+//!
+//! The app is useless without the daemon and must never look broken because of
+//! it: spec §4.5 says a missing daemon is an offer to start one, not an error
+//! dialog. So this module always has an answer — connected, or connecting, or
+//! "not running" with a button — and never a stack trace.
+
+use std::io::BufReader;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use serde_json::{Map, Value};
+use tauri::{AppHandle, Emitter as _, Manager as _};
+
+use crate::pipe::{CALL_TIMEOUT, Connection};
+
+/// The daemon's published socket. Byte-mode, newline-framed, ACL'd to the
+/// current user (spec §4.1) — a plain `File` open is a complete client.
+const PIPE_PATH: &str = r"\\.\pipe\trix-control";
+
+/// First reconnect delay. Short enough that the app is back before the user
+/// has read the "not running" panel when the daemon merely restarted.
+pub(crate) const FIRST_RETRY: Duration = Duration::from_millis(400);
+/// Ceiling on the reconnect delay. A daemon the user has no intention of
+/// starting must not cost a syscall every frame forever, and 5 s is still
+/// quick enough that starting it from the tray feels instant here.
+pub(crate) const MAX_RETRY: Duration = Duration::from_secs(5);
+
+pub(crate) fn next_retry(current: Duration) -> Duration {
+    (current * 2).min(MAX_RETRY)
+}
+
+/// Where `trix-daemon.exe` lives, given this executable's path.
+///
+/// Beside us, always: spec §8 ships all three binaries in one directory, and
+/// cargo puts them in one profile directory too, so the installed and the
+/// development layouts need the same single rule.
+pub(crate) fn daemon_path_beside(ui_exe: &Path) -> Option<PathBuf> {
+    // `Path::parent` returns `Some("")` for a single-component relative path
+    // like `trix-ui.exe`, not `None` — an empty parent is exactly the "no
+    // parent, no guess" case the bare-filename test below requires, so it is
+    // treated the same as no parent at all.
+    let parent = ui_exe.parent()?;
+    if parent.as_os_str().is_empty() {
+        return None;
+    }
+    Some(parent.join("trix-daemon.exe"))
+}
+
+/// Owns the current connection and the thread that keeps trying to make one.
+pub struct Supervisor {
+    app: AppHandle,
+    current: Mutex<Option<Arc<Connection>>>,
+}
+
+impl Supervisor {
+    pub fn start(app: AppHandle) -> Arc<Self> {
+        let supervisor = Arc::new(Self { app, current: Mutex::new(None) });
+        let worker = Arc::clone(&supervisor);
+        // If this thread cannot start there is nothing useful left to do, but
+        // there is still a window: it stays on the "not running" panel, whose
+        // Start button calls `launch` directly.
+        let _ = std::thread::Builder::new()
+            .name("trix-daemon-supervisor".into())
+            .spawn(move || worker.run());
+        supervisor
+    }
+
+    fn run(&self) {
+        let mut delay = FIRST_RETRY;
+        loop {
+            match self.connect() {
+                Ok(connection) => {
+                    delay = FIRST_RETRY;
+                    self.on_connected(&connection);
+                    // Park until the reader thread reports the socket gone.
+                    while !connection.is_closed() {
+                        std::thread::sleep(Duration::from_millis(120));
+                    }
+                    if let Ok(mut current) = self.current.lock() {
+                        *current = None;
+                    }
+                    let _ = self.app.emit("trix-disconnected", ());
+                }
+                Err(()) => {
+                    std::thread::sleep(delay);
+                    delay = next_retry(delay);
+                }
+            }
+        }
+    }
+
+    fn connect(&self) -> Result<Arc<Connection>, ()> {
+        // Read+write on the same handle, then a duplicate for the reader: two
+        // handles to one pipe instance are safe to use concurrently from
+        // different threads, and it is the only way to read and write at once
+        // without overlapped I/O.
+        let write_half =
+            std::fs::OpenOptions::new().read(true).write(true).open(PIPE_PATH).map_err(|_| ())?;
+        let read_half = write_half.try_clone().map_err(|_| ())?;
+
+        let app = self.app.clone();
+        let closed_app = self.app.clone();
+        let connection = Connection::start(
+            BufReader::new(read_half),
+            write_half,
+            move |event| {
+                // One channel for every daemon event; the frontend switches on
+                // `event`. A Tauri event per protocol event would mean a
+                // listener to register for each, and a silent miss whenever the
+                // daemon grows one.
+                let _ = app.emit("trix-event", event);
+            },
+            move || {
+                let _ = closed_app.emit("trix-disconnected", ());
+            },
+        )
+        .map_err(|_| ())?;
+
+        if let Ok(mut current) = self.current.lock() {
+            *current = Some(Arc::clone(&connection));
+        }
+        Ok(connection)
+    }
+
+    /// Announces the connection, and opens the asset scope onto wherever clips
+    /// currently live.
+    ///
+    /// The scope has to be opened here rather than in `tauri.conf.json`
+    /// because `clip_dir` is a config key the user can change from the tray at
+    /// any time; a static scope would be a guess that goes stale the first
+    /// time they do.
+    fn on_connected(&self, connection: &Arc<Connection>) {
+        if let Ok(status) = connection.call("status", Map::new(), CALL_TIMEOUT) {
+            if let Some(dir) = status.get("clip_dir").and_then(Value::as_str) {
+                self.allow_clip_dir(dir);
+            }
+            let _ = self.app.emit("trix-connected", status);
+        } else {
+            let _ = self.app.emit("trix-connected", Value::Null);
+        }
+    }
+
+    /// Lets the webview load `<clip_dir>\*.mp4` and `*.jpg` through `asset:`.
+    ///
+    /// Non-recursive: the library is flat by design (spec §5.1), so the
+    /// directory's own children are exactly the grant needed and subdirectories
+    /// are not this app's business.
+    pub fn allow_clip_dir(&self, dir: &str) {
+        let _ = self.app.asset_protocol_scope().allow_directory(dir, false);
+    }
+
+    pub fn connection(&self) -> Option<Arc<Connection>> {
+        self.current.lock().ok().and_then(|c| c.clone())
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.connection().is_some_and(|c| !c.is_closed())
+    }
+
+    pub fn call(&self, cmd: &str, args: Map<String, Value>) -> Result<Value, String> {
+        let connection = self.connection().ok_or("not connected to the Trix daemon")?;
+        connection.call(cmd, args, CALL_TIMEOUT)
+    }
+
+    /// Starts `trix-daemon.exe`. The supervisor's own retry loop picks the
+    /// socket up; this does not wait for it.
+    pub fn launch(&self) -> Result<(), String> {
+        let exe =
+            std::env::current_exe().map_err(|e| format!("could not locate trix-ui.exe: {e}"))?;
+        let daemon =
+            daemon_path_beside(&exe).ok_or("could not work out where trix-daemon.exe is")?;
+        if !daemon.exists() {
+            return Err(format!("trix-daemon.exe is not beside the app at {}", daemon.display()));
+        }
+
+        // CREATE_NO_WINDOW: the daemon is a console-subsystem binary, so
+        // spawning it from a windowed app flashes a console on screen and then
+        // hands it a window nobody asked for.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        use std::os::windows::process::CommandExt as _;
+        std::process::Command::new(&daemon)
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| format!("could not start the Trix daemon: {e}"))?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_daemon_is_looked_for_beside_this_exe() {
+        let ui = Path::new(r"C:\Program Files\Trix\trix-ui.exe");
+        assert_eq!(
+            daemon_path_beside(ui),
+            Some(PathBuf::from(r"C:\Program Files\Trix\trix-daemon.exe")),
+            "installed layout: spec §8 puts all three binaries in one directory"
+        );
+
+        let dev = Path::new(r"C:\src\trix\target\debug\trix-ui.exe");
+        assert_eq!(
+            daemon_path_beside(dev),
+            Some(PathBuf::from(r"C:\src\trix\target\debug\trix-daemon.exe")),
+            "cargo puts both binaries in the same profile directory, so dev needs no special case"
+        );
+
+        assert_eq!(daemon_path_beside(Path::new("trix-ui.exe")), None, "no parent, no guess");
+    }
+
+    /// Backoff exists so a daemon the user never intends to start does not
+    /// cost a reconnect attempt every frame, and so one that is restarting is
+    /// picked up quickly rather than after a fixed long wait.
+    #[test]
+    fn backoff_grows_from_prompt_to_patient_and_stops_there() {
+        let mut delay = FIRST_RETRY;
+        let mut seen = vec![delay];
+        for _ in 0..8 {
+            delay = next_retry(delay);
+            seen.push(delay);
+        }
+        assert_eq!(seen[0], Duration::from_millis(400), "the first retry is quick");
+        assert!(seen[1] > seen[0] && seen[2] > seen[1], "it must actually back off");
+        assert!(seen.iter().all(|d| *d <= MAX_RETRY), "and it must never exceed the cap: {seen:?}");
+        assert_eq!(*seen.last().expect("non-empty"), MAX_RETRY, "it settles at the cap");
+    }
+}

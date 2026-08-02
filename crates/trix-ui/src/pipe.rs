@@ -1,8 +1,3 @@
-// Task 3 wires `Connection` into the Tauri builder and calls `CALL_TIMEOUT`
-// and `is_closed`; until then both are unused. Narrow allow rather than
-// leaving warnings in the build — remove this line once Task 3 lands.
-#![allow(dead_code)]
-
 //! The control-socket client: framing, request/response correlation, and the
 //! reader thread that routes daemon events.
 //!
