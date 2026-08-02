@@ -260,8 +260,8 @@ Expected: `crates/trix-ui/icons/` fills with `32x32.png`, `128x128.png`, `icon.i
   "build": {
     "frontendDist": "web/dist",
     "devUrl": "http://localhost:1420",
-    "beforeDevCommand": "npm --prefix web run dev",
-    "beforeBuildCommand": "npm --prefix web run build"
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
   },
   "app": {
     "windows": [
@@ -290,6 +290,8 @@ Expected: `crates/trix-ui/icons/` fills with `32x32.png`, `128x128.png`, `icon.i
   }
 }
 ```
+
+Note there is no `--prefix web` on either hook: the Tauri CLI already runs both `beforeDevCommand` and `beforeBuildCommand` with the working directory set to the frontend directory it derives from `frontendDist` (here `crates/trix-ui/web`), so adding `--prefix web` would resolve to the nonexistent `web/web`.
 
 Two things here are load-bearing and easy to get wrong:
 
