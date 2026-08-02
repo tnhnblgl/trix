@@ -73,10 +73,35 @@ use windows::core::HSTRING;
 
 use pipe_reader::PeekingPipeReader;
 
-/// How long a test waits for the write to complete, and then for the reply.
+/// How long the round-trip test waits for the write to complete, and then for
+/// the reply; also what bounds `StubDaemon::connect` and `StubDaemon::drop`.
 /// Generous next to a `status` the stub answers out of a literal in
 /// microseconds — if either wait runs out, the transport is wedged, not slow.
+/// This is a "must complete" bound, so its patience is genuinely earned; it is
+/// not used by the naive deadlock test below — see [`DEADLOCK_PROOF`] for why
+/// that one's bound is so much shorter.
 const WAIT: Duration = Duration::from_secs(5);
+
+/// How long `the_naive_layout_deadlocks_the_write_behind_the_read` waits
+/// before declaring the write stuck.
+///
+/// The property under test is structural, not statistical: once a
+/// synchronous `ReadFile` is pending on a duplicate handle, the I/O manager
+/// will not even dispatch a write IRP issued on the paired handle until that
+/// read completes. There is no long tail to wait out before deciding the
+/// write is stuck — it either starts moving in the first tens of
+/// milliseconds or it never does until the pipe breaks — so `WAIT`'s extra
+/// 4.25s buys no information here.
+///
+/// The asymmetry that makes a short bound safe: this test can only ever
+/// false-*pass*. A loaded machine delays the writer thread's report over its
+/// channel, which makes a `Timeout` more likely, and `Timeout` is the result
+/// the test wants. It cannot make the test false-*fail* the way a short bound
+/// on a "must complete" assertion would. What a timeout alone cannot rule out
+/// is a write that actually went through — bytes reached the pipe — while
+/// only the *report* of that was delayed past this deadline; the
+/// `PeekNamedPipe` check right after closes exactly that gap.
+const DEADLOCK_PROOF: Duration = Duration::from_millis(750);
 
 /// How often the stub looks for a request, and how quickly it notices it has
 /// been told to stop. The same 25 ms the daemon and `pipe_reader.rs` both use.
@@ -133,6 +158,11 @@ struct StubDaemon {
     stop: Arc<AtomicBool>,
     stopped: Receiver<()>,
     name: String,
+    /// A duplicate of the server's own pipe instance, held only so
+    /// `bytes_received` can `PeekNamedPipe` it from the test thread. The
+    /// worker owns and reads a different duplicate of the same instance; this
+    /// one is never read, only peeked.
+    instance: File,
 }
 
 impl StubDaemon {
@@ -142,6 +172,8 @@ impl StubDaemon {
     fn start(label: &str) -> Self {
         let name = private_pipe_name(label);
         let instance = create_instance(&name);
+        let peek_handle =
+            instance.try_clone().expect("could not duplicate the stub's own pipe handle");
         let stop = Arc::new(AtomicBool::new(false));
         let (stopped_tx, stopped) = mpsc::channel();
         let worker_stop = Arc::clone(&stop);
@@ -152,7 +184,18 @@ impl StubDaemon {
                 let _ = stopped_tx.send(());
             })
             .expect("could not spawn the stub daemon thread");
-        Self { stop, stopped, name }
+        Self { stop, stopped, name, instance: peek_handle }
+    }
+
+    /// Bytes the OS is holding on the server's end of the pipe right now.
+    ///
+    /// Exists for `the_naive_layout_deadlocks_the_write_behind_the_read`,
+    /// which needs a positive check that nothing arrived rather than the mere
+    /// absence of a completion — see [`DEADLOCK_PROOF`]. A peek failure (the
+    /// client side never got far enough to connect) reads the same as zero:
+    /// either way, nothing arrived.
+    fn bytes_received(&self) -> u32 {
+        available(&self.instance).unwrap_or(0)
     }
 
     /// One connect attempt, exactly as `daemon.rs::connect` makes it.
@@ -227,9 +270,9 @@ impl Drop for StubDaemon {
 /// Creates one pipe instance on `name`, with default security.
 ///
 /// The daemon builds a user-only DACL here (`trix-daemon/src/pipe.rs`) and
-/// `trix-daemon/tests` has a test for it. This is not that test: nothing
-/// reaches this pipe but the client fifteen lines below it, so the descriptor
-/// is left at the default and `Win32_Security` stays out of the dev-dependency.
+/// `trix-daemon/tests` has a test for it. This is not that test: nothing but
+/// the client fifteen lines below ever opens this pid-scoped private name, so
+/// there is no one else to lock the descriptor out.
 fn create_instance(name: &str) -> File {
     // SAFETY: the name is a live `HSTRING` for the duration of the call, and
     // the security-attributes argument is `None`, so no pointer outlives it.
@@ -418,17 +461,27 @@ fn the_naive_layout_deadlocks_the_write_behind_the_read() {
     // Matched rather than tested with `is_err()`: `Disconnected` is also an
     // `Err`, so a writer thread that panicked would have made this assertion
     // pass instantly having proven nothing at all.
-    match wrote.recv_timeout(WAIT) {
-        Err(RecvTimeoutError::Timeout) => {}
+    match wrote.recv_timeout(DEADLOCK_PROOF) {
+        Err(RecvTimeoutError::Timeout) => {
+            // A timeout alone is an absence, not a proof: turn it into one by
+            // confirming the server's kernel buffer is still empty. See
+            // `DEADLOCK_PROOF` for the false-pass this closes.
+            assert_eq!(
+                stub.bytes_received(),
+                0,
+                "the write's completion report timed out, but bytes reached the server -- that's \
+                 a slow report, not a stuck write, and this test proves nothing about the deadlock"
+            );
+        }
         Err(RecvTimeoutError::Disconnected) => {
             panic!("the writer thread died before reporting, so this test proved nothing")
         }
         Ok(result) => panic!(
-            "the `status` write completed in under {}s ({result:?}) with a blocking read pending \
+            "the `status` write completed in under {}ms ({result:?}) with a blocking read pending \
              on a duplicate of the same handle. That is the serialization `src/pipe_reader.rs` \
              exists to work around, and this platform no longer appears to do it -- re-check \
              whether the wrapper is still needed before trusting this",
-            WAIT.as_secs()
+            DEADLOCK_PROOF.as_millis()
         ),
     }
 
