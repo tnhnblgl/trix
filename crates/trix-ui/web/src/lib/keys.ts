@@ -49,6 +49,33 @@ export function isActivatableTarget(target: EventTarget | null): boolean {
 }
 
 /**
+ * Whether the grid's window-level handler should act on this key press.
+ *
+ * Three rules, and the third is the one that is easy to get wrong:
+ *
+ * - Typed text always belongs to the field it landed in.
+ * - A `<button>` outside the grid — the rail's Arm control — owns Space and
+ *   Enter itself, and must keep them.
+ * - A card *inside* the grid is a grid item first, even though it is also a
+ *   `<button>`. WebView2 focuses it on click, so if it were left to activate
+ *   itself, Space would re-select the clip instead of previewing it and Enter
+ *   would re-select instead of opening — and spec §6.2 gives both of those
+ *   keys to the grid. Arrow keys reach the grid from either kind of button.
+ *
+ * `insideGrid` is passed in rather than read off the target because the suite
+ * runs on node with no DOM; the caller owns the `contains` check.
+ */
+export function gridShouldHandle(
+  target: EventTarget | null,
+  key: string,
+  insideGrid: boolean,
+): boolean {
+  if (isTypingTarget(target)) return false;
+  const activates = key === ' ' || key === 'Enter';
+  return !(isActivatableTarget(target) && activates && !insideGrid);
+}
+
+/**
  * Where the selection lands after an arrow key in a grid `columns` wide.
  *
  * Clamps rather than wraps, on purpose. The grid is newest-first and `Del` acts

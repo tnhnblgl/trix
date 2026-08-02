@@ -1,7 +1,7 @@
 <script lang="ts">
   import ClipCard from '../components/ClipCard.svelte';
   import { app } from '../lib/state.svelte';
-  import { isActivatableTarget, isTypingTarget, moveSelection } from '../lib/keys';
+  import { gridShouldHandle, moveSelection } from '../lib/keys';
   import { clipUrl } from '../lib/clips';
 
   /** Kept in sync with the CSS grid below so ArrowDown moves one visual row. */
@@ -21,15 +21,12 @@
 
   function onkeydown(e: KeyboardEvent) {
     // `<svelte:window>` is global for as long as the grid is mounted, so a key
-    // meant for a control anywhere in the app arrives here too. A text field
-    // keeps every key it's given, arrows included — see `isTypingTarget`.
-    if (isTypingTarget(e.target)) return;
-    // A `<button>` (the rail's Arm control, a clip card once WebView2 has
-    // focused it after a click) only ever consumes Space and Enter itself;
-    // this exists because a blanket guard on the tag alone was also eating
-    // the arrow keys a focused card should be passing straight through to the
-    // grid's own navigation below. See `isActivatableTarget`.
-    if (isActivatableTarget(e.target) && (e.key === ' ' || e.key === 'Enter')) return;
+    // meant for a control anywhere in the app arrives here too. Which of them
+    // are ours is `gridShouldHandle`'s decision — and it needs to know whether
+    // the target is one of our own cards, because those are `<button>`s that
+    // WebView2 focuses on click yet whose Space and Enter belong to the grid.
+    const insideGrid = !!gridEl && e.target instanceof Node && gridEl.contains(e.target);
+    if (!gridShouldHandle(e.target, e.key, insideGrid)) return;
 
     if (e.key === 'Enter') {
       // Nothing to open. `App.svelte` renders branches for `grid` and
@@ -37,6 +34,10 @@
       // empty <main> and unmount this grid — taking this handler with it, and
       // leaving the rail's "Clips" button as the only way back out.
       if (app.clips.length === 0) return;
+      // Without this a focused card would also fire its own `click` — Chromium
+      // activates a button on Enter's keydown — and re-select the clip we are
+      // in the middle of leaving.
+      e.preventDefault();
       app.view = 'clip';
       return;
     }
