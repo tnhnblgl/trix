@@ -57,8 +57,16 @@ class AppState {
 
 export const app = new AppState();
 
-/** Everything the app does the moment it has a daemon to talk to. */
+/**
+ * Everything the app does the moment it has a daemon to talk to.
+ *
+ * Guarded here rather than at the call sites: the startup poll and the
+ * `trix-connected` event are ordered by nothing, so either can arrive first
+ * and both will fire for the same connect. `onDisconnected` clears the flag,
+ * so a genuine reconnect still runs this.
+ */
 async function onDaemonUp() {
+  if (app.connected) return;
   app.connected = true;
   await app.refreshStatus();
   // Stats drive the ring meter; per spec §4.4 the daemon measures nothing
@@ -85,9 +93,14 @@ export function wireDaemon() {
   // registered late. Without asking once at startup the app would sit on
   // "Trix isn't running" whenever the daemon was already up -- which, for a
   // daemon that lives in the tray, is the normal way it gets opened.
-  void daemonConnected().then((up) => {
-    if (up && !app.connected) void onDaemonUp();
-  });
+  void daemonConnected()
+    .then((up) => {
+      if (up) void onDaemonUp();
+    })
+    .catch(() => {
+      // Nothing to tell the user: failing to ask only means falling back on
+      // the event, which is the behaviour they would have had anyway.
+    });
 
   onDaemonEvent((event) => {
     const data = event.data as Record<string, unknown>;
