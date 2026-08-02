@@ -1,29 +1,51 @@
 /**
- * Tags that answer Space and Enter themselves.
- *
- * `BUTTON` is the one that actually bit. The rail's Arm control is a real
- * `<button>` and `Grid.svelte` listens on `<svelte:window>`, so while the grid
- * was mounted every key press in the app reached it: Space hit the grid's
- * `preventDefault` before the browser could activate the focused button, which
- * left a keyboard user unable to arm or disarm at all, and Enter navigated away
- * *without* preventing the default, so the button fired too and one press both
- * toggled arm and left the screen.
+ * Tags a user types into. These keep every key, arrows included — a text
+ * field must never lose a keystroke to a window-level shortcut sitting
+ * behind it.
  */
-const SELF_HANDLING_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON']);
+const TYPING_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT']);
 
 /**
- * True when a key press belongs to the control it landed on rather than to a
- * window-level shortcut sitting behind it.
+ * Tags that answer Space and Enter themselves, and only those two.
+ *
+ * `BUTTON` is the one that actually bit, and the reason this is a second,
+ * narrower set rather than folded into `TYPING_TAGS`. The rail's Arm control
+ * is a real `<button>` and `Grid.svelte` listens on `<svelte:window>`, so
+ * while the grid was mounted every key press in the app reached it: Space hit
+ * the grid's `preventDefault` before the browser could activate the focused
+ * button, which left a keyboard user unable to arm or disarm at all, and
+ * Enter navigated away *without* preventing the default, so the button fired
+ * too and one press both toggled arm and left the screen. But a button only
+ * ever consumes Space and Enter — WebView2 moves focus to it on click, and a
+ * blanket guard keyed on the tag alone then ate ArrowLeft/Right/Up/Down too,
+ * killing the grid's own navigation for anyone who had just clicked a card.
+ */
+const ACTIVATABLE_TAGS = new Set(['BUTTON']);
+
+/**
+ * True when a key press is typed text that belongs to the control it landed
+ * on, not a window-level shortcut sitting behind it.
  *
  * Duck-typed rather than `instanceof HTMLElement` because the suite runs on
  * node with no DOM, and the only two things this needs off an event target are
  * its tag name and whether it is being typed into.
  */
-export function isInteractiveTarget(target: EventTarget | null): boolean {
+export function isTypingTarget(target: EventTarget | null): boolean {
   if (!target) return false;
   const el = target as { tagName?: unknown; isContentEditable?: unknown };
   if (el.isContentEditable === true) return true;
-  return typeof el.tagName === 'string' && SELF_HANDLING_TAGS.has(el.tagName.toUpperCase());
+  return typeof el.tagName === 'string' && TYPING_TAGS.has(el.tagName.toUpperCase());
+}
+
+/**
+ * True when the target is a control that natively consumes Space and Enter
+ * itself — a `<button>`. Every other key, arrows included, must fall through
+ * to whatever window-level handler sits behind it.
+ */
+export function isActivatableTarget(target: EventTarget | null): boolean {
+  if (!target) return false;
+  const el = target as { tagName?: unknown };
+  return typeof el.tagName === 'string' && ACTIVATABLE_TAGS.has(el.tagName.toUpperCase());
 }
 
 /**

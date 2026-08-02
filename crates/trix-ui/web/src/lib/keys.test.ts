@@ -1,29 +1,62 @@
 import { describe, expect, it } from 'vitest';
-import { isInteractiveTarget, moveSelection } from './keys';
+import { isActivatableTarget, isTypingTarget, moveSelection } from './keys';
 
 /** An event target, as much of one as a DOM-less suite needs. */
 const target = (props: Record<string, unknown>) => props as unknown as EventTarget;
 
-describe('isInteractiveTarget', () => {
-  it('leaves Space and Enter to the control they landed on', () => {
-    // The rail's Arm button. Grid.svelte listens on <svelte:window>, so
-    // without this a keyboard user could not arm at all (Space was
-    // preventDefault'ed out from under the button) and Enter both toggled arm
-    // and navigated away.
-    expect(isInteractiveTarget(target({ tagName: 'BUTTON' }))).toBe(true);
-    expect(isInteractiveTarget(target({ tagName: 'INPUT' }))).toBe(true);
-    expect(isInteractiveTarget(target({ tagName: 'TEXTAREA' }))).toBe(true);
-    expect(isInteractiveTarget(target({ tagName: 'SELECT' }))).toBe(true);
-    expect(isInteractiveTarget(target({ tagName: 'DIV', isContentEditable: true }))).toBe(true);
+describe('isTypingTarget', () => {
+  it('keeps every key for text entry, arrows included', () => {
+    expect(isTypingTarget(target({ tagName: 'INPUT' }))).toBe(true);
+    expect(isTypingTarget(target({ tagName: 'TEXTAREA' }))).toBe(true);
+    expect(isTypingTarget(target({ tagName: 'SELECT' }))).toBe(true);
+    expect(isTypingTarget(target({ tagName: 'DIV', isContentEditable: true }))).toBe(true);
   });
 
   it('lets the grid keep the keys nothing else wanted', () => {
-    expect(isInteractiveTarget(target({ tagName: 'DIV' }))).toBe(false);
-    expect(isInteractiveTarget(target({ tagName: 'BODY', isContentEditable: false }))).toBe(false);
+    expect(isTypingTarget(target({ tagName: 'DIV' }))).toBe(false);
+    expect(isTypingTarget(target({ tagName: 'BODY', isContentEditable: false }))).toBe(false);
     // `window` itself is the target when nothing is focused, and it has no
     // tagName at all — the case every grid shortcut actually runs in.
-    expect(isInteractiveTarget(target({}))).toBe(false);
-    expect(isInteractiveTarget(null)).toBe(false);
+    expect(isTypingTarget(target({}))).toBe(false);
+    expect(isTypingTarget(null)).toBe(false);
+    // A button is activatable, not a typing target — it must not get the
+    // free pass on arrow keys that `TYPING_TAGS` grants.
+    expect(isTypingTarget(target({ tagName: 'BUTTON' }))).toBe(false);
+  });
+});
+
+describe('isActivatableTarget', () => {
+  it('is true only for the tag that natively consumes Space and Enter', () => {
+    expect(isActivatableTarget(target({ tagName: 'BUTTON' }))).toBe(true);
+    expect(isActivatableTarget(target({ tagName: 'DIV' }))).toBe(false);
+    expect(isActivatableTarget(target({}))).toBe(false);
+    expect(isActivatableTarget(null)).toBe(false);
+  });
+});
+
+describe('Grid.svelte key guard', () => {
+  // The regression this whole split exists to prevent: a clip card is a real
+  // `<button>` (ClipCard.svelte), and WebView2 moves focus to it on click —
+  // the primary way a user selects a clip. A blanket guard keyed on the tag
+  // alone swallowed every key for a focused card, arrows included, so the
+  // grid's own navigation went dead the moment a clip was clicked. This
+  // asserts the actual guard expression `Grid.svelte` runs, not just the two
+  // predicates in isolation.
+  function guardConsumes(target: EventTarget | null, key: string): boolean {
+    if (isTypingTarget(target)) return true;
+    return isActivatableTarget(target) && (key === ' ' || key === 'Enter');
+  }
+
+  it('still lets ArrowRight through a focused clip-card button', () => {
+    expect(guardConsumes(target({ tagName: 'BUTTON' }), 'ArrowRight')).toBe(false);
+  });
+
+  it('leaves Space and Enter to the button the rail Arm control is', () => {
+    // Space with the Arm button focused must still arm/disarm natively
+    // rather than also previewing in place, and Enter there must not also
+    // navigate to the clip view.
+    expect(guardConsumes(target({ tagName: 'BUTTON' }), ' ')).toBe(true);
+    expect(guardConsumes(target({ tagName: 'BUTTON' }), 'Enter')).toBe(true);
   });
 });
 
