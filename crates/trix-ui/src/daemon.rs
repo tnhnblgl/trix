@@ -9,7 +9,7 @@
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value};
 use tauri::{AppHandle, Emitter as _, Manager as _};
@@ -29,8 +29,42 @@ pub(crate) const FIRST_RETRY: Duration = Duration::from_millis(400);
 /// quick enough that starting it from the tray feels instant here.
 pub(crate) const MAX_RETRY: Duration = Duration::from_secs(5);
 
+/// How long a connection has to last before it counts as one that really
+/// worked.
+///
+/// A daemon the user restarts holds a connection for minutes or hours. A
+/// connection that opens and dies again in the same breath is not a restart, it
+/// is a failure that happens to get past `CreateFile` — and every one of them
+/// costs a `trix-disconnected`/`trix-connected` pair in the webview and a
+/// flicker of the daemon-down panel. Two seconds is far below any real session
+/// and far above any spin.
+pub(crate) const HEALTHY_SESSION: Duration = Duration::from_secs(2);
+
 pub(crate) fn next_retry(current: Duration) -> Duration {
     (current * 2).min(MAX_RETRY)
+}
+
+/// After a connection ends: how long to wait before trying again, and what the
+/// delay after *that* should be.
+///
+/// Exists as a pure function so the floor below can be tested without a daemon,
+/// a socket, or a two-second sleep in the suite.
+///
+/// The `Ok` arm of [`Supervisor::run`] used to reset the delay and loop with no
+/// wait at all, which is right for the case it was written for — the daemon
+/// restarted, and the app should be back before the user has finished reading
+/// the panel — and has no floor under it whatsoever. A connect that succeeds
+/// and drops immediately, forever, spun that loop at full speed: one
+/// `CreateFile` and one pair of webview events per iteration, with nothing
+/// slowing it down and nothing logged. Backing a short session off exactly as
+/// if the connect had failed closes that, and leaves the restart case untouched
+/// because a restart is on the other side of [`HEALTHY_SESSION`].
+pub(crate) fn after_connection(delay: Duration, lasted: Duration) -> (Duration, Duration) {
+    if lasted >= HEALTHY_SESSION {
+        (Duration::ZERO, FIRST_RETRY)
+    } else {
+        (delay, next_retry(delay))
+    }
 }
 
 /// Where `trix-daemon.exe` lives, given this executable's path.
@@ -74,7 +108,7 @@ impl Supervisor {
         loop {
             match self.connect() {
                 Ok(connection) => {
-                    delay = FIRST_RETRY;
+                    let opened = Instant::now();
                     self.on_connected(&connection);
                     // Park until the reader thread reports the socket gone.
                     while !connection.is_closed() {
@@ -88,6 +122,11 @@ impl Supervisor {
                     // a poll interval earlier. Emitting again would double
                     // every disconnect the frontend sees, which is fine for a
                     // flag and wrong for anything counted or shown once.
+                    let (wait, next) = after_connection(delay, opened.elapsed());
+                    delay = next;
+                    // `Duration::ZERO` after a real session, so a daemon that
+                    // restarted is retried as immediately as it always was.
+                    std::thread::sleep(wait);
                 }
                 Err(()) => {
                     std::thread::sleep(delay);
@@ -231,5 +270,38 @@ mod tests {
         assert!(seen[1] > seen[0] && seen[2] > seen[1], "it must actually back off");
         assert!(seen.iter().all(|d| *d <= MAX_RETRY), "and it must never exceed the cap: {seen:?}");
         assert_eq!(*seen.last().expect("non-empty"), MAX_RETRY, "it settles at the cap");
+    }
+
+    /// A daemon that was actually being used and then went away is the case the
+    /// short first retry was written for: no wait at all before the next
+    /// attempt, and the delay back down to its quickest.
+    #[test]
+    fn a_real_session_that_ends_is_retried_immediately() {
+        let (wait, next) = after_connection(MAX_RETRY, HEALTHY_SESSION);
+        assert_eq!(wait, Duration::ZERO, "a restart must not be made to wait");
+        assert_eq!(next, FIRST_RETRY, "and the backoff earned before it is forgotten");
+    }
+
+    /// The floor. A socket that opens and dies again immediately is not a
+    /// restart, and without this it cost a `CreateFile` plus a
+    /// `trix-disconnected`/`trix-connected` pair per iteration for as long as
+    /// it kept happening — a spinning core and a daemon-down panel strobing at
+    /// whatever rate the loop managed.
+    #[test]
+    fn a_connection_that_dies_instantly_cannot_spin_the_loop() {
+        let instant = Duration::from_millis(1);
+        let mut delay = FIRST_RETRY;
+        let mut total = Duration::ZERO;
+        for _ in 0..20 {
+            let (wait, next) = after_connection(delay, instant);
+            assert!(wait > Duration::ZERO, "every failed-fast connection must cost a wait");
+            total += wait;
+            delay = next;
+        }
+        assert_eq!(delay, MAX_RETRY, "and it must back off to the cap like a failed connect");
+        assert!(
+            total > Duration::from_secs(20),
+            "20 instant drops should take a minute or so, not a millisecond: {total:?}"
+        );
     }
 }

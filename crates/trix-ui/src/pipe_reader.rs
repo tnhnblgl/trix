@@ -13,7 +13,9 @@ use std::fs::File;
 use std::io::Read;
 use std::time::Duration;
 
-use windows::Win32::Foundation::HANDLE;
+use windows::Win32::Foundation::{
+    ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_NOT_CONNECTED, HANDLE, WIN32_ERROR,
+};
 use windows::Win32::System::Pipes::PeekNamedPipe;
 
 /// How long the reader waits before asking the pipe again whether anything has
@@ -109,13 +111,80 @@ impl Read for PeekingPipeReader {
                 // Bytes are queued, so this read returns them promptly rather
                 // than blocking — a byte-mode pipe hands over whatever it has.
                 Ok(_) => return self.pipe.read(out),
-                // The daemon exited, or the pipe is otherwise unusable.
-                // Reported as EOF rather than an error because that is what it
-                // means to this reader, and because it is what makes
-                // `Connection`'s reader thread end cleanly and fire `on_close`,
-                // which is how the supervisor learns to start reconnecting.
-                Err(_) => return Ok(0),
+                Err(e) => return end_of_stream_or_error(e),
             }
         }
+    }
+}
+
+/// The three `PeekNamedPipe` failures that mean "there is no daemon on the
+/// other end any more", as opposed to "the call itself went wrong".
+///
+/// `ERROR_BROKEN_PIPE` once the far end has closed *and* its bytes have been
+/// drained (see the daemon's `request_pending`, which measured exactly that),
+/// `ERROR_PIPE_NOT_CONNECTED` if it was never there, and `ERROR_NO_DATA` while
+/// its handle is on the way down.
+const PIPE_IS_GONE: [WIN32_ERROR; 3] = [ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_NOT_CONNECTED];
+
+/// Turns a failed peek into either a clean end of stream or a real error.
+///
+/// A gone pipe is reported as EOF because that is what it means to this reader,
+/// and because it is what makes `Connection`'s reader thread end cleanly and
+/// fire `on_close`, which is how the supervisor learns to start reconnecting.
+///
+/// Everything else is propagated. This used to be `Err(_) => Ok(0)`, which
+/// forged *every* peek failure — a bad handle, a permissions problem, anything
+/// the future adds — into a clean disconnect. That reads as a harmless
+/// simplification, because `Connection`'s reader thread treats `Ok(0)` and
+/// `Err(_)` identically, and it is not: a failure that persists rather than
+/// resolves became an unbounded loop of connect, fake-EOF, reconnect, with a
+/// `trix-disconnected`/`trix-connected` pair emitted into the webview on every
+/// pass. `Supervisor::run` now puts a floor under that loop, and this stops
+/// lying to it about why the socket ended. Nothing in this crate logs, so an
+/// error that is invented here is an error nobody can ever recover.
+fn end_of_stream_or_error(e: windows::core::Error) -> std::io::Result<usize> {
+    if PIPE_IS_GONE.iter().any(|gone| gone.to_hresult() == e.code()) {
+        return Ok(0);
+    }
+    // `io::Error::other` rather than the `From<windows::core::Error>` impl:
+    // that impl feeds the raw `HRESULT` to `from_raw_os_error`, which expects a
+    // Win32 code, so the resulting error renders as a nonsense message under a
+    // number that is not the one Windows reported. Keeping the `windows::core::Error`
+    // as the source keeps its own `Display` — the only description of this
+    // failure anyone will ever see.
+    Err(std::io::Error::other(e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The distinction the whole function exists to make. A gone pipe is the
+    /// normal way a session ends and must stay indistinguishable from EOF; a
+    /// peek that fails for any other reason must not be dressed up as one,
+    /// because `Supervisor::run` cannot tell "the daemon quit" from "this call
+    /// will fail again in 400 ms" if both arrive as a clean disconnect.
+    #[test]
+    fn only_a_gone_pipe_is_reported_as_end_of_stream() {
+        for gone in PIPE_IS_GONE {
+            let result =
+                end_of_stream_or_error(windows::core::Error::from_hresult(gone.to_hresult()));
+            assert!(
+                matches!(result, Ok(0)),
+                "{gone:?} means the daemon is gone, which is this reader's EOF: {result:?}"
+            );
+        }
+
+        // A handle this reader should never have had. Nothing about it says the
+        // daemon exited, and answering "clean disconnect" would send the
+        // supervisor round the reconnect loop forever against a bug it cannot
+        // fix by reconnecting.
+        let bogus = windows::core::Error::from_hresult(
+            windows::Win32::Foundation::ERROR_INVALID_HANDLE.to_hresult(),
+        );
+        assert!(
+            end_of_stream_or_error(bogus).is_err(),
+            "a peek failure that is not a dead pipe must be propagated, not forged into EOF"
+        );
     }
 }
