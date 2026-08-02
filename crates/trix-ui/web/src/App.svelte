@@ -1,6 +1,7 @@
 <script lang="ts">
   import Rail from './views/Rail.svelte';
   import DaemonDown from './views/DaemonDown.svelte';
+  import Grid from './views/Grid.svelte';
   import Toasts from './components/Toasts.svelte';
   import { app, wireDaemon } from './lib/state.svelte';
 
@@ -14,7 +15,7 @@
     <Rail />
     <main class="content">
       {#if app.view === 'grid'}
-        <p class="placeholder">Clips arrive in Task 5.</p>
+        <Grid />
       {:else if app.view === 'settings'}
         <p class="placeholder">Settings arrive in Task 9.</p>
       {/if}

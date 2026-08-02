@@ -53,6 +53,20 @@ class AppState {
       this.toast('error', String(e));
     }
   }
+
+  async loadClips() {
+    try {
+      const page = await call<{ clips: ClipMeta[]; total: number; offset: number }>('library.list', {
+        offset: 0,
+        limit: 200,
+      });
+      this.clips = page.clips;
+      this.total = page.total;
+      this.selected = 0;
+    } catch (e) {
+      this.toast('error', String(e));
+    }
+  }
 }
 
 export const app = new AppState();
@@ -69,6 +83,7 @@ async function onDaemonUp() {
   if (app.connected) return;
   app.connected = true;
   await app.refreshStatus();
+  await app.loadClips();
   // Stats drive the ring meter; per spec §4.4 the daemon measures nothing
   // until a client asks, so nobody pays for this while no UI is open.
   try {
