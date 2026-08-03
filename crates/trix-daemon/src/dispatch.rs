@@ -538,7 +538,7 @@ mod tests {
     }
 
     /// The published `config.get` payload: every key `Config` has, plus
-    /// `clip_dir_resolved`.
+    /// `clip_dir_resolved` and `config_file_exists`.
     ///
     /// The expected key set is *derived* from `Config::default()` rather than
     /// written out here, and that is the whole point. A config key added to
@@ -547,7 +547,7 @@ mod tests {
     /// this fails the day the next key is added rather than the day a user
     /// notices it missing from the UI.
     #[test]
-    fn config_get_returns_every_config_key_plus_the_resolved_clip_dir() {
+    fn config_get_returns_every_config_key_plus_clip_dir_resolved_and_config_file_exists() {
         let daemon = idle("config-get");
         let response = daemon.dispatch(1, &request(1, "config.get"));
         assert!(response.ok, "config.get must be answered now: {:?}", response.error);
@@ -565,7 +565,8 @@ mod tests {
         actual.sort_unstable();
         assert_eq!(
             actual, expected,
-            "config.get must round-trip every Config key, plus clip_dir_resolved and nothing else"
+            "config.get must round-trip every Config key, plus clip_dir_resolved and \
+             config_file_exists, and nothing else"
         );
 
         // `clip_dir_resolved` is `clip_dir` put through `Config::clip_dir_path`,

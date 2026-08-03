@@ -43,12 +43,27 @@
       // three keys in three calls could leave a half-configured install behind
       // if the second failed.
       await call('config.set', { monitor_index: monitorIndex, clip_hotkey: hotkey });
+    } catch (e) {
+      // Setup itself did not happen -- staying on this step, whose only
+      // control retries the very call that just failed, is the correct
+      // response.
+      app.toast('error', String(e));
+      return;
+    }
+
+    // config.set succeeded, so setup is done: leave the wizard for the grid
+    // no matter what happens next. Arming is a separate, retryable action the
+    // rail already exposes once the grid is showing, so a failed `arm` here
+    // must not strand the user in a wizard whose job is already finished --
+    // same "safer default" reasoning as the config.get call site in
+    // onDaemonUp.
+    try {
       await call('arm');
-      await app.refreshStatus();
-      app.view = 'grid';
     } catch (e) {
       app.toast('error', String(e));
     }
+    await app.refreshStatus();
+    app.view = 'grid';
   }
 </script>
 

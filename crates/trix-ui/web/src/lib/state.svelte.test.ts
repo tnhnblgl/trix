@@ -19,7 +19,7 @@ vi.mock('./ipc', () => ({
 }));
 
 const { app, wireDaemon } = await import('./state.svelte');
-const { onDaemonEvent } = await import('./ipc');
+const { onConnected, onDaemonEvent } = await import('./ipc');
 
 /**
  * Registers the real `wireDaemon()` event listener and hands back the
@@ -32,6 +32,32 @@ function registerDaemonEventHandler(): (event: DaemonEvent) => void {
   if (!handler) throw new Error('wireDaemon() never registered a daemon event handler');
   return handler;
 }
+
+/**
+ * Registers the real `wireDaemon()` connect listener and hands back the
+ * callback it passed to `onConnected` -- the same capture-and-invoke shape as
+ * `registerDaemonEventHandler`, but for the handler that drives `onDaemonUp`.
+ */
+function registerConnectedHandler(): (status: unknown) => void {
+  wireDaemon();
+  const handler = vi.mocked(onConnected).mock.calls.at(-1)?.[0];
+  if (!handler) throw new Error('wireDaemon() never registered an onConnected handler');
+  return handler;
+}
+
+/** Minimal valid `status` payload, enough for `refreshStatus` to read. */
+const statusPayload = () => ({
+  armed: false,
+  encoder: null,
+  monitor_index: 0,
+  ring_seconds_used: 0,
+  ring_seconds_total: 0,
+  version: '0.0.0-test',
+  clip_dir: 'C:\\fake\\clips',
+});
+
+/** Minimal valid `library.list` payload, enough for `loadClips` to read. */
+const libraryListPayload = () => ({ clips: [], total: 0, offset: 0 });
 
 const clip = (id: string): ClipMeta => ({
   id,
@@ -50,11 +76,16 @@ const clip = (id: string): ClipMeta => ({
 beforeEach(() => {
   callMock.mockReset();
   vi.mocked(onDaemonEvent).mockClear();
+  vi.mocked(onConnected).mockClear();
   app.clips = [];
   app.total = 0;
   app.selected = 0;
   app.view = 'clip';
   app.toasts = [];
+  // onDaemonUp() short-circuits when this is already true, so a test that
+  // ran earlier (or wireDaemon()'s own daemonConnected() bootstrap) must not
+  // leave it set for the next one.
+  app.connected = false;
 });
 
 describe('AppState.remove', () => {
@@ -274,5 +305,54 @@ describe('wireDaemon: clip_saved', () => {
     expect(app.total).toBe(2);
     expect(app.selected).toBe(1);
     expect(app.toasts).toHaveLength(0);
+  });
+});
+
+describe('onDaemonUp: first-run routing', () => {
+  // Every command onDaemonUp can reach needs a stub, regardless of which
+  // branch a given test takes -- refreshStatus, loadClips and
+  // stats.subscribe all run before or after the config.get check, so an
+  // unstubbed one would leave a call resolving to `undefined` and throw
+  // inside `refreshStatus`/`loadClips` reading its shape.
+  function stubDaemonCommands(configFileExists: boolean) {
+    callMock.mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case 'config.get':
+          return Promise.resolve({ config_file_exists: configFileExists });
+        case 'status':
+          return Promise.resolve(statusPayload());
+        case 'library.list':
+          return Promise.resolve(libraryListPayload());
+        case 'stats.subscribe':
+          return Promise.resolve({});
+        default:
+          return Promise.resolve({});
+      }
+    });
+  }
+
+  it('opens the wizard when the daemon reports no config file', async () => {
+    app.view = 'grid';
+    stubDaemonCommands(false);
+    const handle = registerConnectedHandler();
+
+    // `onConnected(() => void onDaemonUp())` is fire-and-forget: the handler
+    // itself returns nothing awaitable, so the assertion has to wait for the
+    // promise chain inside onDaemonUp to settle rather than reading
+    // app.view the instant handle() returns.
+    handle(undefined);
+
+    await vi.waitFor(() => expect(app.view).toBe('firstrun'));
+  });
+
+  it('leaves the grid up when a config file already exists', async () => {
+    app.view = 'grid';
+    stubDaemonCommands(true);
+    const handle = registerConnectedHandler();
+
+    handle(undefined);
+
+    await vi.waitFor(() => expect(callMock).toHaveBeenCalledWith('config.get'));
+    expect(app.view).toBe('grid');
   });
 });

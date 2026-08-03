@@ -134,6 +134,22 @@ async function onDaemonUp() {
   if (app.connected) return;
   app.connected = true;
   await app.refreshStatus();
+  try {
+    // Spec §7.4: no config file means first run. Only the daemon can tell —
+    // it knows whether its own `config_path` points at a real file, which a
+    // UI has no way to check for itself. Checked right after `refreshStatus`,
+    // ahead of `loadClips` and `stats.subscribe`, so the wizard can appear as
+    // soon as this resolves instead of waiting on a library scan and a stats
+    // subscription an unconfigured install has no use for yet. `app.connected`
+    // is already set true above, though, so a brief grid frame before the
+    // wizard mounts is still possible -- this narrows that window, it does
+    // not close it.
+    const config = await call<Record<string, unknown>>('config.get');
+    if (config['config_file_exists'] === false) app.view = 'firstrun';
+  } catch {
+    // A config.get that fails is not a reason to force a wizard on someone
+    // who may have a perfectly good config; the grid is the safer default.
+  }
   await app.loadClips();
   // Stats drive the ring meter; per spec §4.4 the daemon measures nothing
   // until a client asks, so nobody pays for this while no UI is open.
@@ -142,16 +158,6 @@ async function onDaemonUp() {
   } catch {
     // A daemon that will not subscribe is still a usable daemon; the meter
     // just falls back to the value `status` reported.
-  }
-  try {
-    // Spec §7.4: no config file means first run. Only the daemon can tell —
-    // it knows whether its own `config_path` points at a real file, which a
-    // UI has no way to check for itself.
-    const config = await call<Record<string, unknown>>('config.get');
-    if (config['config_file_exists'] === false) app.view = 'firstrun';
-  } catch {
-    // A config.get that fails is not a reason to force a wizard on someone
-    // who may have a perfectly good config; the grid is the safer default.
   }
 }
 
