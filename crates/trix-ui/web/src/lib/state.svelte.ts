@@ -143,6 +143,16 @@ async function onDaemonUp() {
     // A daemon that will not subscribe is still a usable daemon; the meter
     // just falls back to the value `status` reported.
   }
+  try {
+    // Spec §7.4: no config file means first run. Only the daemon can tell —
+    // it knows whether its own `config_path` points at a real file, which a
+    // UI has no way to check for itself.
+    const config = await call<Record<string, unknown>>('config.get');
+    if (config['config_file_exists'] === false) app.view = 'firstrun';
+  } catch {
+    // A config.get that fails is not a reason to force a wizard on someone
+    // who may have a perfectly good config; the grid is the safer default.
+  }
 }
 
 /** Subscribes the store to the daemon. Call once, from App.svelte. */

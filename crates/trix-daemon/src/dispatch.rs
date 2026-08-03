@@ -558,6 +558,7 @@ mod tests {
         let mut expected: Vec<&str> =
             defaults.as_object().unwrap().keys().map(String::as_str).collect();
         expected.push("clip_dir_resolved");
+        expected.push("config_file_exists");
         expected.sort_unstable();
 
         let mut actual: Vec<&str> = object.keys().map(String::as_str).collect();
@@ -588,6 +589,37 @@ mod tests {
             default_resolved.ends_with(r"Videos\Trix"),
             "an empty clip_dir must resolve to the default: {default_resolved}"
         );
+    }
+
+    /// Spec §7.4 defines first run as "no config file". `Config::load` never
+    /// writes one, so the fact is real and only the daemon can see it — a UI
+    /// cannot tell a default from a saved value that happens to equal it.
+    #[test]
+    fn config_get_reports_whether_a_config_file_exists() {
+        let (daemon, path, _dir) = with_scratch_config("first-run");
+        assert!(!path.exists(), "the scratch config starts absent");
+
+        let before = daemon.dispatch(1, &request(1, "config.get"));
+        let data = before.data.expect("config.get carries data");
+        assert_eq!(data["config_file_exists"], false, "no file yet, so this is first run");
+
+        let set = daemon.dispatch(1, &request_with(2, "config.set", &[("fps", 30.into())]));
+        assert!(set.ok, "{:?}", set.error);
+
+        let after = daemon.dispatch(1, &request(3, "config.get"));
+        assert_eq!(
+            after.data.expect("data")["config_file_exists"],
+            true,
+            "the first config.set is what ends first run"
+        );
+    }
+
+    /// A daemon with nowhere to persist has no config file by definition, and
+    /// must say so rather than reporting on some other file's existence.
+    #[test]
+    fn a_daemon_with_no_config_path_is_always_first_run() {
+        let response = idle("no-config-path").dispatch(1, &request(1, "config.get"));
+        assert_eq!(response.data.expect("data")["config_file_exists"], false);
     }
 
     /// The refusal boundary. A key the daemon does not know, and a value it

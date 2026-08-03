@@ -4,6 +4,7 @@
   import Grid from './views/Grid.svelte';
   import ClipPage from './views/ClipPage.svelte';
   import Settings from './views/Settings.svelte';
+  import FirstRun from './views/FirstRun.svelte';
   import Toasts from './components/Toasts.svelte';
   import { app, wireDaemon } from './lib/state.svelte';
 
@@ -12,6 +13,8 @@
 
 {#if !app.connected}
   <DaemonDown />
+{:else if app.view === 'firstrun'}
+  <FirstRun />
 {:else}
   <div class="shell">
     <Rail />

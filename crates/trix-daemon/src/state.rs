@@ -618,6 +618,20 @@ impl Daemon {
             "clip_dir_resolved".to_string(),
             Value::from(config.clip_dir_path().to_string_lossy().as_ref()),
         );
+        // Spec §7.4's first run is "no config file", and `Config::load` never
+        // writes one, so this is an observation rather than a flag somebody
+        // has to remember to clear.
+        //
+        // Read from this daemon's own `config_path` rather than from
+        // `Config::path()`. They are the same thing in production, and very
+        // much not in a test: a static lookup would consult the developer's
+        // real `%APPDATA%\trix\config.toml` and answer `true` no matter what
+        // this daemon was pointed at, which would make the test below pass
+        // for the wrong reason and hide the case it exists to cover.
+        object.insert(
+            "config_file_exists".to_string(),
+            Value::Bool(self.config_path.as_ref().is_some_and(|path| path.is_file())),
+        );
         // Overridden, not read from the file: the registry is the source of
         // truth for autostart (spec §7.3). A user who removed the Run entry in
         // regedit or a startup manager has disabled autostart, and a settings
