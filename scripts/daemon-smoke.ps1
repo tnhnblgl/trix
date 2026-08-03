@@ -112,6 +112,23 @@ function Check {
     $script:Checks.Add([PSCustomObject]@{ Name = $Name; Passed = $Condition; Detail = $Detail })
 }
 
+# tracing-subscriber has no TTY detection of its own -- colour is gated only on
+# the NO_COLOR environment variable -- so redirecting the daemon's or the
+# CLI's output to a file does not disable it, and DefaultVisitor::record_debug
+# writes a field's name and its "=" in separate SGR escape sequences. That
+# makes a plain 'frames=\d+ dropped=\d+ paced=\d+' match fail against
+# redirected output whenever NO_COLOR happens to be unset in the shell that
+# runs this script -- which is this gate's own stage-3 failure, confirmed by
+# running it both ways on the same build. Fixed here, in the two places that
+# read counters back out of a log file, rather than by adding .with_ansi(false)
+# to the daemon or CLI's init_tracing: that would also strip colour from the
+# author's own interactive terminal, which is theirs to decide, not a side
+# effect of making this script's regex match.
+function Strip-AnsiCodes {
+    param([Parameter(ValueFromPipeline)][string]$Line)
+    process { $Line -replace '\x1B\[[0-9;]*m', '' }
+}
+
 # Deliberately NOT fail-fast, unlike protocol-smoke.ps1: this gate arms real
 # hardware, writes real clips and touches the registry, so a run that stops at
 # the first failure costs a minute to learn one fact and leaves the rest
@@ -407,7 +424,7 @@ try {
     # The daemon and `trix replay` share the whole capture path; if the daemon
     # drops frames the CLI does not, the daemon's own wiring is at fault.
     function Get-DaemonCounters {
-        $line = (Get-Content $outLog, $errLog -ErrorAction SilentlyContinue |
+        $line = (Get-Content $outLog, $errLog -ErrorAction SilentlyContinue | Strip-AnsiCodes |
             Where-Object { $_ -match 'frames=\d+ dropped=\d+ paced=\d+' } | Select-Object -Last 1)
         if ($line -match 'frames=(\d+) dropped=(\d+) paced=(\d+)') {
             return [PSCustomObject]@{ frames = [int]$Matches[1]; dropped = [int]$Matches[2]; paced = [int]$Matches[3] }
@@ -431,7 +448,7 @@ try {
             -PassThru -WindowStyle Hidden -RedirectStandardOutput $cliOut -RedirectStandardError "$cliOut.err"
         $cliRun.WaitForExit(60000) | Out-Null
     } finally { $env:APPDATA = $scratch }
-    $cliLine = (Get-Content $cliOut, "$cliOut.err" -ErrorAction SilentlyContinue |
+    $cliLine = (Get-Content $cliOut, "$cliOut.err" -ErrorAction SilentlyContinue | Strip-AnsiCodes |
         Where-Object { $_ -match 'frames=\d+ dropped=\d+ paced=\d+' } | Select-Object -Last 1)
     if ($cliLine -match 'frames=(\d+) dropped=(\d+) paced=(\d+)') {
         $cliCounters = [PSCustomObject]@{ frames = [int]$Matches[1]; dropped = [int]$Matches[2]; paced = [int]$Matches[3] }
