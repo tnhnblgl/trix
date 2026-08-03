@@ -12,6 +12,7 @@
 //! `WM_ENDSESSION`, and gets marked "not responding" by the OS. Every action
 //! is therefore a message on a channel that the worker thread drains.
 
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -59,6 +60,9 @@ pub enum Action {
     Disarm,
     /// Tray menu: toggle depending on current state.
     ToggleArmed,
+    /// Tray menu's "Open Trix" and a left click on the icon: launch the
+    /// desktop app, or fall back to the clips folder if it is not installed.
+    OpenApp,
     OpenClipsFolder,
     /// Tray menu: pick a new clips folder. Handled on the worker thread
     /// because a modal dialog lasts as long as the user takes to browse, and
@@ -330,9 +334,8 @@ unsafe extern "system" fn wnd_proc(
             // Without NOTIFYICON_VERSION_4 (which we do not ask for) the
             // callback's lparam is the mouse message itself.
             let action = match lparam.0 as u32 {
-                // Left click opens the UI. Until stage 4 ships one, that is
-                // the clips folder — the thing the user came to look at.
-                WM_LBUTTONUP => Some(Action::OpenClipsFolder),
+                // Left click opens the UI.
+                WM_LBUTTONUP => Some(Action::OpenApp),
                 WM_RBUTTONUP => {
                     // The menu is modal and pumps its own messages, but it is
                     // driven by the user and returns promptly, so it is the
@@ -340,7 +343,7 @@ unsafe extern "system" fn wnd_proc(
                     let armed = ARMED_MIRROR.load(Ordering::Relaxed);
                     match unsafe { tray::show_menu(hwnd, armed) } {
                         Some(tray::ID_TOGGLE) => Some(Action::ToggleArmed),
-                        Some(tray::ID_OPEN_UI) => Some(Action::OpenClipsFolder),
+                        Some(tray::ID_OPEN_UI) => Some(Action::OpenApp),
                         Some(tray::ID_OPEN_FOLDER) => Some(Action::OpenClipsFolder),
                         Some(tray::ID_CHANGE_FOLDER) => Some(Action::ChangeClipsFolder),
                         Some(tray::ID_QUIT) => Some(Action::Quit),
@@ -546,14 +549,8 @@ pub fn handle_action(daemon: &Arc<Daemon>, action: Action) {
         Action::ToggleArmed => set_armed(daemon, !ARMED_MIRROR.load(Ordering::Relaxed)),
         Action::Arm => set_armed(daemon, true),
         Action::Disarm => set_armed(daemon, false),
-        Action::OpenClipsFolder => {
-            let dir = daemon.clip_dir();
-            // `explorer.exe` returns a non-zero exit code even on success, so
-            // its status is deliberately ignored rather than logged as a
-            // failure the user would see in the log for no reason.
-            let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
-            tracing::debug!(dir = %dir.display(), "opened the clips folder");
-        }
+        Action::OpenApp => open_app(daemon),
+        Action::OpenClipsFolder => open_clips_folder(daemon),
         Action::ChangeClipsFolder => change_clips_folder(daemon),
         Action::Quit => {
             // The same path Ctrl+C takes, so a tray Quit finalizes an
@@ -562,6 +559,57 @@ pub fn handle_action(daemon: &Arc<Daemon>, action: Action) {
             tracing::info!("quit requested from the tray");
             trix_core::control::request_shutdown();
         }
+    }
+}
+
+/// Opens the clips folder in Explorer.
+fn open_clips_folder(daemon: &Arc<Daemon>) {
+    let dir = daemon.clip_dir();
+    // `explorer.exe` returns a non-zero exit code even on success, so its
+    // status is deliberately ignored rather than logged as a failure the user
+    // would see in the log for no reason.
+    let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
+    tracing::debug!(dir = %dir.display(), "opened the clips folder");
+}
+
+/// Where `trix-ui.exe` lives, given the daemon's own path: beside it, the way
+/// spec §8's MSI installs all three binaries and the way cargo builds them.
+///
+/// Returns `None` when `daemon_exe` has no real parent directory — either
+/// because `Path::parent` returns `None` outright (a root or a prefix), or
+/// because it returns `Some("")`, which is what a bare relative filename like
+/// `trix-daemon.exe` produces. An empty parent still joins into a path
+/// (`"" .join("trix-ui.exe")` is `"trix-ui.exe"`), but that bare relative path
+/// is exactly what must not reach `Command::spawn`: it would be resolved
+/// against the daemon's *current working directory*, which for a process
+/// started from the autostart registry entry, a smoke script, or an arbitrary
+/// shell is not where the binaries actually live. Treating an empty parent
+/// the same as no parent is what makes the caller fall back to opening the
+/// clips folder instead of launching whatever happens to sit in the cwd.
+fn ui_path_beside(daemon_exe: &Path) -> Option<PathBuf> {
+    let parent = daemon_exe.parent()?;
+    if parent.as_os_str().is_empty() {
+        return None;
+    }
+    Some(parent.join("trix-ui.exe"))
+}
+
+/// Opens the desktop app, or the clips folder if it is not installed.
+///
+/// The fallback is not politeness: `trix-daemon.exe` is a supported thing to
+/// run on its own (it is what the autostart entry runs, and what the smoke
+/// scripts drive), so "Open Trix" has to do something useful on a machine that
+/// has the daemon and no app. The app's own single-instance plugin handles the
+/// second click — this side always just runs the exe.
+fn open_app(daemon: &Arc<Daemon>) {
+    let ui = std::env::current_exe().ok().and_then(|exe| ui_path_beside(&exe));
+    let Some(ui) = ui.filter(|path| path.exists()) else {
+        open_clips_folder(daemon);
+        return;
+    };
+    if let Err(error) = std::process::Command::new(&ui).spawn() {
+        tracing::warn!(path = %ui.display(), %error, "could not start the Trix app");
+        open_clips_folder(daemon);
     }
 }
 
@@ -662,6 +710,23 @@ mod tests {
         let (tx, rx) = sync_channel::<Action>(ACTION_QUEUE_DEPTH);
         drop(rx);
         assert!(!offer(&tx, Action::Quit));
+    }
+
+    /// Both the menu item and a left click open the app now. Until this task
+    /// they opened the clips folder, which was the right placeholder for a
+    /// daemon with no app and is the wrong behaviour for one that has it.
+    #[test]
+    fn opening_trix_launches_the_app_beside_the_daemon() {
+        let daemon = Path::new(r"C:\Program Files\Trix\trix-daemon.exe");
+        assert_eq!(
+            ui_path_beside(daemon),
+            Some(PathBuf::from(r"C:\Program Files\Trix\trix-ui.exe"))
+        );
+        // A bare filename has no real parent directory (`Path::parent`
+        // returns `Some("")`, not `None`), so this must fall back rather than
+        // hand back a bare `trix-ui.exe` for `Command::spawn` to resolve
+        // against the daemon's current working directory.
+        assert_eq!(ui_path_beside(Path::new("trix-daemon.exe")), None);
     }
 
     /// A hotkey the user changes in settings has to work now, not after a
