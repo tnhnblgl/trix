@@ -301,6 +301,12 @@ pub(crate) struct ConfigUpdate {
     pub accepted: Map<String, Value>,
     /// Which of those keys need an `arm` before they change what is captured.
     pub requires_rearm: Vec<String>,
+    /// `clip_dir` resolved the same way `config_json`'s `clip_dir_resolved`
+    /// is. Carried out here, rather than left for `dispatch.rs` to ask
+    /// `Daemon` for separately, because this module is deliberately
+    /// transport-free (see the module doc) — `dispatch.rs` uses this to
+    /// broadcast `config_changed` without a second round trip into `Daemon`.
+    pub clip_dir_resolved: String,
 }
 
 pub struct Daemon {
@@ -772,7 +778,14 @@ impl Daemon {
             crate::window::rebind_hotkey(&config.clip_hotkey);
         }
 
-        Ok(ConfigUpdate { accepted, requires_rearm })
+        // Read under the same lock the write above just landed into, the same
+        // way `config_json` computes it fresh rather than trusting a value
+        // carried in from before the merge — `dispatch.rs` broadcasts this in
+        // `config_changed` unconditionally, not only when `clip_dir` was one
+        // of `values`, so a client always learns where clips land now.
+        let clip_dir_resolved = config.clip_dir_path().to_string_lossy().into_owned();
+
+        Ok(ConfigUpdate { accepted, requires_rearm, clip_dir_resolved })
     }
 
     // --- Statistics ---------------------------------------------------------

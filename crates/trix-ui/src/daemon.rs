@@ -85,6 +85,19 @@ pub(crate) fn daemon_path_beside(ui_exe: &Path) -> Option<PathBuf> {
     Some(parent.join("trix-daemon.exe"))
 }
 
+/// Lets the webview load `<dir>\*.mp4` and `*.jpg` through `asset:`.
+///
+/// A free function, not a method, so the event closure in [`Supervisor::connect`]
+/// can call it too: that closure must be `'static` (the reader thread that owns
+/// it outlives the `connect` call), so it can only capture an owned clone of
+/// `AppHandle`, never a borrow of `&Supervisor`. Sharing this one line is what
+/// keeps the app-initiated grant (`Supervisor::allow_clip_dir`, called from
+/// `on_connected`) and the event-driven one from becoming two copies of the
+/// same rule that could drift apart.
+fn grant_clip_dir(app: &AppHandle, dir: &str) {
+    let _ = app.asset_protocol_scope().allow_directory(dir, false);
+}
+
 /// Owns the current connection and the thread that keeps trying to make one.
 pub struct Supervisor {
     app: AppHandle,
@@ -151,6 +164,23 @@ impl Supervisor {
             reader,
             write_half,
             move |event| {
+                // `config_changed` is the one event this layer acts on itself
+                // rather than only forwarding. It is broadcast to every
+                // connected client, including this app's own, for every
+                // accepted `config.set` regardless of who sent it — which is
+                // what makes this the single place that keeps the asset scope
+                // current. Before this, the grant only ran right after a
+                // `config.set` this app itself issued (see `commands.rs`),
+                // which missed the tray's "Change clips folder…": an
+                // already-open app kept building `asset:` URLs against the old
+                // directory, and the new one was never granted, so every
+                // thumbnail broke and every clip stopped playing until the
+                // daemon restarted.
+                if event.event == "config_changed"
+                    && let Some(dir) = event.data.get("clip_dir_resolved").and_then(Value::as_str)
+                {
+                    grant_clip_dir(&app, dir);
+                }
                 // One channel for every daemon event; the frontend switches on
                 // `event`. A Tauri event per protocol event would mean a
                 // listener to register for each, and a silent miss whenever the
@@ -192,8 +222,13 @@ impl Supervisor {
     /// Non-recursive: the library is flat by design (spec §5.1), so the
     /// directory's own children are exactly the grant needed and subdirectories
     /// are not this app's business.
+    ///
+    /// Only ever needed for the *initial* grant on connect now — every later
+    /// change rides the `config_changed` event handled in `connect`'s own
+    /// closure above, which calls [`grant_clip_dir`] directly because it
+    /// cannot hold a borrow of `self` across the reader thread's lifetime.
     pub fn allow_clip_dir(&self, dir: &str) {
-        let _ = self.app.asset_protocol_scope().allow_directory(dir, false);
+        grant_clip_dir(&self.app, dir);
     }
 
     pub fn connection(&self) -> Option<Arc<Connection>> {

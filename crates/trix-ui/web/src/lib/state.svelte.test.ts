@@ -336,6 +336,24 @@ describe('wireDaemon: clip_saved', () => {
   });
 });
 
+describe('wireDaemon: config_changed', () => {
+  // The tray's "Change clips folder..." is the only reachable way to change
+  // clip_dir outside this app, and it never told an open app anything before
+  // this event existed -- the grid kept building asset: URLs against the old
+  // directory. Refreshing status is what picks up the new clip_dir the same
+  // way the `armed`/`disarmed` cases already do.
+  it('refreshes status so a tray-driven clip_dir change reaches app.clipDir', async () => {
+    app.status = statusPayload();
+    callMock.mockResolvedValue({ ...statusPayload(), clip_dir: 'D:\\new-clips' });
+    const handle = registerDaemonEventHandler();
+
+    handle({ event: 'config_changed', data: { clip_dir_resolved: 'D:\\new-clips' } });
+    await vi.waitFor(() => expect(app.clipDir).toBe('D:\\new-clips'));
+
+    expect(callMock).toHaveBeenCalledWith('status');
+  });
+});
+
 describe('onDaemonUp: first-run routing', () => {
   // Every command onDaemonUp can reach needs a stub, regardless of which
   // branch a given test takes -- refreshStatus, loadClips and

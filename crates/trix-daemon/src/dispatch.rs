@@ -108,6 +108,29 @@ impl ClientHandler for Daemon {
 fn config_set(daemon: &Daemon, id: u64, values: &Map<String, Value>) -> Response {
     match daemon.set_config(values) {
         Ok(update) => {
+            // Broadcast before the response, not after — matching `arm`'s
+            // `armed` and window.rs's `hotkey_rebound`, which both fire the
+            // moment the state-changing call answers `Ok`. `set_config` only
+            // ever returns `Ok` once every gate (unknown key, out-of-range
+            // value, an unwritable `clip_dir`, a failed autostart write, a
+            // failed file write) has already passed and the change has
+            // actually landed, so this cannot fire for one that did not.
+            //
+            // Every accepted key, not just `clip_dir`: the tray's "Change
+            // clips folder..." is the only reachable way to change `clip_dir`
+            // outside this app, and it never told an already-open app
+            // anything, so its thumbnails and playback silently broke until
+            // the daemon restarted. Broadcasting unconditionally, rather than
+            // only when `clip_dir` was one of the keys, means every client
+            // (including the one that sent this `config.set`) learns the same
+            // way regardless of who changed what.
+            let mut changed = update.accepted.clone();
+            changed.insert(
+                "clip_dir_resolved".to_string(),
+                Value::from(update.clip_dir_resolved.as_str()),
+            );
+            daemon.clients.broadcast(&Event::new("config_changed", Value::Object(changed)));
+
             let mut fields = Map::new();
             fields.insert("accepted".to_string(), Value::Object(update.accepted));
             fields.insert(
@@ -621,6 +644,58 @@ mod tests {
     fn a_daemon_with_no_config_path_is_always_first_run() {
         let response = idle("no-config-path").dispatch(1, &request(1, "config.get"));
         assert_eq!(response.data.expect("data")["config_file_exists"], false);
+    }
+
+    /// The event `daemon.rs`'s asset-scope grant and `state.svelte.ts`'s
+    /// status refresh both depend on (whole-branch review finding 2): every
+    /// accepted `config.set` broadcasts `config_changed` to every registered
+    /// client, not just the one that sent it. The tray's "Change clips
+    /// folder…" is the only reachable way to change `clip_dir` outside a
+    /// connected UI, and without this event an already-open app never learns
+    /// its asset scope has gone stale.
+    #[test]
+    fn config_set_broadcasts_config_changed_with_the_accepted_keys_and_clip_dir_resolved() {
+        let (daemon, _path, dir) = with_scratch_config("config-changed");
+        let (tx, rx) = std::sync::mpsc::sync_channel(crate::clients::OUTBOUND_QUEUE_DEPTH);
+        daemon.client_connected(tx);
+
+        let response = daemon.dispatch(1, &request_with(1, "config.set", &[("fps", 30.into())]));
+        assert!(response.ok, "{:?}", response.error);
+
+        let line = rx.try_recv().expect("an accepted config.set must broadcast config_changed");
+        let event: Event = serde_json::from_str(line.trim_end())
+            .unwrap_or_else(|e| panic!("event line did not decode: {e}\nline: {line}"));
+        assert_eq!(event.event, "config_changed");
+        assert_eq!(
+            event.data.get("fps").and_then(Value::as_u64),
+            Some(30),
+            "the accepted key rides along"
+        );
+        let resolved =
+            event.data.get("clip_dir_resolved").and_then(Value::as_str).unwrap_or_default();
+        assert_eq!(
+            resolved,
+            dir.to_string_lossy(),
+            "clip_dir_resolved rides along even though clip_dir was not one of the keys sent"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The other half of the same contract: a listener has to be able to
+    /// trust that `config_changed` firing means the change actually landed,
+    /// without re-checking the response for every key.
+    #[test]
+    fn a_refused_config_set_broadcasts_no_config_changed_event() {
+        let (daemon, _path, dir) = with_scratch_config("config-changed-refused");
+        let (tx, rx) = std::sync::mpsc::sync_channel(crate::clients::OUTBOUND_QUEUE_DEPTH);
+        daemon.client_connected(tx);
+
+        let response = daemon.dispatch(1, &request_with(1, "config.set", &[("nope", 1.into())]));
+        assert!(!response.ok, "an unknown key is refused");
+        assert!(rx.try_recv().is_err(), "a refused config.set must not broadcast config_changed");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// The refusal boundary. A key the daemon does not know, and a value it

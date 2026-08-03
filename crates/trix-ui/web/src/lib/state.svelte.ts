@@ -206,6 +206,18 @@ export function wireDaemon() {
     switch (event.event) {
       case 'armed':
       case 'disarmed':
+      // The tray's "Change clips folder..." is the only reachable way to
+      // change `clip_dir` outside this app, and it never told an open app
+      // anything -- the grid kept building `asset:` URLs against the old
+      // directory, so every thumbnail broke and every clip stopped playing
+      // until the daemon restarted. `config_changed` (state.rs's
+      // `set_config`, broadcast from `dispatch.rs`) fires for every accepted
+      // `config.set` regardless of who sent it; refreshing `status` here
+      // picks up the new `clip_dir` the same way `armed`/`disarmed` do. The
+      // Rust side grants the new directory to the asset scope off this same
+      // event (see `daemon.rs`), so the two together are what makes a
+      // tray-driven folder change work in an already-open window.
+      case 'config_changed':
         void app.refreshStatus();
         break;
       case 'stats':

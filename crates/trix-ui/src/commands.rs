@@ -24,21 +24,18 @@ pub async fn trix_call(
     // spawn_blocking, because `call` parks until the daemon answers and an
     // `arm` takes seconds: doing that on a runtime worker would stall every
     // other command behind it.
-    tauri::async_runtime::spawn_blocking(move || {
-        let result = supervisor.call(&cmd, args);
-        // A clip directory change has to reach the asset scope or the grid
-        // renders broken thumbnails from a directory the webview may not read.
-        if result.is_ok() && cmd == "config.set" {
-            if let Ok(status) = supervisor.call("status", Map::new()) {
-                if let Some(dir) = status.get("clip_dir").and_then(Value::as_str) {
-                    supervisor.allow_clip_dir(dir);
-                }
-            }
-        }
-        result
-    })
-    .await
-    .map_err(|e| format!("the call could not be scheduled: {e}"))?
+    //
+    // A `config.set` used to be special-cased right here to re-grant the
+    // asset scope on a successful `clip_dir` change — but that only ever ran
+    // for a `config.set` this app itself issued, and missed the tray's
+    // "Change clips folder…" entirely. The daemon now broadcasts
+    // `config_changed` for every accepted `config.set` regardless of who sent
+    // it, and `daemon.rs`'s `Connection::start` event closure grants off that
+    // instead, so this is a plain pass-through again — one path responsible
+    // for the grant, not two.
+    tauri::async_runtime::spawn_blocking(move || supervisor.call(&cmd, args))
+        .await
+        .map_err(|e| format!("the call could not be scheduled: {e}"))?
 }
 
 #[tauri::command]

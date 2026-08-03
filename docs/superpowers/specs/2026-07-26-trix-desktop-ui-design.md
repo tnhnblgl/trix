@@ -180,8 +180,8 @@ reaching the filesystem.
 
 ### 4.4 Events
 
-`armed`, `disarmed`, `clip_saved`, `hotkey_pressed`, `hotkey_rebound`, `export_progress`,
-`export_done`, `error`, and `stats`.
+`armed`, `disarmed`, `clip_saved`, `hotkey_pressed`, `hotkey_rebound`, `config_changed`,
+`export_progress`, `export_done`, `error`, and `stats`.
 
 `stats` is emitted only while a client has subscribed. This makes the existing `stats_seconds = 0`
 default coherent: with no UI attached, nothing measures anything.
@@ -189,6 +189,11 @@ default coherent: with no UI attached, nothing measures anything.
 `hotkey_pressed` fires whenever the registered clip hotkey reaches the daemon, whether or not a
 clip results, because that is the only observable that answers §6.4's live test; `hotkey_rebound`
 reports whether a `config.set clip_hotkey` actually took the binding.
+
+`config_changed` fires for every accepted `config.set`, regardless of which client sent it, carrying
+the same `{accepted:{…}}` shape `config.set` answers with plus `clip_dir_resolved`. The tray's
+"Change clips folder…" is the only reachable way to change `clip_dir` outside a connected UI, and
+without this event an already-open app has no way to learn its asset scope has gone stale.
 
 ### 4.5 Semantics
 
