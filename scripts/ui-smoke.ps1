@@ -16,7 +16,13 @@
     hand-verification checklist and is NOT in here. A green run of this script
     is not stage 4.
 
-    Runs the app against a SCRATCH %APPDATA%, so it can neither read nor
+    Runs the app against a SCRATCH %APPDATA%, with a config.toml seeded into
+    it that points clip_dir at a SCRATCH clip directory alongside it -- the
+    same technique daemon-smoke.ps1 uses. Without that seeded clip_dir, an
+    empty %APPDATA% still leaves clip_dir empty, which resolves to
+    %USERPROFILE%\Videos\Trix regardless of %APPDATA% (Config::clip_dir_path):
+    a scratch %APPDATA% alone relocates config.toml but not the clip library.
+    With both scratch, the daemon this gate starts can neither read nor
     rewrite the developer's real config.toml or clip library.
 
     Requires:
@@ -51,6 +57,26 @@ function Check {
 
 $scratch = Join-Path $env:TEMP ("trix-ui-smoke-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force $scratch | Out-Null
+
+# A scratch %APPDATA% only relocates config.toml. clip_dir is a key INSIDE
+# that file, and an empty one -- which is what a fresh scratch profile has,
+# since there is no file yet -- resolves to %USERPROFILE%\Videos\Trix
+# (Config::clip_dir_path, crates/trix-core/src/config.rs): the developer's
+# real library, entirely independent of %APPDATA%. Proved empirically: a
+# daemon started against a scratch %APPDATA% with no seeded config logged
+# `scanned the clip library clips=7 ... dir=C:\Users\<user>\Videos\Trix`.
+# Seeded here the same way daemon-smoke.ps1 seeds its own scratch config, so
+# the daemon this gate starts never touches the real library. `clip_hotkey`
+# is set away from the default for the same reason daemon-smoke.ps1 sets it:
+# Alt+F10 is owned by the NVIDIA overlay on at least one development machine.
+$clipDir = Join-Path $scratch 'clips'
+New-Item -ItemType Directory -Force (Join-Path $scratch 'trix') | Out-Null
+New-Item -ItemType Directory -Force $clipDir | Out-Null
+@"
+clip_dir = '$clipDir'
+clip_hotkey = "ctrl+alt+shift+f7"
+"@ | Out-File -FilePath (Join-Path $scratch 'trix\config.toml') -Encoding utf8
+
 # tracing_subscriber::fmt()'s default writer is stdout, not stderr -- checked
 # empirically before this gate was written by running trix-daemon.exe with
 # stdout and stderr redirected to separate files and diffing them; every line
