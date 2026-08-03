@@ -183,13 +183,22 @@ finally {
         # the tool, so the whole thing is wrapped: a process that already
         # exited is the normal case here, not a problem.
         try { if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction Stop } } catch {}
-        # Stop-Process returns before the process is gone. The daemon holds its
-        # log file open under $scratch, so deleting the tree without waiting
-        # leaves a stray %TEMP%\trix-ui-smoke-* behind -- silently, since the
-        # removal below suppresses its errors. Same wait daemon-smoke.ps1 does.
+        # Stop-Process returns before the process is gone.
         try { $p.WaitForExit(5000) | Out-Null } catch {}
+        try { $p.Dispose() } catch {}
     }
-    Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
+    # Retried, because waiting on the child is not enough on its own: the
+    # redirect files belong to Start-Process in THIS shell, not to the child,
+    # so the handle on daemon.err.log outlives the daemon by a moment. Without
+    # the retry the removal loses that race and leaves a stray
+    # %TEMP%\trix-ui-smoke-* behind -- silently, since it suppresses errors.
+    # Measured both ways on this machine: waiting on the child alone still left
+    # the directory holding daemon.err.log; with the retry, nothing is left.
+    for ($attempt = 0; $attempt -lt 5; $attempt++) {
+        if (-not (Test-Path -LiteralPath $scratch)) { break }
+        Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $scratch) { Start-Sleep -Milliseconds 300 }
+    }
 }
 
 $passed = @($script:Checks | Where-Object { $_.Passed }).Count
