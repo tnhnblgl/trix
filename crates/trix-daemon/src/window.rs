@@ -226,9 +226,17 @@ pub fn rebind_hotkey(spec: &str) {
     // post `WM_TRIX_REHOTKEY` to it, and have the pump call the real
     // `RegisterHotKey` — taking a system-wide hotkey combination on the
     // developer's own desktop. So this returns before reading `WINDOW_HWND`
-    // or writing `PENDING_HOTKEY` at all under test, which makes that
-    // impossible rather than merely unlikely (a mutex serializing the two
-    // tests would still leave the hazard one careless future test away).
+    // or writing `PENDING_HOTKEY` at all, which makes that impossible rather
+    // than merely unlikely (a mutex serializing the two tests would still
+    // leave the hazard one careless future test away).
+    //
+    // Scope, precisely: `cfg!(test)` is true only in this crate's own unit-test
+    // binary, which is where the adversarial pair lives. The files under
+    // `tests/` are separate crates linking the *non-test* build of this lib, so
+    // the guard is simply absent there and `window::rebind_hotkey` is fully
+    // importable. Nothing in `tests/` calls it or `window::spawn` today, and
+    // `WINDOW_HWND` stays 0 in a binary that never starts a pump — but an
+    // integration test that starts one gets no protection from this line.
     if cfg!(test) {
         return;
     }
