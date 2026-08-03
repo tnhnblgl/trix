@@ -4071,7 +4071,7 @@ dependencies = [
 
 [[package]]
 name = "trix-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4082,7 +4082,7 @@ dependencies = [
 
 [[package]]
 name = "trix-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -4098,7 +4098,7 @@ dependencies = [
 
 [[package]]
 name = "trix-daemon"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -4111,7 +4111,7 @@ dependencies = [
 
 [[package]]
 name = "trix-proto"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4119,7 +4119,7 @@ dependencies = [
 
 [[package]]
 name = "trix-ui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "serde",
