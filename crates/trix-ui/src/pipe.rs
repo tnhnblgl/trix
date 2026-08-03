@@ -206,10 +206,10 @@ impl Connection {
             return;
         }
         if let Ok(response) = serde_json::from_str::<Response>(line) {
-            if let Ok(mut pending) = self.pending.lock() {
-                if let Some(tx) = pending.remove(&response.id) {
-                    let _ = tx.try_send(response);
-                }
+            if let Ok(mut pending) = self.pending.lock()
+                && let Some(tx) = pending.remove(&response.id)
+            {
+                let _ = tx.try_send(response);
             }
             return;
         }
