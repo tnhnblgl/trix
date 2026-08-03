@@ -15,7 +15,7 @@ use trix_core::{
     config::Config, control, control::SingleInstance, engine::EngineHandle, engine::EngineStatus,
     library, stats,
 };
-use trix_proto::ClipMeta;
+use trix_proto::{ClipMeta, Event};
 
 use crate::clients::Clients;
 
@@ -526,6 +526,21 @@ impl Daemon {
 
     /// Saves a clip from the live ring. `Ok(None)` means there is no footage
     /// buffered yet; the caller turns that into the CLI's wording.
+    ///
+    /// Broadcasts `clip_saved` here rather than at the call sites, because
+    /// there are two of them and only one ever did it. `dispatch::clip` (the
+    /// socket command) broadcast; `window::handle_action`'s `Action::Clip`
+    /// (the hotkey and the tray) did not, so a clip taken with the hotkey was
+    /// written to disk and no client was ever told. The desktop app's grid
+    /// only learned about it on a reload — which is precisely the failure
+    /// spec §10's stage-4 gate opens by forbidding: "clip appears in the grid
+    /// within a second of the hotkey".
+    ///
+    /// `dispatch::clip`'s comment had predicted the hotkey path would need
+    /// this and asked for it to live in one place. It stayed at that one call
+    /// site instead, and the second caller arrived a plan later without it.
+    /// Emitting from inside the function every caller must go through is what
+    /// makes that structural rather than a rule to remember.
     pub fn clip(&self) -> Result<Option<ClipMeta>> {
         let saved = {
             let armed = self.lock_armed();
@@ -535,13 +550,38 @@ impl Daemon {
             state.engine.clip()?
         };
         if let Some(meta) = &saved {
-            // Prepended, matching `library::scan`'s newest-first order. This is
-            // the incremental update that keeps `library.list` off the disk
-            // after startup (spec §5.2).
-            self.lock_library().insert(0, meta.clone());
-            self.enforce_library_ceiling();
+            self.record_saved_clip(meta);
         }
         Ok(saved)
+    }
+
+    /// Takes a clip that has just been written to disk into the live library
+    /// and tells every connected client about it.
+    ///
+    /// Split out of [`Self::clip`] so it can be tested. `clip` itself needs an
+    /// armed engine with a real capture ring, so nothing in the suite can
+    /// reach the lines below through it -- which is exactly how a saved clip
+    /// went three plans without an event for the hotkey path. This half needs
+    /// only a `ClipMeta`, so the guarantee that a recorded clip is an
+    /// announced clip is now something a test can hold.
+    fn record_saved_clip(&self, meta: &ClipMeta) {
+        // Prepended, matching `library::scan`'s newest-first order. This is
+        // the incremental update that keeps `library.list` off the disk
+        // after startup (spec §5.2).
+        self.lock_library().insert(0, meta.clone());
+        self.enforce_library_ceiling();
+        // After the insert, so a client that answers the event by calling
+        // `library.list` cannot race ahead of the clip it was told about.
+        match serde_json::to_value(meta) {
+            Ok(data) => self.clients.broadcast(&Event::new("clip_saved", data)),
+            // `ClipMeta` is strings, integers and bools, so this cannot
+            // actually happen -- but `panic = "abort"` leaves no room for
+            // an `unwrap` on a path the hotkey reaches, and a clip that
+            // saved is still saved even if nobody can be told.
+            Err(e) => {
+                tracing::error!(error = %e, "could not serialize a saved clip for clip_saved");
+            }
+        }
     }
 
     pub fn status(&self) -> DaemonStatus {
@@ -1580,5 +1620,48 @@ mod tests {
             Err(e) => format!("{e:#}"),
         };
         assert_eq!(error, "not armed — send arm first");
+    }
+
+    /// A clip that reaches the library must reach the clients too.
+    ///
+    /// This is the regression that shipped: `clip_saved` was broadcast by
+    /// `dispatch::clip`, the socket command's handler, so a clip taken with
+    /// the **hotkey** — which calls `Daemon::clip` directly from
+    /// `window::handle_action` and never touches `dispatch` — was written to
+    /// disk and announced to nobody. The desktop app's grid only showed it
+    /// after a reload, while spec §10's stage-4 gate opens by requiring the
+    /// opposite: "clip appears in the grid within a second of the hotkey".
+    ///
+    /// It survived three plans because the only way in was `Daemon::clip`,
+    /// which needs an armed engine and a real capture ring and so is
+    /// unreachable from any test. Asserting on `record_saved_clip` is what
+    /// makes the guarantee testable at all.
+    #[test]
+    fn a_recorded_clip_is_announced_to_every_client() {
+        use std::sync::mpsc::sync_channel;
+
+        let daemon = idle("clip-saved-broadcast", Config::default());
+        let (tx, rx) = sync_channel(crate::clients::OUTBOUND_QUEUE_DEPTH);
+        daemon.clients.register(tx);
+
+        daemon.record_saved_clip(&meta("20260803_120000"));
+
+        // The library half — the part that already worked.
+        assert_eq!(
+            daemon.lock_library().first().map(|c| c.id.as_str()),
+            Some("20260803_120000"),
+            "a saved clip is prepended to the live library"
+        );
+
+        // The event half — the part that did not.
+        let line = rx.try_recv().expect("a saved clip must broadcast clip_saved");
+        let event: Event = serde_json::from_str(line.trim_end())
+            .unwrap_or_else(|e| panic!("event line did not decode: {e}\nline: {line}"));
+        assert_eq!(event.event, "clip_saved");
+        assert_eq!(
+            event.data.get("id").and_then(Value::as_str),
+            Some("20260803_120000"),
+            "the event carries the ClipMeta the grid prepends"
+        );
     }
 }

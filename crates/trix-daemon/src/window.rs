@@ -560,6 +560,12 @@ pub fn handle_action(daemon: &Arc<Daemon>, action: Action) {
             // be dropped by a full queue (`offer` in `window::wnd_proc`)
             // before it ever reaches this match, and the event has to survive
             // that; broadcasting only on this side once did not.
+            //
+            // `clip_saved` is not emitted here either: `Daemon::clip` emits it
+            // itself, so this path and the socket's `clip` command announce a
+            // saved clip identically. They did not always -- only the socket
+            // command did, which meant a hotkey clip reached disk and no
+            // client was ever told.
             match daemon.clip() {
                 Ok(Some(meta)) => {
                     tracing::info!(clip = %meta.id, "clip saved from the hotkey")

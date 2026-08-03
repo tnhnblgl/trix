@@ -215,16 +215,13 @@ fn disarm(daemon: &Daemon, id: u64) -> Response {
 fn clip(daemon: &Daemon, id: u64) -> Response {
     match daemon.clip() {
         Ok(Some(meta)) => match serde_json::to_value(&meta) {
-            Ok(data) => {
-                // Broadcast, not just answered: `clip_saved` is how a client
-                // that did not send this `clip` learns a clip exists. Nothing
-                // else saves one in this build, but the hotkey path already in
-                // `trix-core`'s engine and plan 3's tray both will, and both
-                // belong here — this is the only place that turns a saved clip
-                // into an event.
-                daemon.clients.broadcast(&Event::new("clip_saved", data.clone()));
-                Response::ok(id, data)
-            }
+            // `clip_saved` is broadcast by `Daemon::clip` itself, not here.
+            // It used to be here, and that was the bug: the hotkey and tray
+            // path (`window::handle_action`) calls `Daemon::clip` directly and
+            // never came through this function, so a clip taken with the
+            // hotkey reached disk without any client being told. Only the
+            // socket `clip` command emitted the event.
+            Ok(data) => Response::ok(id, data),
             // `ClipMeta` is strings, integers and bools, so this cannot
             // actually happen — but `to_value` returns a `Result` and a
             // `panic = "abort"` build has no room for an `unwrap` on a path a
