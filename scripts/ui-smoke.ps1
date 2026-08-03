@@ -27,7 +27,12 @@
 
     Requires:
         cargo build --release --workspace
-        cargo tauri build --no-bundle --config crates/trix-ui/tauri.conf.json
+        cd crates/trix-ui; cargo tauri build --no-bundle
+
+    The second command must be run from crates/trix-ui, not from the repo root
+    with --config. tauri-cli resolves the frontend directory by walking down
+    from its working directory, and from the root it settles on crates/ and
+    fails there trying to run "npm run build".
 #>
 [CmdletBinding()]
 param(
@@ -178,6 +183,11 @@ finally {
         # the tool, so the whole thing is wrapped: a process that already
         # exited is the normal case here, not a problem.
         try { if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction Stop } } catch {}
+        # Stop-Process returns before the process is gone. The daemon holds its
+        # log file open under $scratch, so deleting the tree without waiting
+        # leaves a stray %TEMP%\trix-ui-smoke-* behind -- silently, since the
+        # removal below suppresses its errors. Same wait daemon-smoke.ps1 does.
+        try { $p.WaitForExit(5000) | Out-Null } catch {}
     }
     Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
 }
