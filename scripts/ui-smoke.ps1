@@ -92,6 +92,13 @@ clip_hotkey = "ctrl+alt+shift+f7"
 $daemonOutLog = Join-Path $scratch 'daemon.out.log'
 $daemonErrLog = Join-Path $scratch 'daemon.err.log'
 $started = New-Object System.Collections.Generic.List[object]
+# Saved before the scratch %APPDATA% is ever assigned (below, in step 4) and
+# restored in `finally`, the same way daemon-smoke.ps1 saves and restores
+# around its CLI sub-section. Without this, a run of this script -- the
+# normal, interactive way to run it -- leaves the calling shell's %APPDATA%
+# pointing at $scratch for everything run afterwards, and `finally` deletes
+# $scratch, so it would be pointing at a directory that no longer exists.
+$originalAppData = $env:APPDATA
 
 try {
     # --- 1. The rule ----------------------------------------------------------
@@ -178,6 +185,12 @@ try {
     }
 }
 finally {
+    # Restored before anything else in cleanup, and unconditionally: every
+    # branch above that sets $env:APPDATA runs inside this try, so by the time
+    # `finally` is reached the calling shell's environment must be put back
+    # regardless of which checks ran or failed.
+    $env:APPDATA = $originalAppData
+
     foreach ($p in $started) {
         # -ErrorAction on Stop-Process suppresses the message but still fails
         # the tool, so the whole thing is wrapped: a process that already
