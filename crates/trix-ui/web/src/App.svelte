@@ -3,6 +3,7 @@
   import DaemonDown from './views/DaemonDown.svelte';
   import Grid from './views/Grid.svelte';
   import ClipPage from './views/ClipPage.svelte';
+  import Settings from './views/Settings.svelte';
   import Toasts from './components/Toasts.svelte';
   import { app, wireDaemon } from './lib/state.svelte';
 
@@ -20,7 +21,7 @@
       {:else if app.view === 'clip'}
         <ClipPage />
       {:else if app.view === 'settings'}
-        <p class="placeholder">Settings arrive in Task 9.</p>
+        <Settings />
       {/if}
     </main>
   </div>
@@ -31,5 +32,4 @@
 <style>
   .shell { display: flex; height: 100vh; }
   .content { flex: 1; overflow: auto; padding: 20px 24px; }
-  .placeholder { color: var(--dim); }
 </style>

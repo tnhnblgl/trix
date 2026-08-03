@@ -1,0 +1,77 @@
+export type FieldKind = 'number' | 'text' | 'select' | 'bool' | 'folder' | 'hotkey';
+
+export type Field = {
+  key: string;
+  label: string;
+  kind: FieldKind;
+  section: 'Capture' | 'Quality' | 'Clips' | 'Trix';
+  help: string;
+  min?: number;
+  max?: number;
+  options?: { value: string; label: string }[];
+  /** Filled at runtime from monitors.list / encoders.list. */
+  dynamic?: 'monitors';
+};
+
+/**
+ * Bounds mirrored from `state.rs`'s NUMERIC_BOUNDS.
+ *
+ * Duplicated deliberately, and it is not a DRY violation to fix: the daemon
+ * must keep validating for third-party clients that never see this file, and
+ * this copy exists only so a typo is caught before a round trip. The daemon
+ * remains the authority -- if the two ever disagree, its answer is the one the
+ * user sees.
+ */
+const BOUNDS: Record<string, [number, number]> = {
+  fps: [1, 480],
+  bitrate_kbps: [1, 200000],
+  max_bitrate_kbps: [0, 200000],
+  replay_seconds: [1, 600],
+  monitor_index: [0, 63],
+  stats_seconds: [0, 86400],
+  max_library_gb: [0, 10000],
+};
+
+export const FIELDS: Field[] = [
+  { key: 'monitor_index', label: 'Monitor', kind: 'select', section: 'Capture', dynamic: 'monitors', help: 'Which screen is captured.' },
+  { key: 'fps', label: 'Frame rate', kind: 'number', section: 'Capture', ...span('fps'), help: 'Capture and encode rate.' },
+  { key: 'replay_seconds', label: 'Replay buffer', kind: 'number', section: 'Capture', ...span('replay_seconds'), help: 'Seconds kept in RAM. Memory cost scales with this times the bitrate.' },
+  { key: 'gpu_priority', label: 'GPU priority', kind: 'select', section: 'Capture', options: [
+      { value: 'low', label: 'Low - never cost game fps' },
+      { value: 'normal', label: 'Normal - smoother capture' },
+    ], help: 'Low drops capture frames under contention instead of taking frames from the game.' },
+
+  { key: 'bitrate_kbps', label: 'Bitrate', kind: 'number', section: 'Quality', ...span('bitrate_kbps'), help: 'Target average, in kbit/s.' },
+  { key: 'max_bitrate_kbps', label: 'Peak bitrate', kind: 'number', section: 'Quality', ...span('max_bitrate_kbps'), help: '0 means 1.5x the target. This cap is also the replay buffer\'s worst-case RAM.' },
+  { key: 'rate_control', label: 'Rate control', kind: 'select', section: 'Quality', options: [
+      { value: 'vbr', label: 'VBR - quality-leaning' },
+      { value: 'cbr', label: 'CBR - predictable size' },
+    ], help: 'How the encoder spends its bitrate.' },
+
+  { key: 'clip_dir', label: 'Clips folder', kind: 'folder', section: 'Clips', help: 'Where clips are saved. Empty means Videos\\Trix.' },
+  { key: 'max_library_gb', label: 'Library limit', kind: 'number', section: 'Clips', ...span('max_library_gb'), help: 'GB. When exceeded the oldest non-favorite clips are deleted. 0 turns the limit off.' },
+
+  { key: 'clip_hotkey', label: 'Clip hotkey', kind: 'hotkey', section: 'Trix', help: 'Press the combination to test it. Overlays can silently take a hotkey inside games.' },
+  { key: 'autostart', label: 'Start with Windows', kind: 'bool', section: 'Trix', help: 'Off by default. Writes the registry Run entry, which is the source of truth.' },
+  { key: 'stats_seconds', label: 'Stats interval', kind: 'number', section: 'Trix', ...span('stats_seconds'), help: 'Seconds between performance reports. 0 turns them off.' },
+];
+
+function span(key: string): { min: number; max: number } {
+  const [min, max] = BOUNDS[key];
+  return { min, max };
+}
+
+/** Keys `config.get` returned that this page has no field for. */
+export function unknownKeys(config: Record<string, unknown>): string[] {
+  // `clip_dir_resolved` is documented as not a config key and not settable.
+  const rendered = new Set([...FIELDS.map((f) => f.key), 'clip_dir_resolved']);
+  return Object.keys(config).filter((key) => !rendered.has(key));
+}
+
+/** The daemon's own bound, checked early. `null` means acceptable. */
+export function validate(key: string, value: unknown): string | null {
+  const bound = BOUNDS[key];
+  if (!bound || typeof value !== 'number') return null;
+  const [min, max] = bound;
+  return value < min || value > max ? `${key} accepts ${min} to ${max}` : null;
+}
