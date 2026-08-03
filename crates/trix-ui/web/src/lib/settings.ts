@@ -61,10 +61,27 @@ function span(key: string): { min: number; max: number } {
   return { min, max };
 }
 
+/**
+ * The read-only extras `config.get` adds on top of the real config keys
+ * (`state.rs`'s `config_json`): `clip_dir_resolved`, the absolute directory an
+ * empty `clip_dir` actually resolves to, and `config_file_exists`, spec §7.4's
+ * "no file means first run" flag. Neither is a config key, neither is
+ * settable, and neither belongs in config.toml -- so `unknownKeys` must not
+ * flag them, or every user sees a false "this daemon has settings this app
+ * does not render yet" banner on every visit (they did, once: this exact pair
+ * is why this comment names both by name instead of trusting a future reader
+ * to rediscover it from `state.rs`).
+ *
+ * Exported, not inlined into `unknownKeys`, so `settings.test.ts` can build
+ * its fixture from this list instead of a hand-typed copy of it -- the two
+ * cannot drift apart from each other, even though neither can see a key the
+ * daemon grows that nobody adds here too.
+ */
+export const READ_ONLY_EXTRAS = ['clip_dir_resolved', 'config_file_exists'];
+
 /** Keys `config.get` returned that this page has no field for. */
 export function unknownKeys(config: Record<string, unknown>): string[] {
-  // `clip_dir_resolved` is documented as not a config key and not settable.
-  const rendered = new Set([...FIELDS.map((f) => f.key), 'clip_dir_resolved']);
+  const rendered = new Set([...FIELDS.map((f) => f.key), ...READ_ONLY_EXTRAS]);
   return Object.keys(config).filter((key) => !rendered.has(key));
 }
 

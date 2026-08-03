@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FIELDS, unknownKeys, validate } from './settings';
+import { FIELDS, READ_ONLY_EXTRAS, unknownKeys, validate } from './settings';
 
 describe('FIELDS', () => {
   it('covers every config key the daemon has today', () => {
@@ -14,8 +14,15 @@ describe('FIELDS', () => {
 });
 
 describe('unknownKeys', () => {
-  it('ignores the two read-only extras config.get adds', () => {
-    const config = { fps: 60, clip_dir_resolved: 'C:\\x', autostart: false };
+  it('ignores every read-only extra config.get adds', () => {
+    // Built from `READ_ONLY_EXTRAS` -- the same list `unknownKeys` allowlists
+    // -- rather than a hand-typed copy of it, so this fixture cannot drift
+    // out from under the production code the way it once did: this test used
+    // to be named "the two read-only extras" while carrying only one, and a
+    // third (`config_file_exists`) shipped without it, showing every user a
+    // false "this daemon has settings this app does not render yet" banner.
+    const config: Record<string, unknown> = { fps: 60, autostart: false };
+    for (const key of READ_ONLY_EXTRAS) config[key] = 'placeholder';
     expect(unknownKeys(config)).toEqual([]);
   });
 
