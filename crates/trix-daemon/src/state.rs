@@ -598,9 +598,10 @@ impl Daemon {
     ///
     /// Deliberately this one key rather than a whole-`Config` snapshot: a
     /// snapshot invites callers to read the other keys long after they have
-    /// gone stale, and `config.set` can change any of them at any time. The
-    /// hotkey is registered once at startup and re-reading it would not
-    /// re-register it, so a copy is honest here in a way a snapshot is not.
+    /// gone stale, and `config.set` can change any of them at any time. A
+    /// changed hotkey is now rebound live by `set_config`, so this copy is
+    /// only ever stale for the instant between the write and the pump's
+    /// `WM_TRIX_REHOTKEY`, not until the next restart.
     pub fn clip_hotkey(&self) -> String {
         self.lock_config().clip_hotkey.clone()
     }
@@ -744,6 +745,14 @@ impl Daemon {
             }
         }
         *config = updated;
+
+        // After the write, not before: a rebind that beat a failed write would
+        // leave the running hotkey and the saved hotkey disagreeing, and
+        // `config.set` is all-or-nothing everywhere else.
+        if values.contains_key("clip_hotkey") {
+            crate::window::rebind_hotkey(&config.clip_hotkey);
+        }
+
         Ok(ConfigUpdate { accepted, requires_rearm })
     }
 

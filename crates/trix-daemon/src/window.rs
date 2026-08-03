@@ -12,12 +12,14 @@
 //! `WM_ENDSESSION`, and gets marked "not responding" by the OS. Every action
 //! is therefore a message on a channel that the worker thread drains.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result};
+use serde_json::{Map, Value};
 use trix_core::control::Hotkey;
+use trix_proto::Event;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey;
@@ -47,7 +49,7 @@ static TASKBAR_CREATED: std::sync::atomic::AtomicU32 = std::sync::atomic::Atomic
 
 /// What the pump thread asks the worker to do. Deliberately tiny: anything
 /// that can block belongs on the worker side of this channel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     /// Hotkey pressed, or "Save clip" chosen from the tray menu.
     Clip,
@@ -61,6 +63,12 @@ pub enum Action {
     /// the pump thread must stay free to keep the tray icon alive.
     ChangeClipsFolder,
     Quit,
+    /// The pump finished a rebind. Carries the outcome so the settings page
+    /// can say "that combination is taken" instead of going quiet.
+    HotkeyRebound {
+        spec: String,
+        registered: bool,
+    },
 }
 
 /// How many pending actions the pump may hold. Small on purpose: these are
@@ -89,8 +97,24 @@ pub(crate) const WM_TRIX_QUIT: u32 = WM_APP + 0x10;
 /// Posted to the window when the daemon arms or disarms; `wparam` is the new
 /// state. The icon is only ever changed on the thread that owns it.
 pub(crate) const WM_TRIX_ARMED: u32 = WM_APP + 0x11;
+/// Asks the pump to re-register the clip hotkey from [`PENDING_HOTKEY`].
+pub(crate) const WM_TRIX_REHOTKEY: u32 = WM_APP + 0x12;
 /// The hotkey id. Process-unique is enough — the window owns the only one.
 const HOTKEY_ID: i32 = 1;
+
+/// The spec a pending rebind wants, left here because `PostMessageW` carries
+/// two integers and a `String` is neither of them.
+static PENDING_HOTKEY: Mutex<Option<String>> = Mutex::new(None);
+
+fn set_pending_hotkey(spec: &str) {
+    if let Ok(mut pending) = PENDING_HOTKEY.lock() {
+        *pending = Some(spec.to_string());
+    }
+}
+
+fn take_pending_hotkey() -> Option<String> {
+    PENDING_HOTKEY.lock().ok().and_then(|mut pending| pending.take())
+}
 
 /// A live pump thread and the window it owns.
 pub struct WindowHandle {
@@ -182,6 +206,29 @@ pub fn publish_armed(armed: bool) {
     }
 }
 
+/// Asks the pump to re-register the clip hotkey. Returns immediately; the
+/// outcome arrives as an `Action::HotkeyRebound`.
+///
+/// A no-op when there is no pump — unit tests and the window of shutdown after
+/// the pump has gone. A hotkey that cannot be rebound because nothing is
+/// listening is not an error worth propagating into `config.set`, which has
+/// already saved the value the next startup will register.
+pub fn rebind_hotkey(spec: &str) {
+    let hwnd = WINDOW_HWND.load(Ordering::Relaxed);
+    if hwnd == 0 {
+        return;
+    }
+    set_pending_hotkey(spec);
+    unsafe {
+        let _ = PostMessageW(
+            Some(HWND(hwnd as *mut core::ffi::c_void)),
+            WM_TRIX_REHOTKEY,
+            WPARAM(0),
+            LPARAM(0),
+        );
+    }
+}
+
 /// Never blocks and never calls into `Daemon` — see the module comment.
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
@@ -215,6 +262,42 @@ unsafe extern "system" fn wnd_proc(
                     tray.set_armed(armed);
                 }
             });
+            LRESULT(0)
+        }
+        WM_TRIX_REHOTKEY => {
+            if let Some(spec) = take_pending_hotkey() {
+                // Unregistered first and unconditionally: leaving the old
+                // binding alive would mean two live hotkeys, with the one the
+                // user just replaced still clipping.
+                unsafe {
+                    let _ = UnregisterHotKey(Some(hwnd), HOTKEY_ID);
+                }
+                // Same three outcomes, same severity, as the startup
+                // registration above: unparseable, taken, or ours. A hotkey
+                // that will not bind is a warning, never a failure — the
+                // daemon is still fully usable over the socket and the tray.
+                let registered = match Hotkey::parse(&spec) {
+                    Ok(hotkey) => match unsafe { hotkey.register(hwnd, HOTKEY_ID) } {
+                        Ok(()) => {
+                            tracing::info!(hotkey = %hotkey, "clip hotkey re-registered");
+                            true
+                        }
+                        Err(e) => {
+                            tracing::warn!(hotkey = %hotkey, error = %format!("{e:#}"), "the new clip hotkey is already taken");
+                            false
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(spec = %spec, error = %format!("{e:#}"), "the new clip_hotkey is not parseable");
+                        false
+                    }
+                };
+                ACTIONS.with(|a| {
+                    if let Some(tx) = a.borrow().as_ref() {
+                        offer(tx, Action::HotkeyRebound { spec, registered });
+                    }
+                });
+            }
             LRESULT(0)
         }
         tray::WM_TRIX_TRAY => {
@@ -399,14 +482,35 @@ unsafe fn create_window() -> Result<HWND> {
 /// Runs one action. Called on the worker thread, where blocking is fine.
 pub fn handle_action(daemon: &Arc<Daemon>, action: Action) {
     match action {
-        Action::Clip => match daemon.clip() {
-            Ok(Some(meta)) => tracing::info!(clip = %meta.id, "clip saved from the tray or hotkey"),
-            // `arm` only starts filling the ring when the first frame arrives,
-            // so a hotkey pressed in the first moments after arming is a real
-            // "nothing buffered yet" rather than a failure.
-            Ok(None) => tracing::warn!("nothing buffered yet — no clip saved"),
-            Err(e) => tracing::warn!(error = %format!("{e:#}"), "clip failed"),
-        },
+        Action::Clip => {
+            // Emitted before the clip is attempted, and regardless of whether
+            // one is possible: this is the only honest answer to the settings
+            // page's "press it now" test, which asks whether the *daemon*
+            // received the combination — not whether a clip resulted. Spec
+            // §6.4 exists because NVIDIA's overlay silently eats Alt+F10
+            // inside hooked games, and nothing the webview can observe would
+            // ever catch that. `Action::Clip` reaches here only from
+            // `WM_HOTKEY`, so this cannot fire for anything but a real press.
+            daemon.clients.broadcast(&Event::new("hotkey_pressed", Value::Object(Map::new())));
+
+            match daemon.clip() {
+                Ok(Some(meta)) => {
+                    tracing::info!(clip = %meta.id, "clip saved from the tray or hotkey")
+                }
+                // `arm` only starts filling the ring when the first frame
+                // arrives, so a hotkey pressed in the first moments after
+                // arming is a real "nothing buffered yet" rather than a
+                // failure.
+                Ok(None) => tracing::warn!("nothing buffered yet — no clip saved"),
+                Err(e) => tracing::warn!(error = %format!("{e:#}"), "clip failed"),
+            }
+        }
+        Action::HotkeyRebound { spec, registered } => {
+            daemon.clients.broadcast(&Event::new(
+                "hotkey_rebound",
+                serde_json::json!({"spec": spec, "registered": registered}),
+            ));
+        }
         // The mirror decides what the menu offered, so a toggle does what the
         // user just read, not what the daemon became a moment later.
         Action::ToggleArmed => set_armed(daemon, !ARMED_MIRROR.load(Ordering::Relaxed)),
@@ -528,6 +632,22 @@ mod tests {
         let (tx, rx) = sync_channel::<Action>(ACTION_QUEUE_DEPTH);
         drop(rx);
         assert!(!offer(&tx, Action::Quit));
+    }
+
+    /// A hotkey the user changes in settings has to work now, not after a
+    /// restart they were never told to perform. The pump owns the
+    /// registration (`RegisterHotKey` posts to the *registering thread's*
+    /// queue), so a rebind is a message to the pump plus the new spec left
+    /// where the pump can read it.
+    #[test]
+    fn a_rebind_leaves_the_new_spec_for_the_pump() {
+        set_pending_hotkey("ctrl+shift+f9");
+        assert_eq!(take_pending_hotkey().as_deref(), Some("ctrl+shift+f9"));
+        assert_eq!(
+            take_pending_hotkey(),
+            None,
+            "the pump takes the request once; a second WM_TRIX_REHOTKEY must not re-register a stale spec"
+        );
     }
 
     /// A hotkey the daemon cannot have must not stop the daemon. NVIDIA's

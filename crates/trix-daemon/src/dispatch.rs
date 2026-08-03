@@ -791,6 +791,32 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// The settings page has a hotkey field, so `config.set` must both save it
+    /// and make it live. Only the saving half is observable without a message
+    /// pump, and that is what this asserts; the registration itself is
+    /// `window.rs`'s test and the hand verification.
+    #[test]
+    fn config_set_saves_a_new_clip_hotkey_and_does_not_demand_a_rearm() {
+        let (daemon, _path, _dir) = with_scratch_config("hotkey");
+        let response = daemon.dispatch(
+            1,
+            &request_with(1, "config.set", &[("clip_hotkey", "ctrl+shift+f9".into())]),
+        );
+        assert!(response.ok, "{:?}", response.error);
+        let data = response.data.expect("config.set carries data");
+        assert_eq!(data["accepted"]["clip_hotkey"], "ctrl+shift+f9");
+        // The rebind is live, so telling the user to re-arm would be asking
+        // for a capture restart that changes nothing.
+        assert_eq!(
+            data["requires_rearm"].as_array().map(Vec::len),
+            Some(0),
+            "clip_hotkey takes effect without a re-arm"
+        );
+
+        let after = daemon.dispatch(1, &request(2, "config.get"));
+        assert_eq!(after.data.expect("data")["clip_hotkey"], "ctrl+shift+f9");
+    }
+
     /// The contract behind the tray's "Change clips folder…", both ways round:
     /// an accepted directory exists afterwards, and a refused one leaves
     /// *nothing* changed.

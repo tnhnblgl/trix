@@ -180,10 +180,15 @@ reaching the filesystem.
 
 ### 4.4 Events
 
-`armed`, `disarmed`, `clip_saved`, `export_progress`, `export_done`, `error`, and `stats`.
+`armed`, `disarmed`, `clip_saved`, `hotkey_pressed`, `hotkey_rebound`, `export_progress`,
+`export_done`, `error`, and `stats`.
 
 `stats` is emitted only while a client has subscribed. This makes the existing `stats_seconds = 0`
 default coherent: with no UI attached, nothing measures anything.
+
+`hotkey_pressed` fires whenever the registered clip hotkey reaches the daemon, whether or not a
+clip results, because that is the only observable that answers §6.4's live test; `hotkey_rebound`
+reports whether a `config.set clip_hotkey` actually took the binding.
 
 ### 4.5 Semantics
 
