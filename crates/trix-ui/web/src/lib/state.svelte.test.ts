@@ -225,6 +225,24 @@ describe('wireDaemon: clip_saved', () => {
     expect(app.clips[app.selected]?.id).toBe('b');
   });
 
+  it('shifts the selection even when viewing the grid, not the clip detail', () => {
+    // If a future change adds `&& app.view !== 'grid'` to the shift guard,
+    // the user in Grid would see Space preview and Enter open the wrong clip
+    // after a new one is saved (they would get the slot that just slid down,
+    // not the clip they were actually looking at). This test catches that.
+    app.clips = [clip('a'), clip('b')];
+    app.total = 2;
+    app.selected = 1; // pointing at 'b'
+    app.view = 'grid';
+    const handle = registerDaemonEventHandler();
+
+    handle({ event: 'clip_saved', data: clip('new') as unknown as Record<string, unknown> });
+
+    // 'b' slid from index 1 to index 2 when 'new' was prepended.
+    expect(app.selected).toBe(2);
+    expect(app.clips[app.selected]?.id).toBe('b');
+  });
+
   it('does not shift the selection when the library was empty', () => {
     app.clips = [];
     app.total = 0;
