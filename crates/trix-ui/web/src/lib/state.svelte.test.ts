@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ClipMeta } from './types';
+import type { ClipMeta, DaemonEvent } from './types';
 
 // `state.svelte.ts` talks to the daemon through `./ipc`; mocking it here is
 // what lets these tests call the real store methods -- `remove`, `step`,
@@ -9,13 +9,29 @@ const callMock = vi.fn();
 
 vi.mock('./ipc', () => ({
   call: (...args: unknown[]) => callMock(...args),
-  daemonConnected: vi.fn(),
+  // Resolved rather than a bare vi.fn(): wireDaemon() chains `.then()` off
+  // this call unconditionally, and an unmocked vi.fn() returns `undefined`,
+  // which would throw the moment a test calls wireDaemon().
+  daemonConnected: vi.fn().mockResolvedValue(false),
   onConnected: vi.fn(),
   onDaemonEvent: vi.fn(),
   onDisconnected: vi.fn(),
 }));
 
-const { app } = await import('./state.svelte');
+const { app, wireDaemon } = await import('./state.svelte');
+const { onDaemonEvent } = await import('./ipc');
+
+/**
+ * Registers the real `wireDaemon()` event listener and hands back the
+ * callback it passed to `onDaemonEvent`, so tests can drive the shipped
+ * handler directly instead of restating its logic.
+ */
+function registerDaemonEventHandler(): (event: DaemonEvent) => void {
+  wireDaemon();
+  const handler = vi.mocked(onDaemonEvent).mock.calls.at(-1)?.[0];
+  if (!handler) throw new Error('wireDaemon() never registered a daemon event handler');
+  return handler;
+}
 
 const clip = (id: string): ClipMeta => ({
   id,
@@ -33,6 +49,7 @@ const clip = (id: string): ClipMeta => ({
 
 beforeEach(() => {
   callMock.mockReset();
+  vi.mocked(onDaemonEvent).mockClear();
   app.clips = [];
   app.total = 0;
   app.selected = 0;
@@ -178,5 +195,66 @@ describe('AppState.current', () => {
     app.clips = [];
     app.selected = 0;
     expect(app.current).toBeNull();
+  });
+});
+
+describe('wireDaemon: clip_saved', () => {
+  it('prepends a genuinely new clip, bumps the total, and toasts', () => {
+    app.clips = [clip('a'), clip('b')];
+    app.total = 2;
+    app.selected = 0;
+    const handle = registerDaemonEventHandler();
+
+    handle({ event: 'clip_saved', data: clip('new') as unknown as Record<string, unknown> });
+
+    expect(app.clips.map((c) => c.id)).toEqual(['new', 'a', 'b']);
+    expect(app.total).toBe(3);
+    expect(app.toasts.at(-1)?.text).toBe('Saved clip_new');
+  });
+
+  it('shifts the selection so it still points at the clip the user had, not the slot', () => {
+    app.clips = [clip('a'), clip('b')];
+    app.total = 2;
+    app.selected = 1; // pointing at 'b'
+    const handle = registerDaemonEventHandler();
+
+    handle({ event: 'clip_saved', data: clip('new') as unknown as Record<string, unknown> });
+
+    // 'b' slid from index 1 to index 2 when 'new' was prepended.
+    expect(app.selected).toBe(2);
+    expect(app.clips[app.selected]?.id).toBe('b');
+  });
+
+  it('does not shift the selection when the library was empty', () => {
+    app.clips = [];
+    app.total = 0;
+    app.selected = 0;
+    const handle = registerDaemonEventHandler();
+
+    handle({ event: 'clip_saved', data: clip('new') as unknown as Record<string, unknown> });
+
+    expect(app.clips.map((c) => c.id)).toEqual(['new']);
+    expect(app.total).toBe(1);
+    expect(app.selected).toBe(0);
+  });
+
+  it('does not inflate the total or move the selection for a clip already in the list', () => {
+    // Mirrors a reconnect: `library.list` already loaded 'a', and its
+    // `clip_saved` event arrives after. `mergeSaved` still replaces the
+    // entry in place, but the id is not new, so count and selection must
+    // not move, and there is nothing new to toast about.
+    app.clips = [clip('a'), clip('b')];
+    app.total = 2;
+    app.selected = 1; // pointing at 'b'
+    const handle = registerDaemonEventHandler();
+
+    const relabeled = { ...clip('a'), title: 'renamed elsewhere' };
+    handle({ event: 'clip_saved', data: relabeled as unknown as Record<string, unknown> });
+
+    expect(app.clips.map((c) => c.id)).toEqual(['a', 'b']);
+    expect(app.clips[0].title).toBe('renamed elsewhere');
+    expect(app.total).toBe(2);
+    expect(app.selected).toBe(1);
+    expect(app.toasts).toHaveLength(0);
   });
 });

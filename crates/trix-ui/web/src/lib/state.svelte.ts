@@ -178,6 +178,29 @@ export function wireDaemon() {
       case 'stats':
         app.ringUsed = Number(data['ring_seconds_used'] ?? 0);
         break;
+      case 'clip_saved': {
+        const saved = event.data as unknown as ClipMeta;
+        const wasEmpty = app.clips.length === 0;
+        // Decide "is this genuinely new" before merging: `mergeSaved` replaces
+        // in place when the id is already present (a reconnect's `library.list`
+        // racing this same event), and that path must not move the count or
+        // the selection -- there is nothing new for either to react to.
+        const isNew = !app.clips.some((c) => c.id === saved.id);
+        app.clips = mergeSaved(app.clips, saved);
+        if (isNew) {
+          app.total += 1;
+          // `selected` is an index into `app.clips`, and a genuine prepend
+          // shifts every existing clip down one slot in every view: Grid's
+          // Space previews `app.clips[app.selected]` and Enter opens it, so
+          // an unshifted index means the user previews or opens a clip they
+          // never picked. Skip the shift only when the list was empty before
+          // this clip arrived -- it then lands at index 0, which is where
+          // `selected` already points.
+          if (!wasEmpty) app.selected += 1;
+          app.toast('info', `Saved ${saved.title}`);
+        }
+        break;
+      }
       case 'error':
         app.toast('error', String(data['error'] ?? 'the daemon reported an error'));
         break;
