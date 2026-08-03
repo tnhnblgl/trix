@@ -6,7 +6,7 @@
 //! trivially true.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
@@ -315,7 +315,12 @@ pub struct Daemon {
     /// `%APPDATA%` unset — which is an error on that command and irrelevant to
     /// every other one, so it is not a startup failure.
     config_path: Option<PathBuf>,
-    pub clients: Clients,
+    /// `Arc`, not a bare `Clients`, so `window::spawn` can hand a clone to the
+    /// pump thread — see `window.rs`'s `CLIENTS` thread-local and its doc for
+    /// why: `hotkey_pressed` has to reach `Clients::broadcast` from `wnd_proc`
+    /// itself, unconditionally, or a press the daemon received while the
+    /// action queue was full never gets reported at all.
+    pub clients: Arc<Clients>,
     armed: Mutex<Option<Armed>>,
     /// The library, scanned once at startup and updated incrementally.
     /// `library.list` never touches the disk after that (spec §5.2).
@@ -418,7 +423,7 @@ impl Daemon {
         Self {
             config: Mutex::new(config),
             config_path,
-            clients: Clients::default(),
+            clients: Arc::new(Clients::default()),
             armed: Mutex::new(None),
             library: Mutex::new(library),
         }

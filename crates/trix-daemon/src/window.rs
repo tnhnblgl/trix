@@ -11,6 +11,13 @@
 //! window that stops pumping stops redrawing the tray, stops answering
 //! `WM_ENDSESSION`, and gets marked "not responding" by the OS. Every action
 //! is therefore a message on a channel that the worker thread drains.
+//!
+//! The one exception is `Clients::broadcast`, which `wnd_proc`'s `WM_HOTKEY`
+//! arm calls directly. That is not the same invariant as calling into
+//! `Daemon`: `broadcast` is `try_send`-based against a handful of small
+//! bounded queues (see `clients.rs`) and cannot block on a slow capture or a
+//! stuck disk the way `Daemon::clip`/`arm` can — it is a mailbox drop, not a
+//! multi-second operation with a lock held across it.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
@@ -31,6 +38,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::HSTRING;
 
+use crate::clients::Clients;
 use crate::state::Daemon;
 use crate::tray::{self, Tray};
 
@@ -187,6 +195,10 @@ thread_local! {
     /// thread that owns its window: `Shell_NotifyIconW` posts callbacks to
     /// that thread, and `Tray`'s `Drop` must run there too.
     static TRAY: std::cell::RefCell<Option<Tray>> = const { std::cell::RefCell::new(None) };
+    /// So `wnd_proc`'s `WM_HOTKEY` arm can broadcast `hotkey_pressed` directly
+    /// instead of only offering `Action::Clip` to the worker — see that arm's
+    /// comment for why a full action queue makes the difference matter.
+    static CLIENTS: std::cell::RefCell<Option<Arc<Clients>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Records the armed state and asks the pump to repaint the tray icon.
@@ -278,6 +290,23 @@ unsafe extern "system" fn wnd_proc(
     }
     match msg {
         WM_HOTKEY if wparam.0 as i32 == HOTKEY_ID => {
+            // Broadcast before `offer`, and unconditionally: `offer` drops
+            // `Action::Clip` when the worker's queue is already full (a user
+            // mashing the hotkey during a mux), and `handle_action` — where
+            // this used to live — never runs for a dropped action. That made
+            // the daemon receive a press and report nothing, which is exactly
+            // the false negative the settings page's "press it now" test
+            // (spec §6.4) exists to rule out: it asks whether the *daemon*
+            // received the combination, not whether a clip resulted, because
+            // an overlay that has silently stolen the hotkey looks identical
+            // to a slow clip from here otherwise. Broadcasting from the
+            // message itself, before the queue can drop anything, means a
+            // dropped clip no longer also costs the event.
+            CLIENTS.with(|c| {
+                if let Some(clients) = c.borrow().as_ref() {
+                    clients.broadcast(&Event::new("hotkey_pressed", Value::Object(Map::new())));
+                }
+            });
             ACTIONS.with(|a| {
                 if let Some(tx) = a.borrow().as_ref() {
                     offer(tx, Action::Clip);
@@ -376,7 +405,16 @@ unsafe extern "system" fn wnd_proc(
 /// error**: another program owning Alt+F10 (NVIDIA's overlay does exactly
 /// this) must not stop the daemon from starting — the user can still clip from
 /// the tray and can rebind in settings.
-pub fn spawn(actions: SyncSender<Action>, hotkey_spec: &str) -> Result<WindowHandle> {
+///
+/// `clients` is what lets `wnd_proc`'s `WM_HOTKEY` arm broadcast
+/// `hotkey_pressed` straight from the pump, rather than only from
+/// `handle_action` on the worker thread — see that arm's comment for why the
+/// difference matters.
+pub fn spawn(
+    actions: SyncSender<Action>,
+    hotkey_spec: &str,
+    clients: Arc<Clients>,
+) -> Result<WindowHandle> {
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<isize>>();
     let hotkey = Hotkey::parse(hotkey_spec);
     let spec = hotkey_spec.to_string();
@@ -387,6 +425,7 @@ pub fn spawn(actions: SyncSender<Action>, hotkey_spec: &str) -> Result<WindowHan
         .name("trix-window".into())
         .spawn(move || {
             ACTIONS.with(|a| *a.borrow_mut() = Some(actions));
+            CLIENTS.with(|c| *c.borrow_mut() = Some(clients));
             let created = unsafe { create_window() };
             let hwnd = match created {
                 Ok(hwnd) => {
@@ -516,16 +555,11 @@ unsafe fn create_window() -> Result<HWND> {
 pub fn handle_action(daemon: &Arc<Daemon>, action: Action) {
     match action {
         Action::Clip => {
-            // Emitted before the clip is attempted, and regardless of whether
-            // one is possible: this is the only honest answer to the settings
-            // page's "press it now" test, which asks whether the *daemon*
-            // received the combination — not whether a clip resulted. Spec
-            // §6.4 exists because NVIDIA's overlay silently eats Alt+F10
-            // inside hooked games, and nothing the webview can observe would
-            // ever catch that. `Action::Clip` reaches here only from
-            // `WM_HOTKEY`, so this cannot fire for anything but a real press.
-            daemon.clients.broadcast(&Event::new("hotkey_pressed", Value::Object(Map::new())));
-
+            // `hotkey_pressed` is broadcast from `wnd_proc`'s `WM_HOTKEY` arm
+            // itself now, not here — see that arm's comment. This action can
+            // be dropped by a full queue (`offer` in `window::wnd_proc`)
+            // before it ever reaches this match, and the event has to survive
+            // that; broadcasting only on this side once did not.
             match daemon.clip() {
                 Ok(Some(meta)) => {
                     tracing::info!(clip = %meta.id, "clip saved from the hotkey")
@@ -745,6 +779,50 @@ mod tests {
         );
     }
 
+    /// `wnd_proc`'s `WM_HOTKEY` arm broadcasts before it ever calls `offer`,
+    /// so a press the daemon received still reaches a listening client even
+    /// when the worker's action queue is already full and `Action::Clip` gets
+    /// dropped -- the false negative this change exists to close (see that
+    /// arm's comment, and `Action::Clip`'s in `handle_action`).
+    ///
+    /// Posts `WM_HOTKEY` directly rather than registering a real global
+    /// hotkey and pressing it: `wnd_proc` only checks `wparam == HOTKEY_ID`,
+    /// and posting it by hand from another thread is the same technique
+    /// `WindowHandle::request_exit` and `rebind_hotkey` already use to reach
+    /// this pump.
+    #[test]
+    fn hotkey_pressed_reaches_a_client_even_when_the_action_queue_is_full() {
+        let (tx, rx) = sync_channel::<Action>(ACTION_QUEUE_DEPTH);
+        // Filled before the window exists, so the `offer` inside `wnd_proc`'s
+        // `WM_HOTKEY` arm below is guaranteed to find the queue full and drop
+        // what it sends -- the exact condition this test is about.
+        for _ in 0..ACTION_QUEUE_DEPTH {
+            tx.try_send(Action::Clip).expect("queue accepts up to its depth");
+        }
+
+        let clients = Arc::new(Clients::default());
+        let (out_tx, out_rx) = sync_channel(crate::clients::OUTBOUND_QUEUE_DEPTH);
+        clients.register(out_tx);
+
+        let mut window = spawn(tx, "not+a+hotkey", Arc::clone(&clients))
+            .expect("an unusable hotkey must not fail the daemon");
+
+        unsafe {
+            let _ =
+                PostMessageW(Some(window.hwnd()), WM_HOTKEY, WPARAM(HOTKEY_ID as usize), LPARAM(0));
+        }
+
+        let line = out_rx.recv_timeout(std::time::Duration::from_secs(2)).expect(
+            "hotkey_pressed must reach a registered client even though the action queue was full",
+        );
+        let event: Event = serde_json::from_str(line.trim_end())
+            .unwrap_or_else(|e| panic!("event line did not decode: {e}\nline: {line}"));
+        assert_eq!(event.event, "hotkey_pressed");
+
+        drop(rx); // never drained on purpose; see the comment above
+        window.shutdown();
+    }
+
     /// A hotkey the daemon cannot have must not stop the daemon. NVIDIA's
     /// overlay owns Alt+F10 — the configured default — on the developer's own
     /// machine, so this is the common case, not the corner case: the user
@@ -757,8 +835,8 @@ mod tests {
     #[test]
     fn a_hotkey_that_cannot_be_registered_still_leaves_a_live_window() {
         let (tx, _rx) = sync_channel::<Action>(ACTION_QUEUE_DEPTH);
-        let mut window =
-            spawn(tx, "not+a+hotkey").expect("an unusable hotkey must not fail the daemon");
+        let mut window = spawn(tx, "not+a+hotkey", Arc::new(Clients::default()))
+            .expect("an unusable hotkey must not fail the daemon");
         assert!(!window.hwnd().0.is_null(), "the window must exist even with no hotkey");
         // Must return rather than hang: the pump is a live thread, and the
         // only thing that ends it is this message.

@@ -210,7 +210,11 @@ fn main() -> anyhow::Result<()> {
     // shutdown watcher reads: `process::exit` runs no destructors, and the
     // icon has to be removed deliberately.
     let (actions_tx, actions_rx) = std::sync::mpsc::sync_channel(window::ACTION_QUEUE_DEPTH);
-    let _ = window_slot.set(window::spawn(actions_tx, &daemon.clip_hotkey())?);
+    let _ = window_slot.set(window::spawn(
+        actions_tx,
+        &daemon.clip_hotkey(),
+        Arc::clone(&daemon.clients),
+    )?);
 
     let worker_daemon = Arc::clone(&daemon);
     std::thread::Builder::new().name("trix-tray-worker".into()).spawn(move || {
