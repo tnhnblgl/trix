@@ -17,7 +17,9 @@ use crate::pipe::{CALL_TIMEOUT, Connection};
 use crate::pipe_reader::open_halves;
 
 /// The daemon's published socket. Byte-mode, newline-framed, ACL'd to the
-/// current user (spec §4.1) — a plain `File` open is a complete client.
+/// current user (spec §4.1). Opening it takes more than a plain `File`, though
+/// — see [`crate::pipe_reader::open_halves`], which this module's `connect`
+/// uses, for why a bare open deadlocks the app on its first command.
 const PIPE_PATH: &str = r"\\.\pipe\trix-control";
 
 /// First reconnect delay. Short enough that the app is back before the user
