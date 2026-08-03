@@ -121,6 +121,14 @@ class AppState {
       this.total = Math.max(0, this.total - 1);
       // Keep the selection on a real clip: the one that slid into this slot,
       // or the new last one if the deleted clip was at the end.
+      //
+      // Recovering by index like this is only correct because `remove`'s one
+      // caller (the clip page's delete button) always deletes the clip that
+      // is currently selected -- `index` is therefore the selected clip's own
+      // old slot. A grid-level delete (deleting a clip the user has not
+      // selected) would need to recompute `selected` relative to the clip
+      // still being looked at, not to the one just removed; this line would
+      // silently move the selection to the wrong clip instead.
       this.selected = Math.min(index < 0 ? 0 : index, Math.max(0, this.clips.length - 1));
       if (this.clips.length === 0) this.view = 'grid';
     } catch (e) {

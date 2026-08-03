@@ -147,9 +147,12 @@ pub(crate) fn open_halves(path: &str) -> std::io::Result<(BufReader<PeekingPipeR
 /// other end any more", as opposed to "the call itself went wrong".
 ///
 /// `ERROR_BROKEN_PIPE` once the far end has closed *and* its bytes have been
-/// drained (see the daemon's `request_pending`, which measured exactly that),
-/// `ERROR_PIPE_NOT_CONNECTED` if it was never there, and `ERROR_NO_DATA` while
-/// its handle is on the way down.
+/// drained. That was measured, but on the *server* side, by the daemon's
+/// `request_pending` (`crates/trix-daemon/src/pipe.rs`) — this client-side
+/// peek is assumed to behave the same way by extrapolation from that
+/// measurement, not from a measurement taken here. `ERROR_PIPE_NOT_CONNECTED`
+/// if it was never there, and `ERROR_NO_DATA` while its handle is on the way
+/// down.
 const PIPE_IS_GONE: [WIN32_ERROR; 3] = [ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_NOT_CONNECTED];
 
 /// Turns a failed peek into either a clean end of stream or a real error.
