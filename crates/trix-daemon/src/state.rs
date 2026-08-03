@@ -599,9 +599,14 @@ impl Daemon {
     /// Deliberately this one key rather than a whole-`Config` snapshot: a
     /// snapshot invites callers to read the other keys long after they have
     /// gone stale, and `config.set` can change any of them at any time. A
-    /// changed hotkey is now rebound live by `set_config`, so this copy is
-    /// only ever stale for the instant between the write and the pump's
-    /// `WM_TRIX_REHOTKEY`, not until the next restart.
+    /// changed hotkey is rebound live by `set_config` calling
+    /// `window::rebind_hotkey` — but only when a pump is running and posting
+    /// to it succeeds. `rebind_hotkey`'s own doc comment is the honest
+    /// version of this: with no pump (unit tests, and the tail of shutdown)
+    /// or a failed `PostMessageW`, the rebind is skipped entirely and the
+    /// running registration — like this copy — stays stale until the next
+    /// restart, exactly the behavior this feature exists to remove in the
+    /// case where it does reach a live pump.
     pub fn clip_hotkey(&self) -> String {
         self.lock_config().clip_hotkey.clone()
     }

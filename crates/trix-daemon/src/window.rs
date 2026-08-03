@@ -51,7 +51,9 @@ static TASKBAR_CREATED: std::sync::atomic::AtomicU32 = std::sync::atomic::Atomic
 /// that can block belongs on the worker side of this channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// Hotkey pressed, or "Save clip" chosen from the tray menu.
+    /// The clip hotkey was pressed (`WM_HOTKEY`). The tray menu has no "save
+    /// clip" item of its own — see its match arms below for what it does map
+    /// to — so this is never reached any other way.
     Clip,
     Arm,
     Disarm,
@@ -214,6 +216,22 @@ pub fn publish_armed(armed: bool) {
 /// listening is not an error worth propagating into `config.set`, which has
 /// already saved the value the next startup will register.
 pub fn rebind_hotkey(spec: &str) {
+    // `WINDOW_HWND` is process-global (see its doc comment above), not
+    // per-`Daemon`. `cargo test` runs every test in this crate's test binary
+    // as concurrent threads, and `a_hotkey_that_cannot_be_registered_still_
+    // leaves_a_live_window` below keeps a real pump alive with a real,
+    // non-zero `HWND` in that same static for the length of its run. Without
+    // this guard, a `dispatch.rs` test calling `config.set` with a
+    // *parseable* `clip_hotkey` could read that other test's live HWND here,
+    // post `WM_TRIX_REHOTKEY` to it, and have the pump call the real
+    // `RegisterHotKey` — taking a system-wide hotkey combination on the
+    // developer's own desktop. So this returns before reading `WINDOW_HWND`
+    // or writing `PENDING_HOTKEY` at all under test, which makes that
+    // impossible rather than merely unlikely (a mutex serializing the two
+    // tests would still leave the hazard one careless future test away).
+    if cfg!(test) {
+        return;
+    }
     let hwnd = WINDOW_HWND.load(Ordering::Relaxed);
     if hwnd == 0 {
         return;
@@ -396,22 +414,19 @@ pub fn spawn(actions: SyncSender<Action>, hotkey_spec: &str) -> Result<WindowHan
                 }
             }
 
-            let registered = match &hotkey {
+            match &hotkey {
                 Ok(hk) => match unsafe { hk.register(hwnd, HOTKEY_ID) } {
                     Ok(()) => {
                         tracing::info!(hotkey = %hk, "clip hotkey registered");
-                        true
                     }
                     Err(e) => {
                         tracing::warn!(hotkey = %hk, error = %format!("{e:#}"), "clip hotkey unavailable — clip from the tray, or rebind clip_hotkey");
-                        false
                     }
                 },
                 Err(e) => {
                     tracing::warn!(spec = %spec, error = %format!("{e:#}"), "clip_hotkey is not parseable; no hotkey registered");
-                    false
                 }
-            };
+            }
 
             let mut msg = MSG::default();
             while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
@@ -421,10 +436,17 @@ pub fn spawn(actions: SyncSender<Action>, hotkey_spec: &str) -> Result<WindowHan
                 }
             }
 
-            if registered {
-                unsafe {
-                    let _ = UnregisterHotKey(Some(hwnd), HOTKEY_ID);
-                }
+            // Unregistered unconditionally, and the error ignored — same
+            // precedent as the `WM_TRIX_REHOTKEY` arm above. Whether a hotkey
+            // is actually held at this point depends on the startup result
+            // *and* on any `WM_TRIX_REHOTKEY` that ran since, and there is no
+            // cheap way to ask the OS "is HOTKEY_ID currently mine" short of
+            // just releasing it: `UnregisterHotKey` on an id that was never
+            // registered simply fails, harmlessly. Windows would reclaim a
+            // leaked registration at thread exit anyway, but leaving that to
+            // chance would mean this line no longer means what it says.
+            unsafe {
+                let _ = UnregisterHotKey(Some(hwnd), HOTKEY_ID);
             }
             // Before `DestroyWindow`, and on this thread: `Tray::drop` sends
             // `NIM_DELETE` to the shell for this window. An icon whose window
@@ -495,7 +517,7 @@ pub fn handle_action(daemon: &Arc<Daemon>, action: Action) {
 
             match daemon.clip() {
                 Ok(Some(meta)) => {
-                    tracing::info!(clip = %meta.id, "clip saved from the tray or hotkey")
+                    tracing::info!(clip = %meta.id, "clip saved from the hotkey")
                 }
                 // `arm` only starts filling the ring when the first frame
                 // arrives, so a hotkey pressed in the first moments after
@@ -668,5 +690,48 @@ mod tests {
         // Must return rather than hang: the pump is a live thread, and the
         // only thing that ends it is this message.
         window.shutdown();
+    }
+
+    /// Pins the wire shape Task 9's settings page binds to: `hotkey_rebound`
+    /// carries exactly `{"spec": "...", "registered": true|false}`.
+    ///
+    /// `handle_action` never touches `WINDOW_HWND` or `PENDING_HOTKEY` — it
+    /// only broadcasts — so this drives it directly against a scratch
+    /// `Daemon` rather than through a live pump. A live pump is exactly what
+    /// the guard in `rebind_hotkey` above exists to keep this test binary
+    /// away from (see that function's doc comment), so reaching one here
+    /// would be a step backwards, not a more thorough test.
+    ///
+    /// The `Daemon` is built the same way `stats.rs`'s `fixture` and
+    /// `dispatch.rs`'s `with_scratch_config`/`idle` are: a scratch `clip_dir`
+    /// under the temp dir and `config_path: None`, so this neither reads the
+    /// developer's real `config.toml` nor scans their real clip library, and
+    /// it creates no window.
+    #[test]
+    fn hotkey_rebound_broadcasts_the_settings_page_wire_shape() {
+        use trix_core::config::Config;
+
+        let dir = std::env::temp_dir().join(format!("trix-hotkey-rebound-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp clip dir");
+        let config = Config { clip_dir: dir.to_string_lossy().into_owned(), ..Config::default() };
+        let daemon = Arc::new(Daemon::new_at(config, None));
+
+        let (tx, rx) = sync_channel(crate::clients::OUTBOUND_QUEUE_DEPTH);
+        daemon.clients.register(tx);
+
+        handle_action(
+            &daemon,
+            Action::HotkeyRebound { spec: "ctrl+shift+f9".to_string(), registered: true },
+        );
+
+        let line = rx.try_recv().expect("HotkeyRebound must broadcast an event");
+        let event: Event = serde_json::from_str(line.trim_end())
+            .unwrap_or_else(|e| panic!("event line did not decode: {e}\nline: {line}"));
+        assert_eq!(event.event, "hotkey_rebound");
+        assert_eq!(event.data.get("spec").and_then(Value::as_str), Some("ctrl+shift+f9"));
+        assert_eq!(event.data.get("registered").and_then(Value::as_bool), Some(true));
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
