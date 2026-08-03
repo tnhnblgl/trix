@@ -168,7 +168,7 @@ left to be reverse-engineered out of `dispatch.rs`.
 | `library.rename` | `{clip_id, title}` | the updated `ClipMeta`, bare — edits metadata only, the filename never moves, so the id is unchanged |
 | `library.favorite` | `{clip_id, favorite}` | the updated `ClipMeta`, bare |
 | `library.reveal` | `{clip_id}` | `{clip_id}` — opens Explorer with the file selected |
-| `library.export` | `{clip_id, dest, start_ms, end_ms, mode}` | see §6.3. **Arrives in stage 4** with trim/export in the desktop app; not present in stage 2 or 3 |
+| `library.export` | `{clip_id, dest, start_ms, end_ms, mode}` | see §6.3. **Not part of stage 4** — trim/export land with the plan that follows it; absent from stages 2, 3, and 4 |
 | `monitors.list` | — | `{monitors:[{index, name, width, height, left, top, adapter},…]}`. `index` is a `config.monitor_index` value, not an ordinal |
 | `encoders.list` | — | `{encoders:[{name, codec, hardware},…]}`. `hardware:false` is what a settings page warns on |
 | `stats.subscribe` | `{enabled}` | `{enabled}`, echoing the state this connection is now in. Per-connection, not daemon state: two UIs may disagree. Subscribes/unsubscribes this connection to `stats` events (§4.4) |
@@ -418,8 +418,14 @@ artifacts, never a claim of success:
    the clip appears on disk with valid sidecars.
 3. **Daemon:** tray arm/disarm works, hotkey clips while armed, `paced`/`dropped` counters match the
    CLI path, and the memory ceilings of §10.1 hold.
-4. **UI:** clip appears in the grid within a second of the hotkey, plays, trims, exports; fast-mode
-   export is lossless and sub-second, precise-mode re-encodes correctly.
+4. **UI:** machine-gated by `scripts/ui-smoke.ps1` — trix-ui stays off trix-core, both test suites
+   pass, the two binaries share one directory, the app survives a missing daemon and reconnects on its
+   own once one appears, and a second launch focuses the first instead of opening another window. A
+   green run of that script is not stage 4: everything a script cannot see — the clip appearing in the
+   grid within a second of the hotkey, playback, seeking, the settings round trip — is
+   hand-verified. **Trim and export are not part of this stage.** They arrive with `library.export` in
+   the plan after this one, which is when the rest of this line's original claim ("trims, exports;
+   fast-mode export is lossless and sub-second") becomes checkable.
 5. **Cross-machine:** the AMD rigs (RX 6650 XT and RX 550, Win10 19045) install, launch, arm, clip,
    and play back — the same machines that caught the border and rate-control bugs.
 6. **Game-fps regression:** League of Legends with the daemon armed and the UI closed, confirming the

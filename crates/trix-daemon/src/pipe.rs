@@ -342,6 +342,14 @@ where
             continue;
         }
 
+        // The earliest point at which a real client has actually reached the
+        // daemon over the pipe, as opposed to a process merely having
+        // started. scripts/ui-smoke.ps1 greps for this line to tell "the
+        // window opened and connected" apart from "the window opened and
+        // nothing loaded" — a plain liveness check (did the process exit)
+        // cannot see that difference.
+        tracing::info!("client connected");
+
         let handler = Arc::clone(&handler);
         let spawned = std::thread::Builder::new().name("trix-client".into()).spawn(move || {
             if let Err(e) = serve_one(instance, handler) {
