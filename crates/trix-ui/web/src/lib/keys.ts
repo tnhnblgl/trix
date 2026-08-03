@@ -49,30 +49,38 @@ export function isActivatableTarget(target: EventTarget | null): boolean {
 }
 
 /**
- * Whether the grid's window-level handler should act on this key press.
+ * Whether a window-level keydown handler should act on this key press,
+ * rather than leaving it to the control the event landed on.
  *
- * Three rules, and the third is the one that is easy to get wrong:
+ * Two rules hold for every caller in the app:
  *
  * - Typed text always belongs to the field it landed in.
- * - A `<button>` outside the grid — the rail's Arm control — owns Space and
- *   Enter itself, and must keep them.
- * - A card *inside* the grid is a grid item first, even though it is also a
- *   `<button>`. WebView2 focuses it on click, so if it were left to activate
- *   itself, Space would re-select the clip instead of previewing it and Enter
- *   would re-select instead of opening — and spec §6.2 gives both of those
- *   keys to the grid. Arrow keys reach the grid from either kind of button.
+ * - A `<button>` owns Space and Enter itself and must keep them — WebView2
+ *   focuses it on click, so a handler that also claims those keys both fires
+ *   its own action *and* suppresses the button's native activation. Arrow
+ *   keys are never part of what a button owns, so they always fall through.
  *
- * `insideGrid` is passed in rather than read off the target because the suite
- * runs on node with no DOM; the caller owns the `contains` check.
+ * `ownsActivation` lets one caller declare an exception to the second rule
+ * for a specific target: `Grid.svelte`'s cards are `<button>`s too, but
+ * inside the grid their Space and Enter belong to the grid itself (spec
+ * §6.2) — a card left to activate itself would re-select the clip that is
+ * already selected instead of previewing or opening it. Every other caller
+ * (`ClipPage.svelte` among them) has no such exception and leaves this at
+ * its default of `false`, so every button on the page keeps its own Space
+ * and Enter.
+ *
+ * `ownsActivation` is passed in rather than read off the target because the
+ * suite runs on node with no DOM; the grid's caller owns the `contains`
+ * check that decides it.
  */
-export function gridShouldHandle(
+export function shouldHandleKey(
   target: EventTarget | null,
   key: string,
-  insideGrid: boolean,
+  ownsActivation = false,
 ): boolean {
   if (isTypingTarget(target)) return false;
   const activates = key === ' ' || key === 'Enter';
-  return !(isActivatableTarget(target) && activates && !insideGrid);
+  return !(isActivatableTarget(target) && activates && !ownsActivation);
 }
 
 /**

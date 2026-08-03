@@ -1,7 +1,7 @@
 <script lang="ts">
   import ClipCard from '../components/ClipCard.svelte';
   import { app } from '../lib/state.svelte';
-  import { gridShouldHandle, moveSelection } from '../lib/keys';
+  import { shouldHandleKey, moveSelection } from '../lib/keys';
   import { clipUrl } from '../lib/clips';
 
   /** Kept in sync with the CSS grid below so ArrowDown moves one visual row. */
@@ -22,11 +22,11 @@
   function onkeydown(e: KeyboardEvent) {
     // `<svelte:window>` is global for as long as the grid is mounted, so a key
     // meant for a control anywhere in the app arrives here too. Which of them
-    // are ours is `gridShouldHandle`'s decision — and it needs to know whether
+    // are ours is `shouldHandleKey`'s decision — and it needs to know whether
     // the target is one of our own cards, because those are `<button>`s that
     // WebView2 focuses on click yet whose Space and Enter belong to the grid.
     const insideGrid = !!gridEl && e.target instanceof Node && gridEl.contains(e.target);
-    if (!gridShouldHandle(e.target, e.key, insideGrid)) return;
+    if (!shouldHandleKey(e.target, e.key, insideGrid)) return;
 
     if (e.key === 'Enter') {
       // Nothing to open. With an empty library `app.current` is null, so

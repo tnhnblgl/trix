@@ -2265,6 +2265,7 @@ Import `mergeSaved` from `./clips` at the top of the file.
 <script lang="ts">
   import { app } from '../lib/state.svelte';
   import { clipUrl, counterLabel, formatBytes, formatDuration } from '../lib/clips';
+  import { shouldHandleKey } from '../lib/keys';
 
   let video = $state<HTMLVideoElement | null>(null);
   let renaming = $state(false);
@@ -2284,6 +2285,20 @@ Import `mergeSaved` from `./clips` at the top of the file.
       if (e.key === 'Escape') renaming = false;
       return;
     }
+    // The confirm strip is a gate, not a suggestion: deleting is
+    // unrecoverable, so while it is open the only key that does anything is
+    // Escape, which cancels it. Navigation and playback must not slide the
+    // dialog to a different clip out from under a user who is about to click
+    // its Delete button.
+    if (confirmingDelete) {
+      if (e.key === 'Escape') confirmingDelete = false;
+      return;
+    }
+    // Every button on this page owns its own Space and Enter (WebView2
+    // focuses a button when it is clicked, and a button's native activation
+    // must not be stolen by a window-level shortcut) — arrows are never part
+    // of what a button owns, so they always fall through regardless.
+    if (!shouldHandleKey(e.target, e.key)) return;
     switch (e.key) {
       case 'Escape':
         app.view = 'grid';

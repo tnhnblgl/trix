@@ -112,6 +112,42 @@ describe('AppState.remove', () => {
   });
 });
 
+describe('AppState.rename', () => {
+  it('sends the new title and merges the updated clip into app.clips', async () => {
+    const updated = { ...clip('b'), title: 'Better title' };
+    callMock.mockResolvedValue(updated);
+    app.clips = [clip('a'), clip('b')];
+
+    await app.rename('b', 'Better title');
+
+    expect(callMock).toHaveBeenCalledWith('library.rename', { clip_id: 'b', title: 'Better title' });
+    expect(app.clips.find((c) => c.id === 'b')?.title).toBe('Better title');
+  });
+});
+
+describe('AppState.setFavorite', () => {
+  it('sends the favorite flag and merges the updated clip into app.clips', async () => {
+    const updated = { ...clip('a'), favorite: true };
+    callMock.mockResolvedValue(updated);
+    app.clips = [clip('a')];
+
+    await app.setFavorite('a', true);
+
+    expect(callMock).toHaveBeenCalledWith('library.favorite', { clip_id: 'a', favorite: true });
+    expect(app.clips.find((c) => c.id === 'a')?.favorite).toBe(true);
+  });
+});
+
+describe('AppState.reveal', () => {
+  it('asks the daemon to reveal the clip by id', async () => {
+    callMock.mockResolvedValue({});
+
+    await app.reveal('a');
+
+    expect(callMock).toHaveBeenCalledWith('library.reveal', { clip_id: 'a' });
+  });
+});
+
 describe('AppState.step', () => {
   it('walks forward and back without crossing either end', () => {
     app.clips = [clip('a'), clip('b'), clip('c')];

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { gridShouldHandle, isActivatableTarget, isTypingTarget, moveSelection } from './keys';
+import { shouldHandleKey, isActivatableTarget, isTypingTarget, moveSelection } from './keys';
 
 /** An event target, as much of one as a DOM-less suite needs. */
 const target = (props: Record<string, unknown>) => props as unknown as EventTarget;
@@ -34,10 +34,12 @@ describe('isActivatableTarget', () => {
   });
 });
 
-describe('gridShouldHandle', () => {
+describe('shouldHandleKey', () => {
   // Calls the shipped function rather than restating its expression: a mirror
   // of the guard would keep passing after the guard itself was changed, which
-  // is the failure mode these cases exist to catch.
+  // is the failure mode these cases exist to catch. `Grid.svelte` and
+  // `ClipPage.svelte` are both real callers of this one predicate — the grid
+  // passes `ownsActivation`, the clip page leaves it at its default.
   const card = target({ tagName: 'BUTTON' });
   const arm = target({ tagName: 'BUTTON' });
 
@@ -47,8 +49,8 @@ describe('gridShouldHandle', () => {
     // user selects a clip — so a guard keyed on the tag alone went dead on
     // every grid key the moment anyone clicked anything.
     for (const key of ['ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown']) {
-      expect(gridShouldHandle(card, key, true)).toBe(true);
-      expect(gridShouldHandle(arm, key, false)).toBe(true);
+      expect(shouldHandleKey(card, key, true)).toBe(true);
+      expect(shouldHandleKey(arm, key, false)).toBe(true);
     }
   });
 
@@ -56,30 +58,39 @@ describe('gridShouldHandle', () => {
     // Left to itself the card would fire its own `onclick={onselect}` and
     // merely re-select the clip that is already selected — no preview, no
     // open. Inside the grid, the grid decides.
-    expect(gridShouldHandle(card, ' ', true)).toBe(true);
-    expect(gridShouldHandle(card, 'Enter', true)).toBe(true);
+    expect(shouldHandleKey(card, ' ', true)).toBe(true);
+    expect(shouldHandleKey(card, 'Enter', true)).toBe(true);
   });
 
-  it('leaves Space and Enter to a button outside the grid', () => {
-    // The rail's Arm control. Space must arm/disarm natively rather than
-    // preview in place, and Enter there must not also navigate away.
-    expect(gridShouldHandle(arm, ' ', false)).toBe(false);
-    expect(gridShouldHandle(arm, 'Enter', false)).toBe(false);
+  it('leaves Space and Enter to a button with no ownsActivation exception', () => {
+    // The rail's Arm control, and every button on the clip page. Space must
+    // activate the button natively rather than being claimed by a
+    // window-level shortcut, and Enter there must not also navigate away.
+    expect(shouldHandleKey(arm, ' ', false)).toBe(false);
+    expect(shouldHandleKey(arm, 'Enter', false)).toBe(false);
+  });
+
+  it('defaults ownsActivation to false when the caller omits it', () => {
+    // `ClipPage.svelte` calls this two-argument form — every button on that
+    // page owns its own Space and Enter, so there is no exception to opt into.
+    expect(shouldHandleKey(arm, ' ')).toBe(false);
+    expect(shouldHandleKey(arm, 'Enter')).toBe(false);
+    expect(shouldHandleKey(arm, 'ArrowRight')).toBe(true);
   });
 
   it('never takes a key from a text field, wherever it sits', () => {
     const field = target({ tagName: 'INPUT' });
-    expect(gridShouldHandle(field, 'ArrowRight', false)).toBe(false);
-    expect(gridShouldHandle(field, ' ', false)).toBe(false);
+    expect(shouldHandleKey(field, 'ArrowRight', false)).toBe(false);
+    expect(shouldHandleKey(field, ' ', false)).toBe(false);
     // Even inside the grid: a rename box is still a rename box.
-    expect(gridShouldHandle(field, 'ArrowRight', true)).toBe(false);
+    expect(shouldHandleKey(field, 'ArrowRight', true)).toBe(false);
   });
 
   it('handles everything when nothing is focused', () => {
     // `window` is the target then, and it has no tagName at all — the case
-    // every grid shortcut actually runs in.
-    expect(gridShouldHandle(target({}), ' ', false)).toBe(true);
-    expect(gridShouldHandle(null, 'Enter', false)).toBe(true);
+    // every window-level shortcut actually runs in.
+    expect(shouldHandleKey(target({}), ' ', false)).toBe(true);
+    expect(shouldHandleKey(null, 'Enter', false)).toBe(true);
   });
 });
 
