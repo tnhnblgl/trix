@@ -21,11 +21,16 @@
       if (e.key === 'Escape') renaming = false;
       return;
     }
-    // The confirm strip is a gate, not a suggestion: deleting is
-    // unrecoverable, so while it is open the only key that does anything is
-    // Escape, which cancels it. Navigation and playback must not slide the
-    // dialog to a different clip out from under a user who is about to click
-    // its Delete button.
+    // Deleting is unrecoverable, so this is a safety gate: every button
+    // outside the strip (back, both steppers, Rename, Favorite, Show in
+    // Explorer, and the action-row Delete) carries disabled={confirmingDelete}
+    // in the markup below, so clicking or keyboard-activating any of them is
+    // already inert at the DOM level while the strip is open — a disabled
+    // button can't be focused or receive a click, native or synthetic.
+    // Escape has no button of its own, so this branch still owns it; every
+    // other key is dropped here too, since the app-level shortcuts below
+    // (arrows, space, delete) must not act on a different clip while the
+    // dialog is up.
     if (confirmingDelete) {
       if (e.key === 'Escape') confirmingDelete = false;
       return;
@@ -73,15 +78,15 @@
 
 {#if clip}
   <header class="head">
-    <button class="back" onclick={() => (app.view = 'grid')}>&lsaquo; Clips</button>
+    <button class="back" onclick={() => (app.view = 'grid')} disabled={confirmingDelete}>&lsaquo; Clips</button>
     <span class="counter">{counterLabel(app.selected, app.clips.length)}</span>
   </header>
 
   <div class="stage">
-    <button class="step" onclick={() => app.step(-1)} disabled={app.selected === 0}>&lsaquo;</button>
+    <button class="step" onclick={() => app.step(-1)} disabled={confirmingDelete || app.selected === 0}>&lsaquo;</button>
     <!-- svelte-ignore a11y_media_has_caption -->
     <video bind:this={video} src={clipUrl(app.clipDir, clip.id)} controls autoplay></video>
-    <button class="step" onclick={() => app.step(1)} disabled={app.selected >= app.clips.length - 1}>&rsaquo;</button>
+    <button class="step" onclick={() => app.step(1)} disabled={confirmingDelete || app.selected >= app.clips.length - 1}>&rsaquo;</button>
   </div>
 
   <!--
@@ -103,12 +108,12 @@
       <button onclick={() => (renaming = false)}>Cancel</button>
     {:else}
       <span class="title">{clip.title}</span>
-      <button onclick={startRename}>Rename</button>
-      <button onclick={() => app.setFavorite(clip.id, !clip.favorite)}>
+      <button onclick={startRename} disabled={confirmingDelete}>Rename</button>
+      <button onclick={() => app.setFavorite(clip.id, !clip.favorite)} disabled={confirmingDelete}>
         {clip.favorite ? 'Unfavorite' : 'Favorite'}
       </button>
-      <button onclick={() => app.reveal(clip.id)}>Show in Explorer</button>
-      <button class="danger" onclick={() => (confirmingDelete = true)}>Delete</button>
+      <button onclick={() => app.reveal(clip.id)} disabled={confirmingDelete}>Show in Explorer</button>
+      <button class="danger" onclick={() => (confirmingDelete = true)} disabled={confirmingDelete}>Delete</button>
     {/if}
   </div>
 
@@ -130,6 +135,7 @@
 <style>
   .head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
   .back { background: none; border: 0; color: var(--dim); font: inherit; cursor: pointer; padding: 0; }
+  .back:disabled { opacity: 0.35; cursor: default; }
   .counter { color: var(--dim); font-size: 13px; }
   .stage { display: flex; align-items: center; gap: 10px; }
   .stage video { flex: 1; width: 100%; max-height: 62vh; background: #000; border-radius: 10px; }
@@ -139,6 +145,7 @@
   .actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .actions .title { margin-right: auto; font-weight: 600; }
   .actions button, .confirm button { padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font: inherit; cursor: pointer; }
+  .actions button:disabled { opacity: 0.4; cursor: default; }
   .danger { border-color: var(--danger) !important; color: var(--danger) !important; }
   .confirm { margin-top: 14px; padding: 12px 14px; border: 1px solid var(--danger); border-radius: 8px; display: flex; align-items: center; gap: 10px; }
   .confirm p { margin: 0 auto 0 0; }
