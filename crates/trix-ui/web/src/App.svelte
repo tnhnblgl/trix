@@ -2,6 +2,7 @@
   import Rail from './views/Rail.svelte';
   import DaemonDown from './views/DaemonDown.svelte';
   import Grid from './views/Grid.svelte';
+  import ClipPage from './views/ClipPage.svelte';
   import Toasts from './components/Toasts.svelte';
   import { app, wireDaemon } from './lib/state.svelte';
 
@@ -16,6 +17,8 @@
     <main class="content">
       {#if app.view === 'grid'}
         <Grid />
+      {:else if app.view === 'clip'}
+        <ClipPage />
       {:else if app.view === 'settings'}
         <p class="placeholder">Settings arrive in Task 9.</p>
       {/if}

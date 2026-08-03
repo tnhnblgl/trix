@@ -1,4 +1,5 @@
 import { call, daemonConnected, onConnected, onDaemonEvent, onDisconnected } from './ipc';
+import { mergeSaved } from './clips';
 import type { ClipMeta, Status } from './types';
 
 export type View = 'grid' | 'clip' | 'settings' | 'firstrun';
@@ -24,6 +25,15 @@ class AppState {
 
   get clipDir() {
     return this.status?.clip_dir ?? '';
+  }
+
+  get current(): ClipMeta | null {
+    return this.clips[this.selected] ?? null;
+  }
+
+  step(delta: number) {
+    const next = this.selected + delta;
+    if (next >= 0 && next < this.clips.length) this.selected = next;
   }
 
   toast(kind: Toast['kind'], text: string) {
@@ -63,6 +73,47 @@ class AppState {
       this.clips = page.clips;
       this.total = page.total;
       this.selected = 0;
+    } catch (e) {
+      this.toast('error', String(e));
+    }
+  }
+
+  async rename(id: string, title: string) {
+    try {
+      const updated = await call<ClipMeta>('library.rename', { clip_id: id, title });
+      this.clips = mergeSaved(this.clips, updated);
+    } catch (e) {
+      this.toast('error', String(e));
+    }
+  }
+
+  async setFavorite(id: string, favorite: boolean) {
+    try {
+      const updated = await call<ClipMeta>('library.favorite', { clip_id: id, favorite });
+      this.clips = mergeSaved(this.clips, updated);
+    } catch (e) {
+      this.toast('error', String(e));
+    }
+  }
+
+  async reveal(id: string) {
+    try {
+      await call('library.reveal', { clip_id: id });
+    } catch (e) {
+      this.toast('error', String(e));
+    }
+  }
+
+  async remove(id: string) {
+    try {
+      await call('library.delete', { clip_id: id });
+      const index = this.clips.findIndex((c) => c.id === id);
+      this.clips = this.clips.filter((c) => c.id !== id);
+      this.total = Math.max(0, this.total - 1);
+      // Keep the selection on a real clip: the one that slid into this slot,
+      // or the new last one if the deleted clip was at the end.
+      this.selected = Math.min(index < 0 ? 0 : index, Math.max(0, this.clips.length - 1));
+      if (this.clips.length === 0) this.view = 'grid';
     } catch (e) {
       this.toast('error', String(e));
     }

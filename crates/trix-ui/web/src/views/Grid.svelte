@@ -29,10 +29,10 @@
     if (!gridShouldHandle(e.target, e.key, insideGrid)) return;
 
     if (e.key === 'Enter') {
-      // Nothing to open. `App.svelte` renders branches for `grid` and
-      // `settings` only, so switching to `clip` with no clip would paint an
-      // empty <main> and unmount this grid — taking this handler with it, and
-      // leaving the rail's "Clips" button as the only way back out.
+      // Nothing to open. With an empty library `app.current` is null, so
+      // `ClipPage`'s `{#if clip}` renders nothing at all -- no back button,
+      // no Escape target's worth of UI, nothing -- and switching to `clip`
+      // would strand the user on a blank page with no way out.
       if (app.clips.length === 0) return;
       // Without this a focused card would also fire its own `click` — Chromium
       // activates a button on Enter's keydown — and re-select the clip we are
