@@ -196,6 +196,34 @@ describe('AppState.reveal', () => {
   });
 });
 
+describe('AppState.toggleArm', () => {
+  // dispatch.rs's `fail` broadcasts an `error` event for a failed `arm` (spec
+  // §4.4), which `wireDaemon`'s `onDaemonEvent` switch already toasts. Before
+  // this fix, `toggleArm`'s own `catch` toasted the same rejection again, so a
+  // failed arm from the rail showed the identical message twice.
+  it('does not toast locally when arming fails, since the daemon already broadcasts an error event', async () => {
+    app.status = { ...statusPayload(), armed: false };
+    callMock.mockRejectedValueOnce(new Error('arm failed: no hardware encoder'));
+
+    await app.toggleArm();
+
+    expect(app.toasts).toHaveLength(0);
+  });
+
+  // `disarm` broadcasts nothing on failure (dispatch.rs's own comment: only
+  // `arm` and `clip` do, because a refused disarm concerns only the client
+  // that asked) -- so this is the only surface that ever tells the user a
+  // disarm failed, and it must keep doing so.
+  it('still toasts locally when disarming fails, since disarm broadcasts no error event', async () => {
+    app.status = { ...statusPayload(), armed: true };
+    callMock.mockRejectedValueOnce(new Error('disarm failed: engine wedged'));
+
+    await app.toggleArm();
+
+    expect(app.toasts.at(-1)?.text).toContain('disarm failed: engine wedged');
+  });
+});
+
 describe('AppState.step', () => {
   it('walks forward and back without crossing either end', () => {
     app.clips = [clip('a'), clip('b'), clip('c')];

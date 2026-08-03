@@ -54,13 +54,22 @@ class AppState {
   }
 
   async toggleArm() {
+    const wasArmed = this.armed;
     try {
-      const next = await call<Status>(this.armed ? 'disarm' : 'arm');
+      const next = await call<Status>(wasArmed ? 'disarm' : 'arm');
       // `disarm` answers {} rather than a status, so re-read rather than
       // trusting the shape of the reply.
       this.status = 'armed' in next ? next : await call<Status>('status');
     } catch (e) {
-      this.toast('error', String(e));
+      // A failed `arm` also broadcasts an `error` event (dispatch.rs's `fail`,
+      // spec §4.4), which the `onDaemonEvent` switch below already toasts --
+      // toasting again here would show the same failure twice for a
+      // rail-initiated arm. `disarm` broadcasts nothing on failure (by
+      // design: dispatch.rs's own comment says only `arm` and `clip` do, since
+      // a refused disarm concerns only the client that asked), so that path,
+      // and the `status` re-read after it, still need this catch -- it is the
+      // only thing that ever tells the user those failed.
+      if (wasArmed) this.toast('error', String(e));
     }
   }
 
