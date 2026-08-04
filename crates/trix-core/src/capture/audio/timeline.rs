@@ -142,8 +142,9 @@ impl AudioTimeline {
         }
     }
 
-    pub fn log_diagnostics(&self) {
+    pub fn log_diagnostics(&self, source: &str) {
         tracing::info!(
+            source,
             micro_gap_events = self.micro_gap_events,
             micro_gap_frames = self.micro_gap_frames,
             large_gap_events = self.large_gap_events,
