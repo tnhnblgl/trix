@@ -1,13 +1,11 @@
-//! WASAPI system-audio loopback capture (Phase 3).
+//! WASAPI shared-mode capture.
 //!
-//! Event-driven shared-mode loopback on the default render device: the
-//! thread sleeps in the kernel until the audio engine signals a period,
-//! then drains all pending packets. Each packet carries a QPC timestamp
-//! (100 ns units) — the same clock domain as the video frames, which is
-//! what Phase 4 uses to mux the two streams in sync.
+//! Event-driven shared-mode capture: the thread sleeps in the kernel until
+//! the audio engine signals a period, then drains all pending packets. Each
+//! packet carries a QPC timestamp (100 ns units) — the same clock domain as
+//! the video frames, which is what the muxer uses to keep the two in sync.
 
 use std::{
-    collections::VecDeque,
     io::Write,
     path::Path,
     sync::{
@@ -24,10 +22,7 @@ use wasapi::{
     WaveFormat,
 };
 
-pub const SAMPLE_RATE: usize = 48_000;
-pub const CHANNELS: usize = 2;
-/// Bytes per interleaved i16 stereo frame (the format fed to the encoder).
-pub const ENCODER_BLOCK_ALIGN: usize = CHANNELS * 2;
+use super::{AudioPacket, CHANNELS, SAMPLE_RATE};
 
 /// An event-driven shared-mode loopback session on the default render device.
 struct LoopbackSession {
@@ -61,13 +56,6 @@ impl LoopbackSession {
         let scratch = vec![0u8; (buffer_frames as usize).max(4096) * block_align];
         Ok(Self { client, event, capture, block_align, scratch })
     }
-}
-
-/// One loopback packet: interleaved i16 stereo 48 kHz bytes plus the QPC
-/// timestamp (100 ns units) of its first sample.
-pub struct AudioPacket {
-    pub qpc_100ns: i64,
-    pub data: Vec<u8>,
 }
 
 /// Background system-audio capture thread feeding [`AudioPacket`]s to a channel.
@@ -131,168 +119,6 @@ fn capture_loop(stop: &AtomicBool, tx: &Sender<AudioPacket>) -> Result<()> {
     }
     session.client.stop_stream().map_err(|e| anyhow!("stop stream: {e}"))?;
     Ok(())
-}
-
-/// How far audio emission trails the newest video frame. Real packets always
-/// emit immediately; only the silence filler holds back this much so a
-/// late-arriving real packet is never pre-empted by synthesized silence.
-pub const SILENCE_GRACE_100NS: i64 = 1_000_000; // 100 ms
-
-/// Packet QPC stamps jitter by a few samples against the ideal sample-count
-/// clock. Within this band a packet is treated as the seamless continuation
-/// of the stream (append verbatim — no splice); only discrepancies beyond it
-/// are real gaps/overlaps worth re-anchoring for. Splicing on sub-band jitter
-/// is audible as constant crackle (518 splices in 5.5 s of continuous tone).
-pub const CONTINUITY_DEAD_BAND_100NS: i64 = 200_000; // 20 ms
-
-pub fn frames_to_100ns(frames: u64) -> i64 {
-    (frames as i128 * 10_000_000 / SAMPLE_RATE as i128) as i64
-}
-
-pub fn dur_100ns_to_frames(dur: i64) -> u64 {
-    (dur.max(0) as i128 * SAMPLE_RATE as i128 / 10_000_000) as u64
-}
-
-/// Turns raw loopback packets into one *continuous* PCM timeline anchored at
-/// the first video frame's QPC instant: real packets are placed by their QPC
-/// stamps, head/overlap excess is trimmed, idle gaps (loopback goes quiet
-/// when nothing renders) are filled with synthesized silence, and sub-20 ms
-/// timestamp jitter is absorbed without splicing (the Phase 4 crackle fix).
-///
-/// The timeline is sink-agnostic: `emit(start_frame, pcm)` receives gapless
-/// consecutive chunks — `record` forwards them to the AAC encoder, `replay`
-/// appends them to the PCM ring.
-pub struct AudioTimeline {
-    pending: VecDeque<AudioPacket>,
-    t0_qpc: Option<i64>,
-    frames_emitted: u64,
-    silence_frames_emitted: u64,
-    silence: Vec<u8>,
-
-    // splice diagnostics: how often packet placement cut into real audio
-    pub micro_gap_events: u64, // silence inserts < 10 ms (should be ~0 during sound)
-    pub micro_gap_frames: u64,
-    pub large_gap_events: u64, // genuine idle gaps (> 10 ms)
-    pub trim_events: u64,      // packets with leading samples dropped
-    pub trim_frames: u64,
-}
-
-impl AudioTimeline {
-    pub fn new() -> Self {
-        Self {
-            pending: VecDeque::new(),
-            t0_qpc: None,
-            frames_emitted: 0,
-            silence_frames_emitted: 0,
-            // 0.5 s of zeroed PCM reused for every silence emission.
-            silence: vec![0u8; SAMPLE_RATE / 2 * ENCODER_BLOCK_ALIGN],
-            micro_gap_events: 0,
-            micro_gap_frames: 0,
-            large_gap_events: 0,
-            trim_events: 0,
-            trim_frames: 0,
-        }
-    }
-
-    /// Anchors the timeline; the first call wins (t0 = first video frame QPC).
-    pub fn start(&mut self, t0_qpc: i64) {
-        self.t0_qpc.get_or_insert(t0_qpc);
-    }
-
-    pub const fn started(&self) -> bool {
-        self.t0_qpc.is_some()
-    }
-
-    pub const fn frames_emitted(&self) -> u64 {
-        self.frames_emitted
-    }
-
-    pub const fn silence_frames_emitted(&self) -> u64 {
-        self.silence_frames_emitted
-    }
-
-    /// QPC instant (100 ns) up to which audio has been emitted.
-    fn emitted_until(&self) -> i64 {
-        self.t0_qpc.unwrap_or(0) + frames_to_100ns(self.frames_emitted)
-    }
-
-    fn emit(&mut self, bytes: &[u8], sink: &mut impl FnMut(u64, &[u8])) {
-        sink(self.frames_emitted, bytes);
-        self.frames_emitted += (bytes.len() / ENCODER_BLOCK_ALIGN) as u64;
-    }
-
-    fn emit_silence(&mut self, mut frames: u64, sink: &mut impl FnMut(u64, &[u8])) {
-        self.silence_frames_emitted += frames;
-        while frames > 0 {
-            let chunk = frames.min((self.silence.len() / ENCODER_BLOCK_ALIGN) as u64);
-            let bytes = chunk as usize * ENCODER_BLOCK_ALIGN;
-            let buf = std::mem::take(&mut self.silence);
-            self.emit(&buf[..bytes], sink);
-            self.silence = buf;
-            frames -= chunk;
-        }
-    }
-
-    /// Places pending loopback packets on the timeline by their QPC stamps
-    /// (trimming anything already covered) and fills with silence up to
-    /// `target_qpc`.
-    pub fn pump(
-        &mut self,
-        rx: &Receiver<AudioPacket>,
-        target_qpc: i64,
-        sink: &mut impl FnMut(u64, &[u8]),
-    ) {
-        if self.t0_qpc.is_none() {
-            return;
-        }
-        while let Ok(packet) = rx.try_recv() {
-            self.pending.push_back(packet);
-        }
-
-        while let Some(packet) = self.pending.pop_front() {
-            let n_frames = (packet.data.len() / ENCODER_BLOCK_ALIGN) as u64;
-            let delta = packet.qpc_100ns - self.emitted_until();
-
-            if delta.abs() < CONTINUITY_DEAD_BAND_100NS {
-                // Seamless continuation of the flowing stream: append verbatim.
-                let data = packet.data;
-                self.emit(&data, sink);
-            } else if delta > 0 {
-                // Real idle gap (loopback went quiet): fill, then append.
-                self.large_gap_events += 1;
-                self.emit_silence(dur_100ns_to_frames(delta), sink);
-                let data = packet.data;
-                self.emit(&data, sink);
-            } else {
-                // Packet substantially overlaps already-covered time (head
-                // audio from before recording start, or a device hiccup).
-                let skip_frames = dur_100ns_to_frames(-delta).min(n_frames);
-                self.trim_events += 1;
-                self.trim_frames += skip_frames;
-                let bytes = &packet.data[skip_frames as usize * ENCODER_BLOCK_ALIGN..];
-                if !bytes.is_empty() {
-                    let owned = bytes.to_vec();
-                    self.emit(&owned, sink);
-                }
-            }
-        }
-
-        let lag = target_qpc - self.emitted_until();
-        if lag > 0 {
-            self.emit_silence(dur_100ns_to_frames(lag), sink);
-        }
-    }
-
-    pub fn log_diagnostics(&self) {
-        tracing::info!(
-            micro_gap_events = self.micro_gap_events,
-            micro_gap_frames = self.micro_gap_frames,
-            large_gap_events = self.large_gap_events,
-            trim_events = self.trim_events,
-            trim_frames = self.trim_frames,
-            "audio splice diagnostics"
-        );
-    }
 }
 
 /// Captures `seconds` of system loopback audio and writes it as a
