@@ -1,10 +1,10 @@
 //! Mixing two capture sources into the one PCM stream clips carry.
 
+use std::sync::mpsc::Receiver;
 use std::sync::{
     Arc,
     atomic::{AtomicU32, Ordering},
 };
-use std::sync::mpsc::Receiver;
 
 use anyhow::Result;
 
@@ -131,6 +131,9 @@ pub struct AudioMixer {
     mic: Option<Source>,
     gains: Arc<AudioGains>,
     frames_emitted: u64,
+    /// Reused across every `pump` so steady-state mixing allocates nothing:
+    /// cleared, not dropped, at the start of each call.
+    mixed: Vec<u8>,
 }
 
 impl AudioMixer {
@@ -151,7 +154,7 @@ impl AudioMixer {
             .flatten();
         let mic =
             (gains.mic_percent() > 0).then(|| Self::open(AudioSourceKind::Microphone)).flatten();
-        Self { system, mic, gains, frames_emitted: 0 }
+        Self { system, mic, gains, frames_emitted: 0, mixed: Vec::new() }
     }
 
     fn open(kind: AudioSourceKind) -> Option<Source> {
@@ -193,6 +196,7 @@ impl AudioMixer {
             mic: mic.map(|rx| build(AudioSourceKind::Microphone, rx)),
             gains,
             frames_emitted: 0,
+            mixed: Vec::new(),
         }
     }
 
@@ -221,10 +225,16 @@ impl AudioMixer {
         self.frames_emitted
     }
 
-    /// Frames for which *every* open source emitted synthesized silence.
+    /// The lesser of the two sources' own running silence-fill totals.
     ///
-    /// The minimum rather than the sum: a frame the microphone filled with
-    /// silence while the game was loud is not a silent frame in the mix.
+    /// This is an upper bound on "frames where every open source was
+    /// silence-filled," not that count itself: the two totals are
+    /// independent running sums, not a per-frame intersection. A system
+    /// silent for frames 0–100 and a mic silent for frames 200–300 would
+    /// make this return 100 even though no single frame was silent on both.
+    /// Precision is not needed — this only feeds a human-readable summary
+    /// line — so the cheap `min` stands rather than tracking the true
+    /// intersection.
     pub fn silence_frames_emitted(&self) -> u64 {
         [self.system.as_ref(), self.mic.as_ref()]
             .into_iter()
@@ -245,45 +255,59 @@ impl AudioMixer {
     }
 
     /// Emits gapless consecutive mixed chunks as `(start_frame, pcm)`.
+    ///
+    /// Reuses `self.mixed` rather than allocating a fresh buffer every call:
+    /// `bytes` is computed and drained within the same match arm as the
+    /// buffer it bounds, so a drain can never be asked to remove more than
+    /// that buffer holds — there is no second match to fall out of sync with.
     pub fn pump(&mut self, target_qpc: i64, sink: &mut impl FnMut(u64, &[u8])) {
         Self::stage(self.system.as_mut(), target_qpc);
         Self::stage(self.mic.as_mut(), target_qpc);
 
+        self.mixed.clear();
         // Only the span both sources have supplied can be mixed. Holding the
         // excess back costs one pump of latency; emitting it would put audio
         // on the timeline that can never be corrected.
-        let available = match (&self.system, &self.mic) {
-            (Some(system), Some(mic)) => system.staged.len().min(mic.staged.len()),
-            (Some(only), None) | (None, Some(only)) => only.staged.len(),
-            (None, None) => return,
-        };
-        let bytes = available - (available % ENCODER_BLOCK_ALIGN);
-        if bytes == 0 {
-            return;
-        }
-
-        let mixed = match (&mut self.system, &mut self.mic) {
+        let bytes = match (&mut self.system, &mut self.mic) {
             (Some(system), Some(mic)) => {
-                let mut base: Vec<u8> = system.staged.drain(..bytes).collect();
-                apply_gain(&mut base, self.gains.system());
-                let overlay: Vec<u8> = mic.staged.drain(..bytes).collect();
-                mix_into(&mut base, &overlay, self.gains.mic());
-                base
+                let available = system.staged.len().min(mic.staged.len());
+                let bytes = available - (available % ENCODER_BLOCK_ALIGN);
+                if bytes == 0 {
+                    return;
+                }
+                self.mixed.extend_from_slice(&system.staged[..bytes]);
+                apply_gain(&mut self.mixed, self.gains.system());
+                mix_into(&mut self.mixed, &mic.staged[..bytes], self.gains.mic());
+                system.staged.drain(..bytes);
+                mic.staged.drain(..bytes);
+                bytes
             }
             (Some(system), None) => {
-                let mut base: Vec<u8> = system.staged.drain(..bytes).collect();
-                apply_gain(&mut base, self.gains.system());
-                base
+                let available = system.staged.len();
+                let bytes = available - (available % ENCODER_BLOCK_ALIGN);
+                if bytes == 0 {
+                    return;
+                }
+                self.mixed.extend_from_slice(&system.staged[..bytes]);
+                apply_gain(&mut self.mixed, self.gains.system());
+                system.staged.drain(..bytes);
+                bytes
             }
             (None, Some(mic)) => {
-                let mut base: Vec<u8> = mic.staged.drain(..bytes).collect();
-                apply_gain(&mut base, self.gains.mic());
-                base
+                let available = mic.staged.len();
+                let bytes = available - (available % ENCODER_BLOCK_ALIGN);
+                if bytes == 0 {
+                    return;
+                }
+                self.mixed.extend_from_slice(&mic.staged[..bytes]);
+                apply_gain(&mut self.mixed, self.gains.mic());
+                mic.staged.drain(..bytes);
+                bytes
             }
             (None, None) => return,
         };
 
-        sink(self.frames_emitted, &mixed);
+        sink(self.frames_emitted, &self.mixed);
         self.frames_emitted += (bytes / ENCODER_BLOCK_ALIGN) as u64;
     }
 
@@ -316,6 +340,16 @@ impl AudioMixer {
             }
         }
         outcome
+    }
+}
+
+impl Drop for AudioMixer {
+    /// A mixer dropped without `stop()` must still stop its capture threads.
+    /// Without this, a source whose device is silent never notices its
+    /// receiver is gone (it only checks on the next packet it sends), so the
+    /// thread and its WASAPI stream outlive the session that opened them.
+    fn drop(&mut self) {
+        let _ = self.stop();
     }
 }
 
@@ -488,7 +522,8 @@ mod tests {
     fn two_sources_are_summed_frame_aligned() {
         let (_a, system) = source(1000, 480);
         let (_b, mic) = source(500, 480);
-        let mut mixer = AudioMixer::with_sources(Some(system), Some(mic), AudioGains::new(100, 100));
+        let mut mixer =
+            AudioMixer::with_sources(Some(system), Some(mic), AudioGains::new(100, 100));
         mixer.start(0);
         let emitted = drain(&mut mixer, frames_to_100ns(480));
         assert_eq!(emitted.len(), 1);
@@ -515,12 +550,63 @@ mod tests {
         // rather than emit misaligned audio it can never take back.
         let (_a, system) = source(1000, 480);
         let (_b, mic) = source(500, 240);
-        let mut mixer = AudioMixer::with_sources(Some(system), Some(mic), AudioGains::new(100, 100));
+        let mut mixer =
+            AudioMixer::with_sources(Some(system), Some(mic), AudioGains::new(100, 100));
         mixer.start(0);
         // Pump to exactly the shorter source's extent: no silence fill yet.
         let emitted = drain(&mut mixer, frames_to_100ns(240));
-        let frames: usize = emitted.iter().map(|(_, s)| s.len()).sum::<usize>() / (ENCODER_BLOCK_ALIGN / 2);
+        let frames: usize =
+            emitted.iter().map(|(_, s)| s.len()).sum::<usize>() / (ENCODER_BLOCK_ALIGN / 2);
         assert_eq!(frames, 240, "emitted past the shorter source");
+
+        // "...and the rest waits": the withheld 240 frames of real system
+        // audio must still be pending, not discarded. Pumping further lets
+        // the mic silence-fill and brings the retained audio back out.
+        let more = drain(&mut mixer, frames_to_100ns(480));
+        let more_frames: usize =
+            more.iter().map(|(_, s)| s.len()).sum::<usize>() / (ENCODER_BLOCK_ALIGN / 2);
+        assert_eq!(more_frames, 240, "the held-back audio was discarded rather than retained");
+        assert!(more[0].1.iter().all(|&s| s == 1000), "the retained system audio was corrupted");
+    }
+
+    #[test]
+    fn held_back_audio_emerges_intact_on_a_later_pump() {
+        // The alignment guard only earns its keep if what it withholds comes
+        // back out correctly: right prefix first, then the retained
+        // remainder, in order, at the right start frame, with nothing
+        // duplicated or dropped in between.
+        let (_a, system) = source(1000, 480);
+        let (_b, mic) = source(500, 240);
+        let mut mixer =
+            AudioMixer::with_sources(Some(system), Some(mic), AudioGains::new(100, 100));
+        mixer.start(0);
+
+        // First pump: bounded by the shorter mic source, so only the common
+        // 240-frame prefix — mixed — can be emitted.
+        let first = drain(&mut mixer, frames_to_100ns(240));
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].0, 0, "the first chunk starts at frame 0");
+        assert_eq!(first[0].1.len(), 240 * ENCODER_BLOCK_ALIGN / 2, "emitted past the prefix");
+        assert!(first[0].1.iter().all(|&s| s == 1500), "the common prefix was not mixed");
+
+        // Second pump, further out: the mic silence-fills its remaining 240
+        // frames, and the 240 frames of real system audio held back by the
+        // first pump must now emerge — starting exactly where the first
+        // chunk ended, with no gap and no repeat.
+        let second = drain(&mut mixer, frames_to_100ns(480));
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].0, 240, "the retained audio did not continue from the first chunk");
+        assert_eq!(
+            second[0].1.len(),
+            240 * ENCODER_BLOCK_ALIGN / 2,
+            "the retained system audio was not emitted whole"
+        );
+        assert!(
+            second[0].1.iter().all(|&s| s == 1000),
+            "the retained audio was corrupted or mixed against stale mic data"
+        );
+
+        assert_eq!(mixer.frames_emitted(), 480, "frames were duplicated or dropped across pumps");
     }
 
     #[test]
