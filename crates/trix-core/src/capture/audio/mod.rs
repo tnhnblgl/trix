@@ -2,9 +2,11 @@
 
 mod source;
 mod timeline;
+mod mixer;
 
 pub use source::{LoopbackCapture, record_wav};
 pub use timeline::AudioTimeline;
+pub use mixer::{AudioGains, apply_gain, mix_into, percent_to_gain};
 
 pub const SAMPLE_RATE: usize = 48_000;
 pub const CHANNELS: usize = 2;
