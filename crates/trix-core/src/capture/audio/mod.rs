@@ -1,12 +1,12 @@
 //! System-audio and microphone capture.
 
+mod mixer;
 mod source;
 mod timeline;
-mod mixer;
 
+pub use mixer::{AudioGains, AudioMixer, apply_gain, mix_into, percent_to_gain};
 pub use source::{AudioCapture, AudioSourceKind, record_wav};
 pub use timeline::AudioTimeline;
-pub use mixer::{AudioGains, AudioMixer, apply_gain, mix_into, percent_to_gain};
 
 pub const SAMPLE_RATE: usize = 48_000;
 pub const CHANNELS: usize = 2;
