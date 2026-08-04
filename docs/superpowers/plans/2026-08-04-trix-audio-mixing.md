@@ -26,7 +26,7 @@
 - **PCM format everywhere:** interleaved 16-bit signed little-endian stereo at 48 kHz. `ENCODER_BLOCK_ALIGN` (4) bytes per frame, 2 bytes per sample.
 - **Verification commands** (run from the repo root unless stated):
   - `cargo test --workspace` — 149 tests pass at v0.3.0
-  - `cargo clippy --workspace --all-targets` — 12 warnings at v0.3.0, all pre-existing
+  - `cargo clippy --workspace --all-targets` — `grep -c "^warning"` reports **16** at v0.3.0: 12 real warnings plus 4 per-crate summary lines. All pre-existing.
   - `cargo fmt --all --check`
   - `npm test` and `npm run check` from `crates/trix-ui/web` — 48 frontend tests, `svelte-check` 0 errors
 
@@ -205,7 +205,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets 2>&1 | grep -c "^warning"
 ```
 
-Expected: the same pass count as Step 1, `fmt` clean, and no *new* clippy warnings (12 pre-existing).
+Expected: the same pass count as Step 1, `fmt` clean, and a clippy count of 16 (12 real warnings plus 4 per-crate summary lines, all pre-existing).
 
 - [ ] **Step 7: Commit**
 
@@ -495,7 +495,7 @@ impl AudioGains {
 cargo test -p trix-core mixer 2>&1 | tail -20
 ```
 
-Expected: 13 tests pass.
+Expected: 14 tests pass.
 
 - [ ] **Step 5: Mutation-check the clamp**
 
@@ -1099,7 +1099,7 @@ pub use mixer::{AudioGains, AudioMixer, apply_gain, mix_into, percent_to_gain};
 cargo test -p trix-core mixer 2>&1 | tail -20
 ```
 
-Expected: 20 tests pass (13 from Task 2, 7 new).
+Expected: 21 tests pass (14 from Task 2, 7 new).
 
 - [ ] **Step 6: Mutation-check the alignment guard**
 
@@ -1324,6 +1324,25 @@ and pass it into the thread:
 
 Add `use crate::capture::audio::AudioGains;` to its imports. Update the three test call sites in `engine.rs` (lines ~174, ~201) and `crates/trix-core/tests/handle_leak.rs` (line ~86) to pass `AudioGains::new(100, 100)`.
 
+**`handle_leak.rs` also uses the renamed capture type directly** — it is a third consumer, alongside `replay.rs` and `record.rs`, and it is what stops `cargo test -p trix-core` building *any* test binary until it is fixed. Change its import (line ~15):
+
+```rust
+use trix_core::{
+    capture::audio::{AudioCapture, AudioSourceKind},
+    config::Config,
+    engine::EngineHandle,
+};
+```
+
+and its one call site inside `audio_only_cycles` (line ~49):
+
+```rust
+        let (capture, rx) =
+            AudioCapture::start(AudioSourceKind::SystemAudio).expect("loopback start");
+```
+
+The surrounding test — the sleep, the `capture.stop()`, and the deliberate `drop(rx)` *after* the stop — is unchanged. That ordering is load-bearing (dropping the receiver first makes the capture thread return early on a send error, exercising a different teardown path than a real arm/disarm), so do not tidy it.
+
 In `crates/trix-core/tests/public_api.rs`, update the pinned signature:
 
 ```rust
@@ -1344,7 +1363,15 @@ cargo test --workspace 2>&1 | tail -5
 cargo fmt --all --check
 ```
 
-Expected: the workspace compiles and the suite passes with the same count as before plus the 20 mixer/source tests.
+Expected: the workspace compiles and the suite passes with the same count as before plus the mixer and source tests.
+
+**Run the two source tests explicitly and report their output:**
+
+```bash
+cargo test -p trix-core source 2>&1 | tail -10
+```
+
+Task 3 added `each_source_kind_names_itself_for_the_log` and `the_two_source_kinds_read_different_devices`, but could not run them against its own committed tree — `handle_leak.rs` failed to build, and cargo runs no test binary when any target fails to compile. This is the first point at which those two tests execute against committed code. If either fails, that is a Task 3 defect surfacing late, not a Task 5 defect: report it rather than patching `source.rs` here.
 
 - [ ] **Step 9: Commit**
 
@@ -1720,7 +1747,7 @@ cargo clippy --workspace --all-targets 2>&1 | grep -c "^warning"
 cargo fmt --all --check
 ```
 
-Expected: suite passes, no new clippy warnings beyond the 12 pre-existing, `fmt` clean.
+Expected: suite passes, clippy count still 16, `fmt` clean.
 
 - [ ] **Step 9: Commit**
 
@@ -1918,7 +1945,7 @@ cargo clippy --workspace --all-targets 2>&1 | grep -c "^warning"
 cargo fmt --all --check
 ```
 
-Expected: all tests pass; clippy at 12 warnings (the pre-existing count) with none in the new code; `fmt` clean.
+Expected: all tests pass; clippy count still 16 (12 real warnings plus 4 summary lines, all pre-existing) with none in the new code; `fmt` clean.
 
 ```bash
 cd crates/trix-ui/web && npm test 2>&1 | tail -5 && npm run check 2>&1 | tail -5 && cd ../../..
