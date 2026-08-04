@@ -24,8 +24,37 @@ use wasapi::{
 
 use super::{AudioPacket, CHANNELS, SAMPLE_RATE};
 
+/// Which device a capture session reads.
+///
+/// Both are shared-mode *capture* clients — the difference is only which
+/// default device is enumerated. Initializing a capture client against a
+/// **render** device is what makes it a loopback stream; against a **capture**
+/// device it is an ordinary microphone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioSourceKind {
+    SystemAudio,
+    Microphone,
+}
+
+impl AudioSourceKind {
+    fn direction(self) -> Direction {
+        match self {
+            Self::SystemAudio => Direction::Render,
+            Self::Microphone => Direction::Capture,
+        }
+    }
+
+    /// User-facing name, used in the warning shown when a source is missing.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SystemAudio => "system audio",
+            Self::Microphone => "microphone",
+        }
+    }
+}
+
 /// An event-driven shared-mode loopback session on the default render device.
-struct LoopbackSession {
+struct WasapiSession {
     client: AudioClient,
     event: Handle,
     capture: AudioCaptureClient,
@@ -33,12 +62,12 @@ struct LoopbackSession {
     scratch: Vec<u8>,
 }
 
-impl LoopbackSession {
-    fn open(format: &WaveFormat) -> Result<Self> {
+impl WasapiSession {
+    fn open(kind: AudioSourceKind, format: &WaveFormat) -> Result<Self> {
         let enumerator = DeviceEnumerator::new().map_err(|e| anyhow!("device enumerator: {e}"))?;
         let device = enumerator
-            .get_default_device(&Direction::Render)
-            .map_err(|e| anyhow!("no default render device: {e}"))?;
+            .get_default_device(&kind.direction())
+            .map_err(|e| anyhow!("no default {} device: {e}", kind.label()))?;
         let mut client = device.get_iaudioclient().map_err(|e| anyhow!("audio client: {e}"))?;
         client
             .initialize_client(
@@ -58,20 +87,23 @@ impl LoopbackSession {
     }
 }
 
-/// Background system-audio capture thread feeding [`AudioPacket`]s to a channel.
-pub struct LoopbackCapture {
+/// Background capture thread feeding [`AudioPacket`]s to a channel.
+pub struct AudioCapture {
     stop: Arc<AtomicBool>,
     thread: std::thread::JoinHandle<Result<()>>,
 }
 
-impl LoopbackCapture {
-    pub fn start() -> Result<(Self, Receiver<AudioPacket>)> {
+impl AudioCapture {
+    pub fn start(kind: AudioSourceKind) -> Result<(Self, Receiver<AudioPacket>)> {
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = std::sync::mpsc::channel();
         let stop_flag = stop.clone();
         let thread = std::thread::Builder::new()
-            .name("trix-audio".into())
-            .spawn(move || capture_loop(&stop_flag, &tx))
+            .name(match kind {
+                AudioSourceKind::SystemAudio => "trix-audio".into(),
+                AudioSourceKind::Microphone => "trix-mic".into(),
+            })
+            .spawn(move || capture_loop(kind, &stop_flag, &tx))
             .context("failed to spawn audio thread")?;
         Ok((Self { stop, thread }, rx))
     }
@@ -85,12 +117,12 @@ impl LoopbackCapture {
     }
 }
 
-fn capture_loop(stop: &AtomicBool, tx: &Sender<AudioPacket>) -> Result<()> {
+fn capture_loop(kind: AudioSourceKind, stop: &AtomicBool, tx: &Sender<AudioPacket>) -> Result<()> {
     wasapi::initialize_mta().ok().context("COM MTA init failed")?;
-    // i16 directly: the audio engine autoconverts its float mix, so the
-    // packets are already in the encoder's PCM format.
+    // i16 directly: the audio engine autoconverts its float mix (and a mono
+    // or 44.1 kHz microphone), so packets are already in the encoder's format.
     let format = WaveFormat::new(16, 16, &SampleType::Int, SAMPLE_RATE, CHANNELS, None);
-    let mut session = LoopbackSession::open(&format)?;
+    let mut session = WasapiSession::open(kind, &format)?;
     session.client.start_stream().map_err(|e| anyhow!("start stream: {e}"))?;
 
     while !stop.load(Ordering::Relaxed) {
@@ -130,7 +162,7 @@ pub fn record_wav(seconds: u64, path: &Path) -> Result<()> {
     // f32 stereo 48 kHz with autoconvert: the engine resamples whatever the
     // device mix format is, so downstream code sees exactly one format.
     let format = WaveFormat::new(32, 32, &SampleType::Float, SAMPLE_RATE, CHANNELS, None);
-    let mut session = LoopbackSession::open(&format)?;
+    let mut session = WasapiSession::open(AudioSourceKind::SystemAudio, &format)?;
     let block_align = session.block_align;
     let mut pcm: Vec<u8> = Vec::with_capacity(SAMPLE_RATE * block_align * seconds as usize);
 
@@ -234,4 +266,30 @@ fn write_wav_f32(path: &Path, pcm: &[u8]) -> Result<()> {
     file.write_all(pcm)?;
     file.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_source_kind_names_itself_for_the_log() {
+        // These strings reach the user in a warning when a source cannot be
+        // opened ("microphone unavailable, …"), so they are user-facing copy,
+        // not debug output.
+        assert_eq!(AudioSourceKind::SystemAudio.label(), "system audio");
+        assert_eq!(AudioSourceKind::Microphone.label(), "microphone");
+    }
+
+    #[test]
+    fn the_two_source_kinds_read_different_devices() {
+        // The whole difference between recording the speakers and recording
+        // the microphone is which default device is enumerated. If these ever
+        // matched, Trix would silently record system audio twice.
+        //
+        // `matches!` rather than `assert_ne!`: `wasapi::Direction` is a
+        // third-party enum and is not guaranteed to implement `PartialEq`.
+        assert!(matches!(AudioSourceKind::SystemAudio.direction(), Direction::Render));
+        assert!(matches!(AudioSourceKind::Microphone.direction(), Direction::Capture));
+    }
 }
