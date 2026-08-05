@@ -490,6 +490,32 @@ mod tests {
         (tx, rx)
     }
 
+    /// A source channel pre-loaded with two consecutive packets, each holding
+    /// a distinct value — unlike [`source`], whose one repeated value cannot
+    /// tell "the retained remainder" apart from "the already-drained prefix,
+    /// re-emitted": both look identical when every sample is the same number.
+    /// The second packet's QPC stamp continues seamlessly from the first
+    /// (`frames_to_100ns(first_frames)`), so the timeline treats them as one
+    /// gapless stream rather than splicing in silence between them.
+    fn two_value_source(
+        first_value: i16,
+        first_frames: usize,
+        second_value: i16,
+        second_frames: usize,
+    ) -> (Sender<AudioPacket>, Receiver<AudioPacket>) {
+        let (tx, rx) = channel();
+        let first_samples = vec![first_value; first_frames * ENCODER_BLOCK_ALIGN / 2];
+        tx.send(AudioPacket { qpc_100ns: 0, data: pcm(&first_samples) })
+            .expect("receiver is alive");
+        let second_samples = vec![second_value; second_frames * ENCODER_BLOCK_ALIGN / 2];
+        tx.send(AudioPacket {
+            qpc_100ns: frames_to_100ns(first_frames as u64),
+            data: pcm(&second_samples),
+        })
+        .expect("receiver is alive");
+        (tx, rx)
+    }
+
     /// Collects everything a mixer emits in one pump into (start_frame, samples).
     fn drain(mixer: &mut AudioMixer, target_qpc: i64) -> Vec<(u64, Vec<i16>)> {
         let mut out = Vec::new();
@@ -575,7 +601,14 @@ mod tests {
         // back out correctly: right prefix first, then the retained
         // remainder, in order, at the right start frame, with nothing
         // duplicated or dropped in between.
-        let (_a, system) = source(1000, 480);
+        //
+        // The system source carries two distinct values — 1000 for its first
+        // 240 frames, 2000 for its second — rather than one repeated value.
+        // A single repeated value cannot distinguish "emitted the retained
+        // remainder" from "re-emitted a prefix that was never drained": both
+        // read back identically. Two different values make the second pump's
+        // assertion below load-bearing rather than coincidentally true.
+        let (_a, system) = two_value_source(1000, 240, 2000, 240);
         let (_b, mic) = source(500, 240);
         let mut mixer =
             AudioMixer::with_sources(Some(system), Some(mic), AudioGains::new(100, 100));
@@ -602,7 +635,7 @@ mod tests {
             "the retained system audio was not emitted whole"
         );
         assert!(
-            second[0].1.iter().all(|&s| s == 1000),
+            second[0].1.iter().all(|&s| s == 2000),
             "the retained audio was corrupted or mixed against stale mic data"
         );
 
