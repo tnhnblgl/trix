@@ -149,12 +149,25 @@ impl AudioMixer {
     /// device held exclusively, driver refusal — is logged and omitted, so
     /// audio can never be the reason an arm fails.
     pub fn start_sources(gains: Arc<AudioGains>) -> Self {
-        let system = (gains.system_percent() > 0)
+        let system = Self::should_open(gains.system_percent())
             .then(|| Self::open(AudioSourceKind::SystemAudio))
             .flatten();
-        let mic =
-            (gains.mic_percent() > 0).then(|| Self::open(AudioSourceKind::Microphone)).flatten();
+        let mic = Self::should_open(gains.mic_percent())
+            .then(|| Self::open(AudioSourceKind::Microphone))
+            .flatten();
         Self { system, mic, gains, frames_emitted: 0, mixed: Vec::new() }
+    }
+
+    /// Whether a source at this level should be opened at all.
+    ///
+    /// Pulled out of `start_sources` so it can be exercised without a real
+    /// device: `Self::open` touches WASAPI, which makes everything downstream
+    /// of it unreachable from a unit test, and this is the branch that keeps
+    /// the Windows microphone indicator dark at 0 — arguably the single most
+    /// product-critical line in the whole mixer. `start_sources` must call
+    /// `Self::open` if and only if this returns `true`.
+    const fn should_open(percent: u32) -> bool {
+        percent > 0
     }
 
     fn open(kind: AudioSourceKind) -> Option<Source> {
@@ -711,6 +724,20 @@ mod tests {
             second[0].1.iter().all(|&s| s == 2000),
             "the second pump re-emitted the un-drained first packet instead of the second"
         );
+    }
+
+    #[test]
+    fn zero_percent_never_opens_the_stream() {
+        // The one behaviour that keeps the Windows microphone indicator dark
+        // at level 0. `start_sources` itself needs real hardware and cannot
+        // be unit tested, so this is the whole of that decision, isolated.
+        assert!(!AudioMixer::should_open(0));
+    }
+
+    #[test]
+    fn any_nonzero_percent_opens_the_stream() {
+        assert!(AudioMixer::should_open(1), "1% must still open the stream");
+        assert!(AudioMixer::should_open(100));
     }
 
     #[test]
