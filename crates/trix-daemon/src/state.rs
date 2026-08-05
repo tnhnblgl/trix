@@ -205,6 +205,33 @@ pub(crate) const REQUIRES_REARM: [&str; 7] = [
     "gpu_priority",
 ];
 
+/// The two capture levels, which follow a different re-arm rule from every
+/// other key.
+const VOLUME_KEYS: [&str; 2] = ["system_volume", "mic_volume"];
+
+/// True when a level moved onto or off zero.
+///
+/// Levels apply live: the capture session reads them from a shared cell every
+/// pump, so `40 → 70` is audible in the next clip with no re-arm. The
+/// exception is zero, which is not a quiet level but a closed capture stream —
+/// and streams only open at arm time. Reporting those two transitions, and
+/// only those, is what lets the settings page prompt exactly when a prompt
+/// changes the outcome.
+///
+/// A non-numeric value on either side is not a crossing: it is a type error,
+/// and `set_config`'s per-key retry produces a far better message for it.
+fn crosses_zero(key: &str, before: Option<&Value>, after: Option<&Value>) -> bool {
+    if !VOLUME_KEYS.contains(&key) {
+        return false;
+    }
+    let (Some(before), Some(after)) =
+        (before.and_then(Value::as_u64), after.and_then(Value::as_u64))
+    else {
+        return false;
+    };
+    (before == 0) != (after == 0)
+}
+
 /// The accepted range of every numeric config key, as `(key, min, max)`.
 ///
 /// Sanity bounds, not a product policy. Their job is to reject the absurd —
@@ -304,6 +331,11 @@ const DEFAULT_STATS_SECONDS: u32 = 1;
 
 /// What `config.set` did (spec §4.3: "accepted values + which keys require a
 /// re-arm to take effect").
+///
+/// `Debug`-derived so the brief's tests can call `expect_err` on a
+/// `Result<ConfigUpdate>` — `expect_err` needs the `Ok` side printable for the
+/// panic message it never actually reaches on a passing test.
+#[derive(Debug)]
 pub(crate) struct ConfigUpdate {
     /// The keys that were applied, with the values as they now stand — read
     /// back out of the saved config rather than echoed from the request, so a
@@ -335,6 +367,15 @@ pub struct Daemon {
     /// The library, scanned once at startup and updated incrementally.
     /// `library.list` never touches the disk after that (spec §5.2).
     pub library: Mutex<Vec<ClipMeta>>,
+    /// The capture levels, owned for the daemon's whole lifetime and cloned
+    /// into each armed session.
+    ///
+    /// One instance, not one per arm: `config.set` has to be able to apply a
+    /// level whether or not anything is armed, and building a fresh one per
+    /// arm would mean it had to find whichever instance the live session
+    /// happened to hold — the arrangement where a level change silently lands
+    /// on an object nobody is reading.
+    pub(crate) gains: Arc<AudioGains>,
 }
 
 // Lock ordering, and the one rule that matters: `armed` is never held while
@@ -430,12 +471,14 @@ impl Daemon {
                 Vec::new()
             }
         };
+        let gains = AudioGains::new(config.system_volume, config.mic_volume);
         Self {
             config: Mutex::new(config),
             config_path,
             clients: Arc::new(Clients::default()),
             armed: Mutex::new(None),
             library: Mutex::new(library),
+            gains,
         }
     }
 
@@ -482,9 +525,7 @@ impl Daemon {
         // have. On the `?`, `slot` drops and the single-instance mutex is
         // released before the error goes back — a failed arm must not leave the
         // CLI locked out.
-        // Task 6 replaces this placeholder with the daemon's own shared
-        // `AudioGains` instance built from config.
-        let engine = EngineHandle::spawn(config, AudioGains::new(100, 100))?;
+        let engine = EngineHandle::spawn(config, Arc::clone(&self.gains))?;
         *armed = Some(Armed { engine, _slot: slot });
         // Here rather than in the tray's own handler: `arm` is reached from the
         // tray menu, the control socket, and the desktop UI in stage 4, and an
@@ -822,11 +863,18 @@ impl Daemon {
             if let Some(value) = after.get(key) {
                 accepted.insert(key.clone(), value.clone());
             }
-            if REQUIRES_REARM.contains(&key.as_str()) {
+            if REQUIRES_REARM.contains(&key.as_str())
+                || crosses_zero(key, base.get(key), after.get(key))
+            {
                 requires_rearm.push(key.clone());
             }
         }
         *config = updated;
+
+        // After the write, like the hotkey rebind below and for the same
+        // reason: a live session capturing at a level the user was told had
+        // failed to save is exactly what this ordering prevents.
+        self.gains.set(config.system_volume, config.mic_volume);
 
         // After the write, not before: a rebind that beat a failed write would
         // leave the running hotkey and the saved hotkey disagreeing, and
@@ -1189,7 +1237,7 @@ impl Daemon {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::*;
 
@@ -1244,6 +1292,31 @@ mod tests {
     fn idle(name: &str, config: Config) -> Daemon {
         let dir = std::env::temp_dir().join(format!("trix-idle-{name}-{}", std::process::id()));
         Daemon::new_at(Config { clip_dir: dir.to_string_lossy().into_owned(), ..config }, None)
+    }
+
+    /// A daemon whose `config.set` really writes, to a scratch file the test
+    /// owns.
+    ///
+    /// Both halves of the isolation are required, and a scratch `%APPDATA%`
+    /// would supply neither: `Daemon::new_at` takes the config path directly,
+    /// and `clip_dir` is a key *inside* that config whose empty default
+    /// resolves to the developer's real `%USERPROFILE%\Videos\Trix` no matter
+    /// what `%APPDATA%` says. A test that writes a config must own both or it
+    /// is editing the settings of whoever ran `cargo test`.
+    fn writable(name: &str) -> (Daemon, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("trix-vol-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch directory");
+        let config = Config {
+            clip_dir: dir.join("clips").to_string_lossy().into_owned(),
+            ..Config::default()
+        };
+        (Daemon::new_at(config, Some(dir.join("config.toml"))), dir)
+    }
+
+    /// Removes a `writable` scratch directory. Best-effort: a leaked temp
+    /// directory is not worth failing a passing test over.
+    fn cleanup(dir: &Path) {
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// `config.get` must report the registry, not the file (spec §7.3).
@@ -1675,5 +1748,76 @@ mod tests {
             Some("20260803_120000"),
             "the event carries the ClipMeta the grid prepends"
         );
+    }
+
+    /// One `config.set` call carrying a single key.
+    fn one(key: &str, value: u64) -> Map<String, Value> {
+        let mut values = Map::new();
+        values.insert(key.into(), Value::from(value));
+        values
+    }
+
+    #[test]
+    fn a_level_within_the_range_is_accepted() {
+        let (daemon, dir) = writable("accepted");
+        let update = daemon.set_config(&one("mic_volume", 40)).expect("40 is in range");
+        assert_eq!(update.accepted.get("mic_volume"), Some(&Value::from(40)));
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn a_level_above_the_range_is_refused() {
+        let (daemon, dir) = writable("refused");
+        let error = daemon.set_config(&one("mic_volume", 101)).expect_err("101 is out of range");
+        assert!(format!("{error}").contains("0 to 100"), "unexpected message: {error}");
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn changing_a_level_within_the_range_needs_no_rearm() {
+        // Re-arming destroys the replay ring. A volume slider that costs the
+        // user their last fifteen seconds on every nudge is a broken slider.
+        let (daemon, dir) = writable("no-rearm");
+        let update = daemon.set_config(&one("mic_volume", 60)).expect("60 is in range");
+        assert!(update.requires_rearm.is_empty(), "a mid-range nudge asked for a re-arm");
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn muting_a_source_needs_a_rearm() {
+        // 0 closes a real capture stream, which only happens at arm time.
+        let (daemon, dir) = writable("mute");
+        let update = daemon.set_config(&one("mic_volume", 0)).expect("0 is in range");
+        assert_eq!(update.requires_rearm, vec!["mic_volume".to_string()]);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn unmuting_a_source_needs_a_rearm() {
+        let (daemon, dir) = writable("unmute");
+        daemon.set_config(&one("system_volume", 0)).expect("0 is in range");
+        let update = daemon.set_config(&one("system_volume", 80)).expect("80 is in range");
+        assert_eq!(update.requires_rearm, vec!["system_volume".to_string()]);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn an_accepted_level_reaches_the_shared_gains() {
+        // Without this the slider would move, the file would save, and
+        // nothing the capture session reads would change.
+        let (daemon, dir) = writable("applied");
+        daemon.set_config(&one("mic_volume", 25)).expect("25 is in range");
+        assert_eq!(daemon.gains.mic_percent(), 25);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn a_refused_change_leaves_the_shared_gains_alone() {
+        // config.set is all-or-nothing: a rejected request must not have
+        // applied a level the caller was told did not land.
+        let (daemon, dir) = writable("refused-gains");
+        daemon.set_config(&one("mic_volume", 999)).expect_err("999 is out of range");
+        assert_eq!(daemon.gains.mic_percent(), 100);
+        cleanup(&dir);
     }
 }
