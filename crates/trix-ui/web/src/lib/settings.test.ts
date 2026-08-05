@@ -6,10 +6,29 @@ describe('FIELDS', () => {
     const shipped = [
       'fps', 'bitrate_kbps', 'max_bitrate_kbps', 'rate_control', 'replay_seconds',
       'monitor_index', 'clip_hotkey', 'gpu_priority', 'stats_seconds', 'clip_dir',
-      'max_library_gb', 'autostart',
+      'max_library_gb', 'autostart', 'system_volume', 'mic_volume',
     ];
     const covered = FIELDS.map((f) => f.key);
     for (const key of shipped) expect(covered).toContain(key);
+  });
+
+  it('renders both levels as sliders in the Audio section', () => {
+    for (const key of ['system_volume', 'mic_volume']) {
+      const field = FIELDS.find((f) => f.key === key);
+      expect(field, `${key} has no field`).toBeDefined();
+      expect(field?.kind).toBe('slider');
+      expect(field?.section).toBe('Audio');
+    }
+  });
+
+  it('bounds both levels at 0 to 100, mirroring the daemon', () => {
+    // 100 is unity and the maximum. A page that let someone ask for 150
+    // would produce a round trip that fails for a reason the field cannot
+    // explain.
+    expect(validate('mic_volume', 101)).toMatch(/0 to 100/);
+    expect(validate('system_volume', 101)).toMatch(/0 to 100/);
+    expect(validate('mic_volume', 0)).toBeNull();
+    expect(validate('system_volume', 100)).toBeNull();
   });
 });
 

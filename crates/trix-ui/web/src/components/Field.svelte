@@ -5,15 +5,15 @@
   /**
    * One row of the settings page: a label, the control for `field.kind`, and
    * its help text. Pulled out of `Settings.svelte` because the control chain
-   * is a six-branch `{#if}` on `field.kind` (and, for `select`, its
+   * is a seven-branch `{#if}` on `field.kind` (and, for `select`, its
    * `dynamic`) nested inside two `{#each}` blocks -- that reads far better as
    * its own component than inline.
    *
-   * Owns no state of its own. `capture`/`listening`/`heard` live in
-   * `Settings.svelte` because the daemon's `hotkey_pressed`/`hotkey_rebound`
-   * events (wired up there, not here) write to them directly; this component
-   * only renders what they say and reports user actions back up through the
-   * `on*` callbacks.
+   * Owns one piece of state, `dragging`, documented below. `capture`/
+   * `listening`/`heard` live in `Settings.svelte` because the daemon's
+   * `hotkey_pressed`/`hotkey_rebound` events (wired up there, not here) write
+   * to them directly; this component only renders what they say and reports
+   * user actions back up through the `on*` callbacks.
    */
   let {
     field,
@@ -38,6 +38,27 @@
     onsavehotkey: () => void;
     ontogglelisten: () => void;
   } = $props();
+
+  /**
+   * The value under the user's thumb, shown while dragging.
+   *
+   * The one piece of state this component owns, and it is display-only: the
+   * daemon is told on `change` (thumb released), not on `input`, so a drag
+   * across the track is one round trip rather than eighty. Without it the
+   * percentage beside the slider would sit at the old value for the whole
+   * drag, which reads as a broken control.
+   */
+  let dragging = $state<number | null>(null);
+  const shown = $derived(dragging ?? Number(config[field.key] ?? 0));
+
+  // Clear the drag override whenever the authoritative value lands -- whether
+  // that is the daemon accepting the change or the parent reloading the config
+  // after refusing it. Without this a refused change would leave the slider
+  // showing a value the daemon rejected.
+  $effect(() => {
+    void config[field.key];
+    dragging = null;
+  });
 </script>
 
 <div class="row">
@@ -66,6 +87,12 @@
       <input id={field.key} type="number" min={field.min} max={field.max}
         value={Number(config[field.key] ?? 0)}
         onchange={(e) => onset(field.key, Number(e.currentTarget.value))} />
+    {:else if field.kind === 'slider'}
+      <input id={field.key} type="range" min={field.min} max={field.max} step="1"
+        value={shown}
+        oninput={(e) => (dragging = Number(e.currentTarget.value))}
+        onchange={(e) => onset(field.key, Number(e.currentTarget.value))} />
+      <span class="hint">{shown}%</span>
     {:else if field.kind === 'folder'}
       <input id={field.key} readonly value={String(config['clip_dir_resolved'] ?? '')} />
       <span class="hint">Change it from the Trix tray icon.</span>
@@ -94,5 +121,6 @@
   .hint.ok { color: var(--accent); }
   input, select { padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; min-width: 120px; }
   input[readonly] { color: var(--dim); }
+  input[type='range'] { min-width: 200px; padding: 0; border: none; background: none; }
   button { padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font: inherit; cursor: pointer; }
 </style>

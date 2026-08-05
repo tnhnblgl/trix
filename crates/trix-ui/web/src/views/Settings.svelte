@@ -111,7 +111,7 @@
   </div>
 {/if}
 
-{#each ['Capture', 'Quality', 'Clips', 'Trix'] as section (section)}
+{#each ['Capture', 'Audio', 'Quality', 'Clips', 'Trix'] as section (section)}
   <section>
     <h2>{section}</h2>
     {#each FIELDS.filter((f) => f.section === section) as field (field.key)}

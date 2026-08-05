@@ -1,10 +1,10 @@
-export type FieldKind = 'number' | 'text' | 'select' | 'bool' | 'folder' | 'hotkey';
+export type FieldKind = 'number' | 'text' | 'select' | 'bool' | 'folder' | 'hotkey' | 'slider';
 
 export type Field = {
   key: string;
   label: string;
   kind: FieldKind;
-  section: 'Capture' | 'Quality' | 'Clips' | 'Trix';
+  section: 'Capture' | 'Audio' | 'Quality' | 'Clips' | 'Trix';
   help: string;
   min?: number;
   max?: number;
@@ -30,6 +30,8 @@ const BOUNDS: Record<string, [number, number]> = {
   monitor_index: [0, 63],
   stats_seconds: [0, 86400],
   max_library_gb: [0, 10000],
+  system_volume: [0, 100],
+  mic_volume: [0, 100],
 };
 
 export const FIELDS: Field[] = [
@@ -40,6 +42,9 @@ export const FIELDS: Field[] = [
       { value: 'low', label: 'Low - never cost game fps' },
       { value: 'normal', label: 'Normal - smoother capture' },
     ], help: 'Low drops capture frames under contention instead of taking frames from the game.' },
+
+  { key: 'system_volume', label: 'PC sound', kind: 'slider', section: 'Audio', ...span('system_volume'), help: 'How loud your PC\'s own sound is in the clip. Affects the recording only, never your Windows volume. 0 turns it off.' },
+  { key: 'mic_volume', label: 'Microphone', kind: 'slider', section: 'Audio', ...span('mic_volume'), help: 'How loud your voice is in the clip. 0 closes the microphone entirely, so Windows stops showing Trix as using it.' },
 
   { key: 'bitrate_kbps', label: 'Bitrate', kind: 'number', section: 'Quality', ...span('bitrate_kbps'), help: 'Target average, in kbit/s.' },
   { key: 'max_bitrate_kbps', label: 'Peak bitrate', kind: 'number', section: 'Quality', ...span('max_bitrate_kbps'), help: '0 means 1.5x the target. This cap is also the replay buffer\'s worst-case RAM.' },
