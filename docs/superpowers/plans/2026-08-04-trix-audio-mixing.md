@@ -26,7 +26,7 @@
 - **PCM format everywhere:** interleaved 16-bit signed little-endian stereo at 48 kHz. `ENCODER_BLOCK_ALIGN` (4) bytes per frame, 2 bytes per sample.
 - **Verification commands** (run from the repo root unless stated):
   - `cargo test --workspace` — 149 tests pass at v0.3.0
-  - `cargo clippy --workspace --all-targets` — `grep -c "^warning"` reports **16** at v0.3.0: 12 real warnings plus 4 per-crate summary lines. All pre-existing.
+  - `cargo clippy --workspace --all-targets` — `grep -c "^warning"` reports **14** from Task 5 onward: 10 real warnings plus 4 per-crate summary lines, all pre-existing. (It was 16 at v0.3.0; the audio module rewrite retired two lints that lived in the old `capture/audio.rs`. A *decrease* is fine — the gate is "no increase". Tasks 1–4 were measured against 16 while the workspace was mid-rename and not fully lintable; 14 is the number to hold from here.)
   - `cargo fmt --all --check`
   - `npm test` and `npm run check` from `crates/trix-ui/web` — 48 frontend tests, `svelte-check` 0 errors
 
@@ -1747,7 +1747,7 @@ cargo clippy --workspace --all-targets 2>&1 | grep -c "^warning"
 cargo fmt --all --check
 ```
 
-Expected: suite passes, clippy count still 16, `fmt` clean.
+Expected: suite passes, clippy count still 14, `fmt` clean.
 
 - [ ] **Step 9: Commit**
 
@@ -1945,7 +1945,7 @@ cargo clippy --workspace --all-targets 2>&1 | grep -c "^warning"
 cargo fmt --all --check
 ```
 
-Expected: all tests pass; clippy count still 16 (12 real warnings plus 4 summary lines, all pre-existing) with none in the new code; `fmt` clean.
+Expected: all tests pass; clippy count still 14 (10 real warnings plus 4 summary lines, all pre-existing) with none in the new code; `fmt` clean.
 
 ```bash
 cd crates/trix-ui/web && npm test 2>&1 | tail -5 && npm run check 2>&1 | tail -5 && cd ../../..
