@@ -36,8 +36,8 @@ use windows_capture::{
 
 use crate::{
     capture::audio::{
-        AudioPacket, AudioTimeline, ENCODER_BLOCK_ALIGN, LoopbackCapture, SAMPLE_RATE,
-        SILENCE_GRACE_100NS, dur_100ns_to_frames, frames_to_100ns,
+        AudioGains, AudioMixer, ENCODER_BLOCK_ALIGN, SAMPLE_RATE, SILENCE_GRACE_100NS,
+        dur_100ns_to_frames, frames_to_100ns,
     },
     config::Config,
     control,
@@ -75,7 +75,7 @@ pub struct ReplayOptions {
 struct ReplayFlags {
     settings: RecorderSettings,
     replay_100ns: i64,
-    audio_rx: Option<Receiver<AudioPacket>>,
+    mixer: AudioMixer,
     stats_seconds: u32,
 }
 
@@ -112,8 +112,7 @@ struct ReplaySession {
     ring_bytes: usize,
     audio_ring: VecDeque<AudioChunk>,
 
-    audio_rx: Option<Receiver<AudioPacket>>,
-    timeline: AudioTimeline,
+    mixer: AudioMixer,
     t0_qpc: Option<i64>,
     last_frame_qpc: i64,
     /// QPC time the next frame is due; arrivals more than half a frame early
@@ -171,12 +170,10 @@ impl ReplaySession {
     /// and an undrained channel grows without limit (found by the Phase 6
     /// soak: +110 MB working set over 12 idle minutes).
     fn pump_audio_to(&mut self, target_100ns: i64) {
-        if let Some(rx) = &self.audio_rx {
-            let ring = &mut self.audio_ring;
-            self.timeline.pump(rx, target_100ns, &mut |start_frame, pcm| {
-                ring.push_back(AudioChunk { start_frame, data: pcm.to_vec() });
-            });
-        }
+        let ring = &mut self.audio_ring;
+        self.mixer.pump(target_100ns, &mut |start_frame, pcm| {
+            ring.push_back(AudioChunk { start_frame, data: pcm.to_vec() });
+        });
         // evict() trims audio against the *video* front, which stops moving
         // the moment the screen goes static — bound the span directly too.
         if let Some(back) = self.audio_ring.back() {
@@ -463,8 +460,7 @@ impl GraphicsCaptureApiHandler for ReplaySession {
             video_ring: VecDeque::new(),
             ring_bytes: 0,
             audio_ring: VecDeque::new(),
-            audio_rx: flags.audio_rx,
-            timeline: AudioTimeline::new(),
+            mixer: flags.mixer,
             t0_qpc: None,
             last_frame_qpc: 0,
             next_encode_qpc: 0,
@@ -502,7 +498,7 @@ impl GraphicsCaptureApiHandler for ReplaySession {
 
         let callback_start = Instant::now();
         let t0 = *self.t0_qpc.get_or_insert(frame_qpc);
-        self.timeline.start(t0);
+        self.mixer.start(t0);
 
         if (frame.width(), frame.height()) != self.input_size {
             tracing::info!(
@@ -751,9 +747,10 @@ pub fn run(config: &Config, options: ReplayOptions) -> Result<()> {
         })
         .context("failed to spawn the hotkey forwarder")?;
 
+    let gains = AudioGains::new(100, 100);
     let status = Arc::new(Mutex::new(EngineStatus::default()));
     let mut ready = None;
-    let result = run_driven_inner(config, &rx, &status, &mut ready, Some(&hotkey), options);
+    let result = run_driven_inner(config, &gains, &rx, &status, &mut ready, Some(&hotkey), options);
     control::mark_finalized();
     result
 }
@@ -770,6 +767,7 @@ pub fn run(config: &Config, options: ReplayOptions) -> Result<()> {
 /// logoff or console close. The daemon calls it when the daemon exits.
 pub fn run_driven(
     config: &Config,
+    gains: Arc<AudioGains>,
     commands: Receiver<EngineCommand>,
     status: Arc<Mutex<EngineStatus>>,
     ready: Option<Sender<Result<EngineStatus>>>,
@@ -779,14 +777,16 @@ pub fn run_driven(
     }
     let mut ready = ready;
     let options = ReplayOptions { auto_clip_secs: None, exit_after_secs: None, print_clips: false };
-    run_driven_inner(config, &commands, &status, &mut ready, None, options)
+    run_driven_inner(config, &gains, &commands, &status, &mut ready, None, options)
 }
 
 /// The rebuild loop: one capture session at a time, restarted when the display
 /// topology changes under it. Unchanged policy — only its input channel and
 /// the status/readiness it threads through are new.
+#[allow(clippy::too_many_arguments)]
 fn run_driven_inner(
     config: &Config,
+    gains: &Arc<AudioGains>,
     commands: &Receiver<EngineCommand>,
     status: &Arc<Mutex<EngineStatus>>,
     ready: &mut Option<Sender<Result<EngineStatus>>>,
@@ -801,6 +801,7 @@ fn run_driven_inner(
         let session_started = Instant::now();
         match run_session(
             config,
+            gains,
             &options,
             hotkey,
             commands,
@@ -876,7 +877,6 @@ fn run_driven_inner(
 struct LiveSession {
     capture: CaptureControl<ReplaySession, anyhow::Error>,
     encoder_name: String,
-    audio_handle: Option<LoopbackCapture>,
     clip_dir: PathBuf,
     width: u32,
     height: u32,
@@ -884,20 +884,18 @@ struct LiveSession {
 
 /// Brings up one capture session — monitor, audio, encoder, ring. Byte for
 /// byte the setup `run_session` has always done, including the banner.
-fn start_session(config: &Config, hotkey: Option<&control::Hotkey>) -> Result<LiveSession> {
+fn start_session(
+    config: &Config,
+    gains: &Arc<AudioGains>,
+    hotkey: Option<&control::Hotkey>,
+) -> Result<LiveSession> {
     let monitor = Monitor::from_index(config.monitor_index as usize + 1)
         .map_err(|e| anyhow!("monitor {} not available: {e}", config.monitor_index))?;
     let width = monitor.width().map_err(|e| anyhow!("monitor width: {e}"))?;
     let height = monitor.height().map_err(|e| anyhow!("monitor height: {e}"))?;
     let clip_dir = config.clip_dir_path();
 
-    let (audio_handle, audio_rx) = match LoopbackCapture::start() {
-        Ok((handle, rx)) => (Some(handle), Some(rx)),
-        Err(e) => {
-            tracing::warn!("audio capture unavailable, replay continues without: {e}");
-            (None, None)
-        }
-    };
+    let mixer = AudioMixer::start_sources(Arc::clone(gains));
 
     let flags = ReplayFlags {
         settings: RecorderSettings {
@@ -907,10 +905,10 @@ fn start_session(config: &Config, hotkey: Option<&control::Hotkey>) -> Result<Li
             bitrate_bps: config.bitrate_bps(),
             max_bitrate_bps: config.max_bitrate_bps(),
             rate_control: config.rate_control(),
-            with_audio: audio_rx.is_some(),
+            with_audio: mixer.active(),
         },
         replay_100ns: i64::from(config.replay_seconds) * 10_000_000,
-        audio_rx,
+        mixer,
         stats_seconds: config.stats_seconds,
     };
 
@@ -943,12 +941,13 @@ fn start_session(config: &Config, hotkey: Option<&control::Hotkey>) -> Result<Li
         .map_err(|e| anyhow!("failed to start capture: {e}"))?;
     let encoder_name = capture.callback().lock().encoder.name().to_string();
 
-    Ok(LiveSession { capture, encoder_name, audio_handle, clip_dir, width, height })
+    Ok(LiveSession { capture, encoder_name, clip_dir, width, height })
 }
 
 #[allow(clippy::too_many_arguments)]
 fn run_session(
     config: &Config,
+    gains: &Arc<AudioGains>,
     options: &ReplayOptions,
     hotkey: Option<&control::Hotkey>,
     commands: &Receiver<EngineCommand>,
@@ -960,7 +959,7 @@ fn run_session(
     // Exactly one message goes out on the ready channel, from exactly these
     // two places: the setup error below, or the success just after it. Every
     // way `start_session` can fail returns through this arm.
-    let live = match start_session(config, hotkey) {
+    let live = match start_session(config, gains, hotkey) {
         Ok(live) => live,
         Err(e) => {
             if let Some(tx) = ready.take() {
@@ -973,7 +972,7 @@ fn run_session(
             return Err(e);
         }
     };
-    let LiveSession { capture, encoder_name, audio_handle, clip_dir, width, height } = live;
+    let LiveSession { capture, encoder_name, clip_dir, width, height } = live;
     if let Some(tx) = ready.take() {
         // Carries the session's facts, not just "ready": `EngineHandle::spawn`
         // returns the instant this lands, and the 250 ms tick below that would
@@ -1079,9 +1078,12 @@ fn run_session(
 
     if !session_died {
         let session = capture.callback();
-        let session = session.lock();
+        let mut session = session.lock();
         session.log_perf("replay session closing");
-        session.timeline.log_diagnostics();
+        session.mixer.log_diagnostics();
+        if let Err(e) = session.mixer.stop() {
+            tracing::warn!(error = %format!("{e:#}"), "audio capture did not stop cleanly");
+        }
     }
     if session_died {
         if let Err(e) = capture.wait() {
@@ -1089,11 +1091,6 @@ fn run_session(
         }
     } else if let Err(e) = capture.stop() {
         tracing::warn!("failed to stop capture: {e:#}");
-    }
-    if let Some(handle) = audio_handle {
-        if let Err(e) = handle.stop() {
-            tracing::warn!("audio capture thread: {e}");
-        }
     }
     Ok(if session_died { SessionEnd::Died } else { SessionEnd::Shutdown })
 }

@@ -12,8 +12,8 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use serde_json::{Map, Value};
 use trix_core::{
-    config::Config, control, control::SingleInstance, engine::EngineHandle, engine::EngineStatus,
-    library, stats,
+    capture::audio::AudioGains, config::Config, control, control::SingleInstance,
+    engine::EngineHandle, engine::EngineStatus, library, stats,
 };
 use trix_proto::{ClipMeta, Event};
 
@@ -472,7 +472,9 @@ impl Daemon {
         // have. On the `?`, `slot` drops and the single-instance mutex is
         // released before the error goes back — a failed arm must not leave the
         // CLI locked out.
-        let engine = EngineHandle::spawn(config)?;
+        // Task 6 replaces this placeholder with the daemon's own shared
+        // `AudioGains` instance built from config.
+        let engine = EngineHandle::spawn(config, AudioGains::new(100, 100))?;
         *armed = Some(Armed { engine, _slot: slot });
         // Here rather than in the tray's own handler: `arm` is reached from the
         // tray menu, the control socket, and the desktop UI in stage 4, and an

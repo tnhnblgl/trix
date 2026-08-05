@@ -18,7 +18,7 @@ use std::thread::JoinHandle;
 use anyhow::{Context as _, Result, anyhow};
 use trix_proto::ClipMeta;
 
-use crate::{config::Config, replay};
+use crate::{capture::audio::AudioGains, config::Config, replay};
 
 /// What the control loop accepts. Both variants are terminal for the caller:
 /// `Clip` always answers on its reply channel, `Stop` always ends the loop.
@@ -58,7 +58,7 @@ impl EngineHandle {
     /// Starts capture and returns once the first session is live, so a caller
     /// answering an `arm` command can report "no hardware encoder available"
     /// synchronously instead of optimistically claiming success.
-    pub fn spawn(config: Config) -> Result<Self> {
+    pub fn spawn(config: Config, gains: Arc<AudioGains>) -> Result<Self> {
         let (tx, rx) = channel();
         // The readiness channel carries the first session's status, not just a
         // unit: it already fires at exactly the moment capture goes live, and
@@ -74,7 +74,7 @@ impl EngineHandle {
 
         let join = std::thread::Builder::new()
             .name("trix-engine".into())
-            .spawn(move || replay::run_driven(&config, rx, thread_status, Some(ready_tx)))
+            .spawn(move || replay::run_driven(&config, gains, rx, thread_status, Some(ready_tx)))
             .context("failed to spawn the engine thread")?;
 
         // A failure before the first session starts arrives here; a failure
@@ -171,7 +171,8 @@ mod tests {
     #[test]
     #[ignore = "needs a real encoder; run with --ignored"]
     fn spawn_returns_a_status_that_already_names_the_encoder() {
-        let engine = EngineHandle::spawn(Config::default()).expect("arm on real hardware");
+        let engine = EngineHandle::spawn(Config::default(), AudioGains::new(100, 100))
+            .expect("arm on real hardware");
         let status = engine.status();
         assert!(!status.encoder.is_empty(), "arm must not answer with a null encoder");
         assert!(
@@ -198,7 +199,7 @@ mod tests {
             gpu_priority: "normal".into(),
             ..Config::default()
         };
-        let error = match EngineHandle::spawn(config) {
+        let error = match EngineHandle::spawn(config, AudioGains::new(100, 100)) {
             Ok(_) => panic!("monitor 99 must not produce a live engine"),
             Err(e) => format!("{e:#}"),
         };

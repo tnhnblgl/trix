@@ -12,7 +12,11 @@
 
 use std::time::Duration;
 
-use trix_core::{capture::audio::LoopbackCapture, config::Config, engine::EngineHandle};
+use trix_core::{
+    capture::audio::{AudioCapture, AudioGains, AudioSourceKind},
+    config::Config,
+    engine::EngineHandle,
+};
 use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
 
 const CYCLES: usize = 8;
@@ -46,7 +50,8 @@ fn report(label: &str, samples: &[u32]) {
 fn audio_only_cycles() {
     let mut samples = Vec::new();
     for _ in 0..CYCLES {
-        let (capture, rx) = LoopbackCapture::start().expect("loopback start");
+        let (capture, rx) =
+            AudioCapture::start(AudioSourceKind::SystemAudio).expect("loopback start");
         std::thread::sleep(LIVE);
         capture.stop().expect("loopback stop");
         // Held until after stop: dropping the receiver first makes the capture
@@ -83,7 +88,8 @@ fn capture_only_cycles() {
 fn full_arm_cycles() {
     let mut samples = Vec::new();
     for _ in 0..CYCLES {
-        let engine = EngineHandle::spawn(Config::default()).expect("arm on real hardware");
+        let engine = EngineHandle::spawn(Config::default(), AudioGains::new(100, 100))
+            .expect("arm on real hardware");
         std::thread::sleep(LIVE);
         engine.stop().expect("clean stop");
         std::thread::sleep(SETTLE);

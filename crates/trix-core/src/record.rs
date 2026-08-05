@@ -13,7 +13,7 @@
 
 use std::{
     path::PathBuf,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::mpsc::{self, Sender},
     time::{Duration, Instant},
 };
 
@@ -29,10 +29,7 @@ use windows_capture::{
 };
 
 use crate::{
-    capture::audio::{
-        AudioPacket, AudioTimeline, LoopbackCapture, SAMPLE_RATE, SILENCE_GRACE_100NS,
-        frames_to_100ns,
-    },
+    capture::audio::{AudioGains, AudioMixer, SAMPLE_RATE, SILENCE_GRACE_100NS, frames_to_100ns},
     config::{Config, RateControl},
     encode::mf::{MfRecorder, RecorderSettings},
     stats::{LatencyHistogram, StatsReporter, mb},
@@ -54,7 +51,7 @@ struct RecordFlags {
     rate_control: RateControl,
     deadline: Duration,
     done: Sender<Result<Summary>>,
-    audio_rx: Option<Receiver<AudioPacket>>,
+    mixer: AudioMixer,
     stats_seconds: u32,
 }
 
@@ -78,8 +75,7 @@ struct RecordSession {
     frames_paced: u64,
     frame_duration_100ns: i64,
 
-    audio_rx: Option<Receiver<AudioPacket>>,
-    timeline: AudioTimeline,
+    mixer: AudioMixer,
     t0_qpc: Option<i64>,
     last_frame_qpc: i64,
     /// QPC time the next frame is due; arrivals more than half a frame early
@@ -98,8 +94,8 @@ struct RecordSession {
 impl RecordSession {
     /// Drains the audio timeline into the AAC stream up to `target_qpc`.
     fn pump_audio(&mut self, target_qpc: i64) {
-        let (Some(rx), Some(recorder)) = (&self.audio_rx, &mut self.recorder) else { return };
-        self.timeline.pump(rx, target_qpc, &mut |start_frame, pcm| {
+        let Some(recorder) = &mut self.recorder else { return };
+        self.mixer.pump(target_qpc, &mut |start_frame, pcm| {
             if let Err(e) = recorder.write_audio(frames_to_100ns(start_frame), pcm) {
                 tracing::warn!("audio buffer rejected: {e}");
             }
@@ -144,10 +140,13 @@ impl RecordSession {
     /// Closes the audio timeline at the last video frame, finalizes the MP4
     /// (flushes the moov atom), and reports the outcome.
     fn finish(&mut self) {
-        if self.recorder.is_some() && self.timeline.started() {
+        if self.recorder.is_some() && self.mixer.started() {
             self.pump_audio(self.last_frame_qpc);
         }
-        self.timeline.log_diagnostics();
+        self.mixer.log_diagnostics();
+        if let Err(e) = self.mixer.stop() {
+            tracing::warn!(error = %format!("{e:#}"), "audio capture did not stop cleanly");
+        }
         self.log_perf("recording finalizing");
         if let Some(recorder) = self.recorder.take() {
             let frames_dropped = recorder.frames_dropped;
@@ -157,8 +156,8 @@ impl RecordSession {
                     frames: self.frames,
                     frames_dropped,
                     frames_paced: self.frames_paced,
-                    audio_frames: self.timeline.frames_emitted(),
-                    silence_frames: self.timeline.silence_frames_emitted(),
+                    audio_frames: self.mixer.frames_emitted(),
+                    silence_frames: self.mixer.silence_frames_emitted(),
                     elapsed: self.started.elapsed(),
                 })
                 .map_err(|e| anyhow!("failed to finalize MP4: {e}"));
@@ -173,6 +172,7 @@ impl GraphicsCaptureApiHandler for RecordSession {
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self> {
         let flags = ctx.flags;
+        let with_audio = flags.mixer.active();
         let recorder = MfRecorder::new(
             &flags.output,
             &ctx.device,
@@ -183,7 +183,7 @@ impl GraphicsCaptureApiHandler for RecordSession {
                 bitrate_bps: flags.bitrate_bps,
                 max_bitrate_bps: flags.max_bitrate_bps,
                 rate_control: flags.rate_control,
-                with_audio: flags.audio_rx.is_some(),
+                with_audio,
             },
         )
         .map_err(|e| anyhow!("failed to create encoder: {e}"))?;
@@ -194,7 +194,7 @@ impl GraphicsCaptureApiHandler for RecordSession {
             height = flags.height,
             fps = flags.fps,
             bitrate_bps = flags.bitrate_bps,
-            audio = flags.audio_rx.is_some(),
+            audio = with_audio,
             output = %flags.output.display(),
             "sink writer ready"
         );
@@ -207,8 +207,7 @@ impl GraphicsCaptureApiHandler for RecordSession {
             frames: 0,
             frames_paced: 0,
             frame_duration_100ns: 10_000_000 / i64::from(flags.fps.max(1)),
-            audio_rx: flags.audio_rx,
-            timeline: AudioTimeline::new(),
+            mixer: flags.mixer,
             t0_qpc: None,
             last_frame_qpc: 0,
             next_encode_qpc: 0,
@@ -258,7 +257,7 @@ impl GraphicsCaptureApiHandler for RecordSession {
         if let Some(recorder) = &mut self.recorder {
             // Timeline zero = first frame's QPC (so the first sample lands at 0).
             let t0 = *self.t0_qpc.get_or_insert(frame_qpc);
-            self.timeline.start(t0);
+            self.mixer.start(t0);
             match recorder.write_frame(frame.as_raw_texture(), frame_qpc - t0) {
                 Ok(true) => {
                     self.frames += 1;
@@ -298,15 +297,11 @@ pub fn run(config: &Config, options: RecordOptions) -> Result<()> {
     let width = monitor.width().map_err(|e| anyhow!("monitor width: {e}"))?;
     let height = monitor.height().map_err(|e| anyhow!("monitor height: {e}"))?;
 
-    let audio = if options.no_audio {
-        None
-    } else {
-        Some(LoopbackCapture::start().map_err(|e| anyhow!("audio capture failed to start: {e}"))?)
-    };
-    let (audio_handle, audio_rx) = match audio {
-        Some((handle, rx)) => (Some(handle), Some(rx)),
-        None => (None, None),
-    };
+    // `--no-audio` means no audio at all: both sources off, and no audio
+    // stream in the MP4.
+    let gains = if options.no_audio { AudioGains::new(0, 0) } else { AudioGains::new(100, 100) };
+    let mixer = AudioMixer::start_sources(gains);
+    let audio_on = mixer.active();
 
     println!(
         "recording {}x{} at {} fps, {} kbps, audio {} → {} ({} s)",
@@ -314,7 +309,7 @@ pub fn run(config: &Config, options: RecordOptions) -> Result<()> {
         height,
         config.fps,
         config.bitrate_kbps,
-        if audio_rx.is_some() { "on" } else { "off" },
+        if audio_on { "on" } else { "off" },
         options.output.display(),
         options.duration_secs,
     );
@@ -330,7 +325,7 @@ pub fn run(config: &Config, options: RecordOptions) -> Result<()> {
         rate_control: config.rate_control(),
         deadline: Duration::from_secs(options.duration_secs),
         done,
-        audio_rx,
+        mixer,
         stats_seconds: config.stats_seconds,
     };
 
@@ -395,12 +390,6 @@ pub fn run(config: &Config, options: RecordOptions) -> Result<()> {
         }
     };
     crate::control::mark_finalized();
-
-    if let Some(handle) = audio_handle {
-        if let Err(e) = handle.stop() {
-            tracing::warn!("audio capture thread: {e}");
-        }
-    }
 
     let summary = outcome?;
     let bytes = std::fs::metadata(&options.output).map(|m| m.len()).unwrap_or(0);

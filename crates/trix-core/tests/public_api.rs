@@ -110,7 +110,10 @@ fn engine_handle_is_public() {
 
     use trix_core::engine::{EngineCommand, EngineHandle, EngineStatus};
 
-    let _: fn(Config) -> anyhow::Result<EngineHandle> = EngineHandle::spawn;
+    let _: fn(
+        Config,
+        std::sync::Arc<trix_core::capture::audio::AudioGains>,
+    ) -> anyhow::Result<EngineHandle> = EngineHandle::spawn;
     let _: fn(&EngineHandle) -> EngineStatus = EngineHandle::status;
     let _: fn(&EngineHandle) -> anyhow::Result<Option<trix_proto::ClipMeta>> = EngineHandle::clip;
     let _: fn(EngineHandle) -> anyhow::Result<()> = EngineHandle::stop;
@@ -119,6 +122,7 @@ fn engine_handle_is_public() {
     // response can name its encoder without a follow-up poll.
     let _: fn(
         &Config,
+        Arc<trix_core::capture::audio::AudioGains>,
         Receiver<EngineCommand>,
         Arc<Mutex<EngineStatus>>,
         Option<Sender<anyhow::Result<EngineStatus>>>,
