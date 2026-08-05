@@ -299,9 +299,11 @@ pub fn run(config: &Config, options: RecordOptions) -> Result<()> {
 
     // `--no-audio` means no audio at all: both sources off, and no audio
     // stream in the MP4.
-    // Task 6 replaces this placeholder with the daemon's own shared
-    // `AudioGains` instance built from config.
-    let gains = if options.no_audio { AudioGains::new(0, 0) } else { AudioGains::new(100, 100) };
+    let gains = if options.no_audio {
+        AudioGains::new(0, 0)
+    } else {
+        AudioGains::new(config.system_volume, config.mic_volume)
+    };
     let mixer = AudioMixer::start_sources(gains);
     let audio_on = mixer.active();
 

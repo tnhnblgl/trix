@@ -247,7 +247,7 @@ pub(crate) const REQUIRES_REARM: [&str; 7] = [
 /// do is fall silently behind `Config`, so
 /// `every_numeric_config_key_is_range_checked` fails the build the day a
 /// numeric key is added without a bound here.
-const NUMERIC_BOUNDS: [(&str, u64, u64); 7] = [
+const NUMERIC_BOUNDS: [(&str, u64, u64); 9] = [
     ("fps", 1, 480),
     ("bitrate_kbps", 1, 200_000),
     ("max_bitrate_kbps", 0, 200_000),
@@ -255,6 +255,8 @@ const NUMERIC_BOUNDS: [(&str, u64, u64); 7] = [
     ("monitor_index", 0, 63),
     ("stats_seconds", 0, 86_400),
     ("max_library_gb", 0, 10_000),
+    ("system_volume", 0, 100),
+    ("mic_volume", 0, 100),
 ];
 
 /// Refuses the whole request if any bounded key is out of range.

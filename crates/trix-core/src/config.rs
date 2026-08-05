@@ -57,6 +57,23 @@ pub struct Config {
     /// few dozen lines that prevent the most common complaint about the
     /// category.
     pub max_library_gb: u32,
+    /// How loud the PC's own sound is in saved clips, 0–100.
+    ///
+    /// `100` (the default) is unity and the maximum: Trix never amplifies
+    /// above what the system already mixed, so it can never be the reason a
+    /// clip clips. The scale is a squared fader taper, so `50` is roughly half
+    /// the perceived loudness rather than half the amplitude.
+    ///
+    /// `0` does not mute the stream — it never opens it.
+    pub system_volume: u32,
+    /// How loud the microphone is in saved clips, 0–100, on the same scale as
+    /// [`Config::system_volume`].
+    ///
+    /// `0` leaves the microphone closed rather than captured and multiplied by
+    /// zero, so Windows' own microphone-in-use indicator stays off. A recorder
+    /// holding the microphone open while its own level reads 0 is
+    /// indistinguishable, from outside, from one that is lying about it.
+    pub mic_volume: u32,
     /// Start the daemon at login (spec §7.3). Opt-in and off by default —
     /// adding yourself to startup uninvited is the behaviour people resent most
     /// in this category.
@@ -83,6 +100,8 @@ impl Default for Config {
             stats_seconds: 0,
             clip_dir: String::new(),
             max_library_gb: 20,
+            system_volume: 100,
+            mic_volume: 100,
             autostart: false,
         }
     }
@@ -237,5 +256,22 @@ mod tests {
         let parsed: Config = toml::from_str(&text).unwrap();
         assert_eq!(parsed.fps, 30);
         assert_eq!(parsed.clip_dir, r"D:\Clips");
+    }
+
+    #[test]
+    fn both_levels_default_to_full() {
+        let config = Config::default();
+        assert_eq!(config.system_volume, 100);
+        assert_eq!(config.mic_volume, 100);
+    }
+
+    #[test]
+    fn a_config_file_without_the_levels_still_loads_at_full() {
+        // Every config.toml written before this feature existed lacks both
+        // keys. Serde's `default` has to cover them or upgrading silently
+        // mutes everyone.
+        let config: Config = toml::from_str("fps = 60\n").expect("a partial config still parses");
+        assert_eq!(config.system_volume, 100);
+        assert_eq!(config.mic_volume, 100);
     }
 }

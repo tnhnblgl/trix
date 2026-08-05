@@ -747,9 +747,7 @@ pub fn run(config: &Config, options: ReplayOptions) -> Result<()> {
         })
         .context("failed to spawn the hotkey forwarder")?;
 
-    // Task 6 replaces this placeholder with the daemon's own shared
-    // `AudioGains` instance built from config.
-    let gains = AudioGains::new(100, 100);
+    let gains = AudioGains::new(config.system_volume, config.mic_volume);
     let status = Arc::new(Mutex::new(EngineStatus::default()));
     let mut ready = None;
     let result = run_driven_inner(config, &gains, &rx, &status, &mut ready, Some(&hotkey), options);
