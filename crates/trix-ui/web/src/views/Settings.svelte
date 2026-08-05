@@ -8,7 +8,6 @@
 
   let config = $state<Record<string, unknown>>({});
   let monitors = $state<Monitor[]>([]);
-  let rearmNeeded = $state<string[]>([]);
   let extras = $state<string[]>([]);
 
   // Hotkey live test (spec §6.4).
@@ -63,7 +62,7 @@
       // from what was typed is exactly what the field should now show.
       config = { ...config, ...result.accepted };
       if (result.requires_rearm.length > 0 && app.armed) {
-        rearmNeeded = [...new Set([...rearmNeeded, ...result.requires_rearm])];
+        app.addRearmNeeded(result.requires_rearm);
       }
     } catch (e) {
       app.toast('error', String(e));
@@ -97,17 +96,10 @@
 
 <h1>Settings</h1>
 
-{#if rearmNeeded.length > 0}
+{#if app.rearmNeeded.length > 0}
   <div class="notice">
-    Re-arm to apply: {rearmNeeded.join(', ')}
-    <button
-      onclick={async () => {
-        await call('disarm');
-        await call('arm');
-        rearmNeeded = [];
-        await app.refreshStatus();
-      }}>Re-arm now</button
-    >
+    Re-arm to apply: {app.rearmNeeded.join(', ')}
+    <button onclick={() => app.rearmNow()}>Re-arm now</button>
   </div>
 {/if}
 

@@ -82,6 +82,7 @@ beforeEach(() => {
   app.selected = 0;
   app.view = 'clip';
   app.toasts = [];
+  app.rearmNeeded = [];
   // onDaemonUp() short-circuits when this is already true, so a test that
   // ran earlier (or wireDaemon()'s own daemonConnected() bootstrap) must not
   // leave it set for the next one.
@@ -221,6 +222,53 @@ describe('AppState.toggleArm', () => {
     await app.toggleArm();
 
     expect(app.toasts.at(-1)?.text).toContain('disarm failed: engine wedged');
+  });
+});
+
+describe('AppState.addRearmNeeded', () => {
+  // The whole point of this finding: `rearmNeeded` used to be component-local
+  // state in Settings.svelte, which App.svelte mounts only inside
+  // `{#if app.view === 'settings'}` -- navigating away destroyed it. Reading
+  // it back off the `app` singleton (module-scoped, not tied to any
+  // component's lifetime) is what proves it now survives that trip.
+  it('is readable from the shared app singleton, not scoped to a component', () => {
+    app.addRearmNeeded(['mic_volume']);
+    expect(app.rearmNeeded).toEqual(['mic_volume']);
+  });
+
+  it('accumulates across separate config.set responses instead of replacing', () => {
+    app.addRearmNeeded(['fps']);
+    app.addRearmNeeded(['mic_volume']);
+    expect(app.rearmNeeded).toEqual(['fps', 'mic_volume']);
+  });
+
+  it('de-duplicates a key reported more than once', () => {
+    app.addRearmNeeded(['mic_volume']);
+    app.addRearmNeeded(['mic_volume', 'system_volume']);
+    expect(app.rearmNeeded).toEqual(['mic_volume', 'system_volume']);
+  });
+
+  it('leaves the list untouched when nothing is pending', () => {
+    app.addRearmNeeded(['fps']);
+    app.addRearmNeeded([]);
+    expect(app.rearmNeeded).toEqual(['fps']);
+  });
+});
+
+describe('AppState.rearmNow', () => {
+  it('disarms, re-arms, clears the pending list, and refreshes status', async () => {
+    app.rearmNeeded = ['mic_volume', 'system_volume'];
+    callMock.mockImplementation((cmd: string) => {
+      if (cmd === 'status') return Promise.resolve(statusPayload());
+      return Promise.resolve({});
+    });
+
+    await app.rearmNow();
+
+    expect(callMock).toHaveBeenNthCalledWith(1, 'disarm');
+    expect(callMock).toHaveBeenNthCalledWith(2, 'arm');
+    expect(callMock).toHaveBeenCalledWith('status');
+    expect(app.rearmNeeded).toEqual([]);
   });
 });
 

@@ -18,6 +18,19 @@ class AppState {
   toasts = $state<Toast[]>([]);
   /** Live ring seconds while armed, from `stats`; falls back to `status`. */
   ringUsed = $state(0);
+  /**
+   * Config keys accepted while armed whose new value only takes effect at
+   * the next arm -- the "Re-arm to apply" banner's contents. Lives on `app`
+   * rather than as component-local state in Settings.svelte: that page is
+   * mounted only inside `{#if app.view === 'settings'}` (App.svelte), so
+   * component-local state does not survive a trip to Clips and back. Before
+   * this branch that only cost a stale frame rate; the two keys this branch
+   * added are the ones whose unapplied state is a lit taskbar microphone
+   * indicator or a missing voice track, so losing the banner on navigation
+   * is a privacy and data-loss bug, not a cosmetic one. Cleared only by an
+   * actual re-arm (`rearmNow`), never on a timer.
+   */
+  rearmNeeded = $state<string[]>([]);
 
   get armed() {
     return this.status?.armed ?? false;
@@ -71,6 +84,25 @@ class AppState {
       // only thing that ever tells the user those failed.
       if (wasArmed) this.toast('error', String(e));
     }
+  }
+
+  /** Merges newly reported pending-rearm keys into the banner's list, de-duplicated. */
+  addRearmNeeded(keys: string[]) {
+    if (keys.length === 0) return;
+    this.rearmNeeded = [...new Set([...this.rearmNeeded, ...keys])];
+  }
+
+  /**
+   * The Settings page's "Re-arm now" button: cycle the engine so every
+   * pending change takes effect, then clear the banner. This is the only
+   * thing that clears `rearmNeeded` -- there is no timer, because a change
+   * genuinely has not applied until this runs.
+   */
+  async rearmNow() {
+    await call('disarm');
+    await call('arm');
+    this.rearmNeeded = [];
+    await this.refreshStatus();
   }
 
   async loadClips() {
