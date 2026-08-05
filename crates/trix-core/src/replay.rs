@@ -747,6 +747,8 @@ pub fn run(config: &Config, options: ReplayOptions) -> Result<()> {
         })
         .context("failed to spawn the hotkey forwarder")?;
 
+    // Task 6 replaces this placeholder with the daemon's own shared
+    // `AudioGains` instance built from config.
     let gains = AudioGains::new(100, 100);
     let status = Arc::new(Mutex::new(EngineStatus::default()));
     let mut ready = None;
@@ -783,7 +785,6 @@ pub fn run_driven(
 /// The rebuild loop: one capture session at a time, restarted when the display
 /// topology changes under it. Unchanged policy — only its input channel and
 /// the status/readiness it threads through are new.
-#[allow(clippy::too_many_arguments)]
 fn run_driven_inner(
     config: &Config,
     gains: &Arc<AudioGains>,
@@ -996,6 +997,14 @@ fn run_session(
     }
 
     let mut session_died = false;
+    // Set on a mid-loop failure that must still reach the caller. It cannot
+    // propagate with `?` from inside the loop: that would jump straight out
+    // of `run_session` and over the teardown below, leaking both audio
+    // capture threads and the WGC session (`CaptureControl` has no `Drop`).
+    // Stashing it and `break`-ing instead means every exit route — success,
+    // `Stop`, disconnect, or this — runs the teardown exactly once, and the
+    // error surfaces only after it has.
+    let mut pending_error: Option<anyhow::Error> = None;
     loop {
         match commands.recv_timeout(Duration::from_millis(250)) {
             Ok(EngineCommand::Clip { reply }) => {
@@ -1060,9 +1069,13 @@ fn run_session(
                         // --auto-clip that fires before the ring has buffered
                         // anything must say so: a verification run that
                         // silently produces no clip looks like a pass.
-                        match save_clip(&capture, &clip_dir, &encoder_name)? {
-                            Some(saved) => print_clip_line(&saved),
-                            None => println!("nothing buffered yet — try again in a moment"),
+                        match save_clip(&capture, &clip_dir, &encoder_name) {
+                            Ok(Some(saved)) => print_clip_line(&saved),
+                            Ok(None) => println!("nothing buffered yet — try again in a moment"),
+                            Err(e) => {
+                                pending_error = Some(e);
+                                break;
+                            }
                         }
                     }
                 }
@@ -1091,6 +1104,9 @@ fn run_session(
         }
     } else if let Err(e) = capture.stop() {
         tracing::warn!("failed to stop capture: {e:#}");
+    }
+    if let Some(e) = pending_error {
+        return Err(e);
     }
     Ok(if session_died { SessionEnd::Died } else { SessionEnd::Shutdown })
 }

@@ -574,7 +574,13 @@ mod tests {
         // Both timelines silence-fill to the same target, so this is really a
         // guard: if they ever disagree, the mixer must hold the excess back
         // rather than emit misaligned audio it can never take back.
-        let (_a, system) = source(1000, 480);
+        //
+        // The system source carries two distinct values — 1000 then 2000 —
+        // rather than one repeated value: a single repeated value cannot
+        // distinguish "the retained remainder came back" from "an un-drained
+        // prefix was re-emitted," since both read back identically. See
+        // `two_value_source`.
+        let (_a, system) = two_value_source(1000, 240, 2000, 240);
         let (_b, mic) = source(500, 240);
         let mut mixer =
             AudioMixer::with_sources(Some(system), Some(mic), AudioGains::new(100, 100));
@@ -592,7 +598,10 @@ mod tests {
         let more_frames: usize =
             more.iter().map(|(_, s)| s.len()).sum::<usize>() / (ENCODER_BLOCK_ALIGN / 2);
         assert_eq!(more_frames, 240, "the held-back audio was discarded rather than retained");
-        assert!(more[0].1.iter().all(|&s| s == 1000), "the retained system audio was corrupted");
+        assert!(
+            more[0].1.iter().all(|&s| s == 2000),
+            "the retained system audio was corrupted, or a never-drained prefix was re-emitted"
+        );
     }
 
     #[test]
@@ -657,6 +666,51 @@ mod tests {
             expected_start += (chunk.len() / (ENCODER_BLOCK_ALIGN / 2)) as u64;
         }
         assert_eq!(mixer.frames_emitted(), expected_start);
+    }
+
+    #[test]
+    fn a_single_source_drain_keeps_a_later_pump_from_reading_a_stale_prefix() {
+        // Mirrors `held_back_audio_emerges_intact_on_a_later_pump`, but for
+        // the (Some(system), None) arm: with no mic to bound the first pump,
+        // `two_value_source`'s two packets would both land in `staged` on
+        // the very first pump (the timeline drains everything pending
+        // regardless of target), defeating the point. Sending them to the
+        // channel one at a time, between pumps, is what actually exercises
+        // "the next pump reads what the previous one left behind."
+        //
+        // Two distinct values, not one repeated: if the drain at the tail of
+        // this arm were skipped, the second pump would read the first
+        // packet's un-drained bytes off the front of `staged` instead of the
+        // second packet's — a single repeated value cannot tell that apart
+        // from correct behaviour.
+        let (tx, rx) = channel();
+        let first_samples = vec![1000i16; 240 * ENCODER_BLOCK_ALIGN / 2];
+        tx.send(AudioPacket { qpc_100ns: 0, data: pcm(&first_samples) })
+            .expect("receiver is alive");
+        let mut mixer = AudioMixer::with_sources(Some(rx), None, AudioGains::new(100, 100));
+        mixer.start(0);
+
+        let first = drain(&mut mixer, frames_to_100ns(240));
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].0, 0, "the first chunk starts at frame 0");
+        assert!(first[0].1.iter().all(|&s| s == 1000), "the first packet's value was not emitted");
+
+        let second_samples = vec![2000i16; 240 * ENCODER_BLOCK_ALIGN / 2];
+        tx.send(AudioPacket { qpc_100ns: frames_to_100ns(240), data: pcm(&second_samples) })
+            .expect("receiver is alive");
+
+        let second = drain(&mut mixer, frames_to_100ns(480));
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].0, 240, "the second chunk did not continue from the first");
+        assert_eq!(
+            second[0].1.len(),
+            240 * ENCODER_BLOCK_ALIGN / 2,
+            "the second chunk re-emitted the un-drained first packet alongside the second"
+        );
+        assert!(
+            second[0].1.iter().all(|&s| s == 2000),
+            "the second pump re-emitted the un-drained first packet instead of the second"
+        );
     }
 
     #[test]
