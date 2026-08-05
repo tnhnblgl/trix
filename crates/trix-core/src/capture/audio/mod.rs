@@ -25,6 +25,24 @@ pub const SILENCE_GRACE_100NS: i64 = 1_000_000; // 100 ms
 /// is audible as constant crackle (518 splices in 5.5 s of continuous tone).
 pub const CONTINUITY_DEAD_BAND_100NS: i64 = 200_000; // 20 ms
 
+/// A gap between two packets larger than this is a bad timestamp, not a real
+/// idle period — the timeline should log it once and re-anchor rather than
+/// synthesize silence for it.
+///
+/// A genuinely idle source (loopback delivers nothing while a game is muted,
+/// a microphone nobody is talking into) is self-limiting here: `pump`'s own
+/// trailing fill reconciles against `target_qpc` — driven by the *video*
+/// pacer, a clock this audio device cannot corrupt — on every call, so a real
+/// gap is always caught up to within one pump interval; it can never show up,
+/// all at once, as a single packet claiming a huge `delta`. A bad device
+/// clock is the opposite shape: the classic case is a driver reporting
+/// FILETIME (100 ns ticks since 1601) where QPC (100 ns ticks since boot) was
+/// expected, which is off by decades, not seconds. The two failure modes are
+/// separated by orders of magnitude, so this bound does not need to be tuned
+/// finely — five minutes is comfortably above any pacing jitter or scheduler
+/// stall and comfortably below "the clock is simply wrong."
+pub const MAX_SANE_SILENCE_GAP_100NS: i64 = 5 * 60 * 10_000_000; // 5 minutes
+
 /// One capture packet: interleaved i16 stereo 48 kHz bytes plus the QPC
 /// timestamp (100 ns units) of its first sample.
 pub struct AudioPacket {
