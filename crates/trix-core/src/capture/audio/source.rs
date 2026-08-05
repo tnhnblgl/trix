@@ -53,7 +53,10 @@ impl AudioSourceKind {
     }
 }
 
-/// An event-driven shared-mode loopback session on the default render device.
+/// An event-driven shared-mode capture session on whichever default device
+/// [`AudioSourceKind::direction`] resolves to. "Loopback" describes only the
+/// system-audio case (a capture client initialized against the render
+/// device); against a capture device this is an ordinary microphone stream.
 struct WasapiSession {
     client: AudioClient,
     event: Handle,
@@ -76,7 +79,7 @@ impl WasapiSession {
                 // 200 ms device buffer: ample slack, engine period stays ~10 ms.
                 &StreamMode::EventsShared { autoconvert: true, buffer_duration_hns: 2_000_000 },
             )
-            .map_err(|e| anyhow!("loopback init failed: {e}"))?;
+            .map_err(|e| anyhow!("{} init failed: {e}", kind.label()))?;
         let event = client.set_get_eventhandle().map_err(|e| anyhow!("event handle: {e}"))?;
         let capture =
             client.get_audiocaptureclient().map_err(|e| anyhow!("capture client: {e}"))?;

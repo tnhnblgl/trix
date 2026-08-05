@@ -20,7 +20,7 @@ use super::{
 /// crowds into the bottom third of the travel. Squaring is the standard fader
 /// taper. Values above 100 clamp: 100 is unity and the maximum, so Trix can
 /// never be the reason a clip clips.
-pub fn percent_to_gain(percent: u32) -> f32 {
+fn percent_to_gain(percent: u32) -> f32 {
     let fraction = percent.min(100) as f32 / 100.0;
     fraction * fraction
 }
@@ -30,7 +30,7 @@ pub fn percent_to_gain(percent: u32) -> f32 {
 /// Unity returns untouched rather than multiplying by 1.0, which keeps the
 /// default single-source path bit-for-bit identical to what Trix recorded
 /// before mixing existed.
-pub fn apply_gain(pcm: &mut [u8], gain: f32) {
+fn apply_gain(pcm: &mut [u8], gain: f32) {
     if gain == 1.0 {
         return;
     }
@@ -48,7 +48,7 @@ pub fn apply_gain(pcm: &mut [u8], gain: f32) {
 /// truncate the other, which would be a permanent A/V desync rather than a
 /// glitch. Summing in i32 and clamping means a loud game plus a loud voice
 /// distorts; wrapping would invert the waveform and produce a scream.
-pub fn mix_into(dst: &mut [u8], src: &[u8], gain: f32) {
+fn mix_into(dst: &mut [u8], src: &[u8], gain: f32) {
     let common = dst.len().min(src.len());
     let whole_samples = common - (common % 2);
     let pairs = dst[..whole_samples].chunks_exact_mut(2).zip(src[..whole_samples].chunks_exact(2));

@@ -4,7 +4,7 @@ mod mixer;
 mod source;
 mod timeline;
 
-pub use mixer::{AudioGains, AudioMixer, apply_gain, mix_into, percent_to_gain};
+pub use mixer::{AudioGains, AudioMixer};
 pub use source::{AudioCapture, AudioSourceKind, record_wav};
 pub use timeline::AudioTimeline;
 

@@ -157,7 +157,7 @@ impl Config {
         let Some(path) = Self::path() else {
             return Self::default();
         };
-        match std::fs::read_to_string(&path) {
+        let mut config = match std::fs::read_to_string(&path) {
             Ok(text) => match toml::from_str(&text) {
                 Ok(config) => config,
                 Err(error) => {
@@ -166,7 +166,25 @@ impl Config {
                 }
             },
             Err(_) => Self::default(),
-        }
+        };
+        config.clamp_volumes();
+        config
+    }
+
+    /// Clamps the two capture levels to their documented 0..=100 range.
+    ///
+    /// `config.set` enforces this range itself (`state.rs`'s bounds table), but
+    /// a hand-edited `config.toml` bypasses that check entirely — `toml`
+    /// deserializes `mic_volume = 500` into a `u32` without complaint, since
+    /// nothing at the type level says otherwise. Left unclamped, `config.get`
+    /// would report 500 and the Settings page would render "500%" next to a
+    /// slider pinned at 100, while `AudioGains::new`'s own `.min(100)` quietly
+    /// capped what capture actually applied — display and reality would
+    /// disagree. This is the one place that has to catch a value nothing else
+    /// validates.
+    fn clamp_volumes(&mut self) {
+        self.system_volume = self.system_volume.min(100);
+        self.mic_volume = self.mic_volume.min(100);
     }
 
     /// Resolved clip directory (spec §5.1). A flat, timestamped folder —
@@ -287,5 +305,23 @@ mod tests {
             .expect("an explicit zero still parses");
         assert_eq!(config.system_volume, 0);
         assert_eq!(config.mic_volume, 0);
+    }
+
+    /// `config.set` refuses an out-of-range level by name (`state.rs`'s bounds
+    /// table), but that check has no say over a `config.toml` edited by hand.
+    /// `toml::from_str` happily parses `mic_volume = 500` into a `u32` --
+    /// `clamp_volumes` (called from `Config::load`, since `load` resolves its
+    /// path from `%APPDATA%` and cannot be pointed at a fixture here) is the
+    /// only place left to catch it, and it has to, or the Settings page
+    /// renders "500%" next to a slider capture never actually reaches
+    /// (`AudioGains::new` clamps to 100 regardless).
+    #[test]
+    fn a_hand_edited_out_of_range_level_is_clamped() {
+        let mut config: Config = toml::from_str("system_volume = 500\nmic_volume = 9001\n")
+            .expect("an out-of-range level still parses");
+        assert_eq!(config.system_volume, 500, "unclamped straight out of toml::from_str");
+        config.clamp_volumes();
+        assert_eq!(config.system_volume, 100, "500% must clamp to the documented maximum");
+        assert_eq!(config.mic_volume, 100, "9001% must clamp to the documented maximum");
     }
 }
