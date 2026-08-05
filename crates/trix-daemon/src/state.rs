@@ -238,6 +238,14 @@ pub(crate) const REQUIRES_REARM: [&str; 7] = [
 ///   "no ceiling"; 10 TB is past any drive this is likely to run on, and the
 ///   ceiling only ever *deletes*, so an absurdly large value is inert while an
 ///   absurdly small one is already handled (favorites are never pruned).
+/// - `system_volume` 0..=100 — a percentage, where 100 is unity and the
+///   maximum: Trix attenuates but never amplifies, so there is no legal value
+///   above it. 0 stays legal and means the loopback stream is never opened.
+/// - `mic_volume` 0..=100 — the same taper, and 0 carries more weight here than
+///   anywhere else in this table: it is the *only* way to turn the microphone
+///   off, because there is no separate toggle. Windows shows a microphone
+///   indicator whenever a process holds an input stream, so 0 must leave the
+///   stream unopened rather than open it and scale to silence.
 ///
 /// The keys deliberately absent are the non-numeric ones. `rate_control` and
 /// `gpu_priority` both document falling back on an unknown value

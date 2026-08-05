@@ -274,4 +274,18 @@ mod tests {
         assert_eq!(config.system_volume, 100);
         assert_eq!(config.mic_volume, 100);
     }
+
+    #[test]
+    fn an_explicit_zero_survives_the_defaulting() {
+        // The one value `#[serde(default)]` could plausibly eat. 0 is not
+        // "unset" here -- it is how the user turns a source off, and for the
+        // microphone it is the *only* way, since there is no separate toggle.
+        // Silently restoring 100 would reopen the stream and put the Windows
+        // microphone indicator back in the taskbar of someone who switched it
+        // off on purpose.
+        let config: Config = toml::from_str("system_volume = 0\nmic_volume = 0\n")
+            .expect("an explicit zero still parses");
+        assert_eq!(config.system_volume, 0);
+        assert_eq!(config.mic_volume, 0);
+    }
 }
