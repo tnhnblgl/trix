@@ -1624,11 +1624,24 @@ cargo test -p trix-daemon volume 2>&1 | tail -20
 cargo test -p trix-daemon rearm 2>&1 | tail -20
 ```
 
-Expected: `config.set: unknown key "mic_volume"` from the first, and `no field gains on type Daemon` from the last two.
+Expected: a **compile** failure, `no field gains on type Daemon` — not a runtime assertion failure.
+The `gains` field does not exist yet, so the whole `trix-daemon` test binary fails to build and all
+three tests report that one error together.
 
-- [ ] **Step 3: Add the bounds**
+(The plan originally expected `config.set: unknown key "mic_volume"` from the first test. That is no
+longer right: Task 6 added both config keys and their `NUMERIC_BOUNDS` entries, so `mic_volume` is
+already a known, range-checked key. Only the `gains` field is still missing.)
 
-In `crates/trix-daemon/src/state.rs`, change the array length and add two entries:
+- [ ] **Step 3: Add the bounds — ⚠️ ALREADY DONE IN TASK 6, verify only**
+
+**Do not re-apply this step.** Task 6 was forced to land it early: `every_numeric_config_key_is_range_checked`
+(`state.rs`) asserts that every numeric key in a serialized default `Config` has a `NUMERIC_BOUNDS`
+entry, so the moment Task 6 added `system_volume`/`mic_volume` to `Config`, Task 6's own suite went
+red until the bounds existed. The plan missed that ordering dependency; the project's guard caught
+it. Commit `e25423f`.
+
+Confirm `state.rs` already reads exactly as below — array length `9`, with the two new entries last —
+and move to Step 4. If it does, this step is a no-op. **Do not bump the length to 11.**
 
 ```rust
 const NUMERIC_BOUNDS: [(&str, u64, u64); 9] = [
