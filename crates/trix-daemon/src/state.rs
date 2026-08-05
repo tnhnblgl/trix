@@ -1305,6 +1305,10 @@ mod tests {
     /// is editing the settings of whoever ran `cargo test`.
     fn writable(name: &str) -> (Daemon, PathBuf) {
         let dir = std::env::temp_dir().join(format!("trix-vol-{name}-{}", std::process::id()));
+        // The name is only unique per process id, and a test that fails an
+        // assertion never reaches its `cleanup`. Without this, a reused pid
+        // inherits the previous run's `config.toml` and clips.
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch directory");
         let config = Config {
             clip_dir: dir.join("clips").to_string_lossy().into_owned(),
@@ -1818,6 +1822,25 @@ mod tests {
         let (daemon, dir) = writable("refused-gains");
         daemon.set_config(&one("mic_volume", 999)).expect_err("999 is out of range");
         assert_eq!(daemon.gains.mic_percent(), 100);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn setting_one_level_leaves_the_other_alone() {
+        // `gains.set` takes both percentages at once, so it reads them out of
+        // the committed config rather than the request. Reading them from the
+        // request instead would look correct in every single-key test and
+        // silently zero the untouched source the moment a user moved one
+        // slider -- the failure would be a mic that went dead when you turned
+        // the game down.
+        let (daemon, dir) = writable("one-at-a-time");
+        daemon.set_config(&one("mic_volume", 30)).expect("30 is in range");
+        assert_eq!(daemon.gains.mic_percent(), 30);
+        assert_eq!(daemon.gains.system_percent(), 100, "the untouched level keeps its value");
+
+        daemon.set_config(&one("system_volume", 40)).expect("40 is in range");
+        assert_eq!(daemon.gains.system_percent(), 40);
+        assert_eq!(daemon.gains.mic_percent(), 30, "the level set a moment ago survives");
         cleanup(&dir);
     }
 }
