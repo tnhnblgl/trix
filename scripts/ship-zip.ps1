@@ -34,9 +34,12 @@
 
       * Both test suites pass -- Rust and frontend.
 
-      * Every binary is newer than the newest source file, using the same
-        Get-NewestSourceFile that protocol-smoke.ps1 and arm-cycle-leak.ps1
-        use. This catches the build that silently did not run, which is not
+      * Every binary is newer than the newest source file as it stood BEFORE
+        the build started, using the same Get-NewestSourceFile that
+        protocol-smoke.ps1 and arm-cycle-leak.ps1 use. The timestamp is
+        sampled up front because the build edits source itself -- see the
+        comment at that line. This catches a build that silently did not run,
+        which is not
         hypothetical: on 2026-08-06 the memory soak was nearly run against a
         three-day-old trix-daemon.exe that predated the entire audio feature,
         because only a debug build had been made. A gate that runs against a
@@ -189,6 +192,17 @@ if ($SkipTests) {
 Write-Host ''
 Write-Host 'Step 3: release build' -ForegroundColor Cyan
 
+# Snapshotted BEFORE the build, and that ordering is the whole point. The
+# freshness check below asks "is every binary newer than every source file as
+# it stood when this run began" -- which is answerable. Asking it after the
+# build is not, because the build mutates source files itself: `cargo tauri
+# build` rewrites crates\trix-ui\Cargo.toml every single time (line endings
+# only -- `git diff` on it comes back empty), so that file always ends up
+# newer than the binaries the same run produced. Sampling afterwards failed
+# this gate on its first real run, blaming trix.exe for a rebuild that had in
+# fact happened correctly minutes earlier.
+$newestSource = Get-NewestSourceFile -RepoRoot $RepoRoot
+
 Push-Location $RepoRoot
 try { cargo build --release -p trix-cli -p trix-daemon } finally { Pop-Location }
 Require -Name 'cargo build --release (cli, daemon)' -Condition ($LASTEXITCODE -eq 0) -Detail "exit code $LASTEXITCODE"
@@ -210,11 +224,10 @@ foreach ($b in $binaries) {
     Require -Name "$b exists" -Condition (Test-Path -LiteralPath (Join-Path $relDir $b)) -Detail (Join-Path $relDir $b)
 }
 
-$newestSource = Get-NewestSourceFile -RepoRoot $RepoRoot
 foreach ($b in $binaries) {
     $built = (Get-Item -LiteralPath (Join-Path $relDir $b)).LastWriteTime
-    Require -Name "$b is newer than the newest source file" -Condition ($built -ge $newestSource.LastWriteTime) `
-        -Detail "$b built $built, but $($newestSource.Name) was written $($newestSource.LastWriteTime) -- the build did not run"
+    Require -Name "$b is newer than the newest pre-build source file" -Condition ($built -ge $newestSource.LastWriteTime) `
+        -Detail "$b built $built, but $($newestSource.FullName) was written $($newestSource.LastWriteTime) -- the build did not run"
 }
 
 Write-Host ''
@@ -281,6 +294,20 @@ Write-Host ("  " + $zip.FullName)
 Write-Host ("  " + [math]::Round($zip.Length / 1MB, 2) + " MB")
 Write-Host ("  SHA256  " + $sha)
 Write-Host ''
+
+# The tree was clean at Step 1 and the build dirtied it. Said out loud rather
+# than quietly repaired: this script does not run `git checkout` on the user's
+# files. The one file it happens to is crates\trix-ui\Cargo.toml, rewritten by
+# cargo tauri build with different line endings and identical content.
+Push-Location $RepoRoot
+try { $dirtyAfter = @(git status --porcelain) } finally { Pop-Location }
+if ($dirtyAfter.Count -gt 0 -and $isClean) {
+    Write-Host 'Note: the build left the working tree dirty. Expected -- cargo tauri build' -ForegroundColor Yellow
+    Write-Host '      rewrites crates\trix-ui\Cargo.toml with different line endings and the' -ForegroundColor Yellow
+    Write-Host '      same content. Restore it with: git checkout -- crates/trix-ui/Cargo.toml' -ForegroundColor Yellow
+    Write-Host ''
+}
+
 if ($SkipTests) {
     Write-Host "SHIP ZIP BUILT WITHOUT TESTS  ($passed checks) -- NOT A RELEASE ARTIFACT" -ForegroundColor Yellow
 } else {
