@@ -63,3 +63,16 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+
+# Keep the debug build off the disk-space cliff. A Tauri dependency tree is
+# ~600 crates, and by default every one of them is compiled with full debug
+# info, which is the bulk of an 11 GB target/debug/deps. Nobody here steps
+# into wry or webview2-com with a debugger, so that cost buys nothing.
+#
+# Our own crates keep line tables, so panics still report file and line —
+# which is the only thing the backtraces in this project are ever read for.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
