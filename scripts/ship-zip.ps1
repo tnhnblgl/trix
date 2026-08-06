@@ -34,19 +34,22 @@
 
       * Both test suites pass -- Rust and frontend.
 
-      * Every binary is newer than the newest source file as it stood BEFORE
-        the build started, using the same Get-NewestSourceFile that
-        protocol-smoke.ps1 and arm-cycle-leak.ps1 use. The timestamp is
-        sampled up front because the build edits source itself -- see the
-        comment at that line. This catches a build that silently did not run,
-        which is not
-        hypothetical: on 2026-08-06 the memory soak was nearly run against a
-        three-day-old trix-daemon.exe that predated the entire audio feature,
-        because only a debug build had been made. A gate that runs against a
-        stale binary proves nothing at all.
+      * trix.exe reports the expected version when run from the STAGED folder,
+        and trix-ui.exe's embedded version resource matches. Staged, not
+        target\release, so what gets checked is the file that goes in the zip.
 
-      * trix.exe reports the expected version when run from the staged folder,
-        and trix-ui.exe's embedded version resource matches.
+        This is where the freshness question is answered, and it is worth
+        saying why it is not answered with a timestamp comparison the way
+        protocol-smoke.ps1 and arm-cycle-leak.ps1 do. Those scripts consume a
+        binary somebody else built, so mtimes are all they have. This one runs
+        cargo itself, which makes cargo's fingerprint the authority -- it
+        hashes inputs, flags and features rather than trusting a clock. See
+        the long comment in Step 4; an mtime check there gave two different
+        false failures before it was removed.
+
+        trix-daemon.exe rests on cargo's fingerprint alone: it carries no
+        version resource, and running it to ask is precisely the mistake this
+        script refuses to make (see below).
 
     ON RUNNING THE TESTS: neither test command is piped anywhere. In PowerShell
     as in POSIX shells, the exit code of `cmd | tail` is tail's, so a piped
@@ -125,17 +128,6 @@ function Require {
     if (-not $Condition) { throw "$Name -- $Detail" }
 }
 
-# Same AST extraction arm-cycle-leak.ps1 uses, for the same reason: copying
-# the function would let two gates drift apart on what "fresh" means.
-$smoke = Join-Path $PSScriptRoot 'protocol-smoke.ps1'
-if (-not (Test-Path -LiteralPath $smoke)) { throw "protocol-smoke.ps1 not found next to this script: $smoke" }
-$ast = [System.Management.Automation.Language.Parser]::ParseFile($smoke, [ref]$null, [ref]$null)
-$fn = $ast.FindAll({ param($n)
-    $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-    $n.Name -eq 'Get-NewestSourceFile' }, $true) | Select-Object -First 1
-if (-not $fn) { throw 'Get-NewestSourceFile not found in protocol-smoke.ps1' }
-. ([scriptblock]::Create($fn.Extent.Text))
-
 Write-Host ''
 Write-Host 'Step 1: version and working tree' -ForegroundColor Cyan
 
@@ -192,17 +184,6 @@ if ($SkipTests) {
 Write-Host ''
 Write-Host 'Step 3: release build' -ForegroundColor Cyan
 
-# Snapshotted BEFORE the build, and that ordering is the whole point. The
-# freshness check below asks "is every binary newer than every source file as
-# it stood when this run began" -- which is answerable. Asking it after the
-# build is not, because the build mutates source files itself: `cargo tauri
-# build` rewrites crates\trix-ui\Cargo.toml every single time (line endings
-# only -- `git diff` on it comes back empty), so that file always ends up
-# newer than the binaries the same run produced. Sampling afterwards failed
-# this gate on its first real run, blaming trix.exe for a rebuild that had in
-# fact happened correctly minutes earlier.
-$newestSource = Get-NewestSourceFile -RepoRoot $RepoRoot
-
 Push-Location $RepoRoot
 try { cargo build --release -p trix-cli -p trix-daemon } finally { Pop-Location }
 Require -Name 'cargo build --release (cli, daemon)' -Condition ($LASTEXITCODE -eq 0) -Detail "exit code $LASTEXITCODE"
@@ -224,11 +205,30 @@ foreach ($b in $binaries) {
     Require -Name "$b exists" -Condition (Test-Path -LiteralPath (Join-Path $relDir $b)) -Detail (Join-Path $relDir $b)
 }
 
-foreach ($b in $binaries) {
-    $built = (Get-Item -LiteralPath (Join-Path $relDir $b)).LastWriteTime
-    Require -Name "$b is newer than the newest pre-build source file" -Condition ($built -ge $newestSource.LastWriteTime) `
-        -Detail "$b built $built, but $($newestSource.FullName) was written $($newestSource.LastWriteTime) -- the build did not run"
-}
+# NO TIMESTAMP FRESHNESS CHECK HERE, deliberately, and the asymmetry with
+# protocol-smoke.ps1 and arm-cycle-leak.ps1 is the point. Those scripts do not
+# build: they consume a binary somebody else made, so "is this newer than the
+# source" is the only question they can ask, and asking it is what stops a gate
+# running green against a stale exe.
+#
+# This script ran cargo itself, four lines up. That makes cargo's fingerprint
+# the authority, and it is a far stronger one than an mtime heuristic -- it
+# hashes inputs, flags and features rather than trusting a clock. An mtime
+# comparison here is not merely redundant, it is WRONG, and both wrong answers
+# showed up on the first two runs of this script:
+#
+#   * `cargo tauri build` rewrites crates\trix-ui\Cargo.toml on every single
+#     invocation (line endings only -- `git diff` on it comes back empty), so
+#     a source file is always newer than the binaries the same run produced.
+#   * Even sampled before the build, the check still fails honestly-built
+#     binaries: cargo correctly does not relink trix.exe when nothing that
+#     feeds trix-cli changed, so a touched file anywhere under crates\ leaves
+#     an up-to-date trix.exe looking stale. Nothing is wrong; the question is.
+#
+# What replaces it is a claim that can actually be checked: the staged trix.exe
+# reports the version this script read out of Cargo.toml, and trix-ui.exe's
+# version resource agrees. Both are below, and both run against the staged
+# copies rather than target\release.
 
 Write-Host ''
 Write-Host 'Step 5: stage and package' -ForegroundColor Cyan
