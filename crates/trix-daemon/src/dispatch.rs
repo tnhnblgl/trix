@@ -95,6 +95,7 @@ impl ClientHandler for Daemon {
                 fields.insert("enabled".to_string(), Value::Bool(enabled));
                 Response::ok(request.id, Value::Object(fields))
             }
+            Ok(Command::Shutdown) => shutdown(request.id),
             // No catch-all arm. Every `Command` variant is answered here now,
             // so the match is exhaustive and the compiler — not a reviewer —
             // is what stops a command added to `trix-proto` later from
@@ -317,6 +318,24 @@ fn error_data(cmd: &str, error: &str) -> Value {
     fields.insert("cmd".to_string(), Value::from(cmd));
     fields.insert("error".to_string(), Value::from(error));
     Value::Object(fields)
+}
+
+/// Ends the daemon, and answers first.
+///
+/// `request_shutdown` only sets the flag that `main.rs`'s shutdown watcher
+/// polls at 100 ms -- the same flag the tray's Quit item sets. That indirection
+/// is what makes the reply reliable without a sleep here: this function returns
+/// a `Response` the pipe writer flushes immediately, and the watcher does not
+/// even look at the flag until long after. It then removes the tray icon,
+/// disarms within its budget, and exits, so a clip being muxed right now is
+/// still finished.
+fn shutdown(id: u64) -> Response {
+    tracing::info!("shutdown requested over the control socket");
+    trix_core::control::request_shutdown();
+    let mut fields = Map::new();
+    fields.insert("ok".to_string(), Value::Bool(true));
+    fields.insert("pid".to_string(), Value::from(std::process::id()));
+    Response::ok(id, Value::Object(fields))
 }
 
 #[cfg(test)]
@@ -1130,6 +1149,25 @@ mod tests {
         assert!(
             response.error.unwrap_or_default().contains("launch_missiles"),
             "the error should name what was not understood"
+        );
+    }
+
+    /// The reply must be produced by `dispatch`, not inferred by the caller from
+    /// a dropped pipe: a daemon that exited first is indistinguishable from one
+    /// that crashed. The PID rides along because the app cannot always hold a
+    /// process handle -- with "Start with Windows" on, the daemon was started at
+    /// login by the shell, not by the app's supervisor.
+    #[test]
+    fn shutdown_answers_with_its_own_pid_before_the_process_goes_away() {
+        let daemon = idle("shutdown_pid");
+        let response = daemon.dispatch(1, &request(9, "shutdown"));
+
+        let data = response.data.expect("shutdown answers with data");
+        assert_eq!(data.get("ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            data.get("pid").and_then(Value::as_u64),
+            Some(u64::from(std::process::id())),
+            "the caller terminates this PID if the daemon does not leave in time"
         );
     }
 }

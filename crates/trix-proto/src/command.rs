@@ -27,6 +27,9 @@ pub enum Command {
     MonitorsList,
     EncodersList,
     StatsSubscribe { enabled: bool },
+    /// Ends the daemon process. Answered before the process exits, so the
+    /// caller can tell a clean shutdown from a crashed socket.
+    Shutdown,
 }
 
 impl Command {
@@ -69,6 +72,7 @@ impl Command {
             "monitors.list" => Self::MonitorsList,
             "encoders.list" => Self::EncodersList,
             "stats.subscribe" => Self::StatsSubscribe { enabled: bool_arg(req, "enabled")? },
+            "shutdown" => Self::Shutdown,
             other => return Err(format!("unknown command {other:?}")),
         })
     }
@@ -186,5 +190,15 @@ mod tests {
     fn a_line_without_an_id_is_not_a_request() {
         assert!(decode_request(r#"{"cmd":"arm"}"#).is_err());
         assert!(decode_request("not json at all").is_err());
+    }
+
+    /// The app sends this before replacing trix-daemon.exe on disk. It is the
+    /// only command whose success the caller confirms by watching the process
+    /// leave, so it must parse from a bare request with no arguments.
+    #[test]
+    fn shutdown_parses_with_no_arguments() {
+        let (id, cmd) = parse(r#"{"id":3,"cmd":"shutdown"}"#);
+        assert_eq!(id, 3);
+        assert_eq!(cmd.unwrap(), Command::Shutdown);
     }
 }
