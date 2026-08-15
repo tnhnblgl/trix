@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { FIELDS, READ_ONLY_EXTRAS, unknownKeys, validate } from './settings';
+import { FIELDS, READ_ONLY_EXTRAS, SECTIONS, unknownKeys, validate } from './settings';
 
 describe('FIELDS', () => {
   it('covers every config key the daemon has today', () => {
     const shipped = [
       'fps', 'bitrate_kbps', 'max_bitrate_kbps', 'rate_control', 'replay_seconds',
       'monitor_index', 'clip_hotkey', 'gpu_priority', 'stats_seconds', 'clip_dir',
-      'max_library_gb', 'autostart', 'system_volume', 'mic_volume',
+      'max_library_gb', 'autostart', 'system_volume', 'mic_volume', 'check_for_updates',
     ];
     const covered = FIELDS.map((f) => f.key);
     for (const key of shipped) expect(covered).toContain(key);
@@ -74,5 +74,15 @@ describe('settings fields', () => {
     const fromDaemon = { check_for_updates: true, ...Object.fromEntries(READ_ONLY_EXTRAS.map((k) => [k, ''])) };
     expect(unknownKeys(fromDaemon)).toEqual([]);
     expect(FIELDS.find((f) => f.key === 'check_for_updates')?.kind).toBe('bool');
+  });
+
+  it('has every FIELDS section rendered by SECTIONS', () => {
+    // Settings.svelte iterates SECTIONS, not FIELDS, to decide what headings
+    // to draw. A field whose `section` is not in SECTIONS is valid TypeScript
+    // (svelte-check never checks the array literal against the union) but
+    // never reaches the screen -- exactly what happened to `check_for_updates`
+    // and `'Updates'` before SECTIONS existed.
+    const usedSections = new Set(FIELDS.map((f) => f.section));
+    for (const section of usedSections) expect(SECTIONS).toContain(section);
   });
 });

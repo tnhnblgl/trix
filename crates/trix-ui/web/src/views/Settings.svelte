@@ -2,7 +2,7 @@
   import { onDestroy } from 'svelte';
   import { call, onDaemonEvent } from '../lib/ipc';
   import { app } from '../lib/state.svelte';
-  import { FIELDS, unknownKeys, validate } from '../lib/settings';
+  import { FIELDS, SECTIONS, unknownKeys, validate } from '../lib/settings';
   import Field from '../components/Field.svelte';
   import type { Monitor } from '../lib/types';
 
@@ -103,7 +103,7 @@
   </div>
 {/if}
 
-{#each ['Capture', 'Audio', 'Quality', 'Clips', 'Trix'] as section (section)}
+{#each SECTIONS as section (section)}
   <section>
     <h2>{section}</h2>
     {#each FIELDS.filter((f) => f.section === section) as field (field.key)}

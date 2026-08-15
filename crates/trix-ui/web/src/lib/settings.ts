@@ -63,6 +63,15 @@ export const FIELDS: Field[] = [
   { key: 'check_for_updates', label: 'Check for updates', kind: 'bool', section: 'Updates', help: 'Asks github.com once per launch whether a newer Trix exists. Sends nothing about you. Updates are never installed without you clicking.' },
 ];
 
+/**
+ * The sections `Settings.svelte` renders, in display order, and the single
+ * source of truth for it: the page iterates this constant instead of its own
+ * literal, so a `FIELDS` entry naming a section absent here is invisible
+ * rather than silently unrendered. `Updates` sits last because it is an
+ * app-level concern, below the capture and clip settings above it.
+ */
+export const SECTIONS: Field['section'][] = ['Capture', 'Audio', 'Quality', 'Clips', 'Trix', 'Updates'];
+
 function span(key: string): { min: number; max: number } {
   const [min, max] = BOUNDS[key];
   return { min, max };
