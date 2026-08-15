@@ -116,6 +116,55 @@ fn pipe_exists() -> bool {
     unsafe { WaitNamedPipeW(&HSTRING::from(PIPE_PATH), 1).as_bool() }
 }
 
+/// Pulls the PID out of a `shutdown` reply, if it said one.
+///
+/// A pure function of the reply -- present, absent, present but not a number,
+/// or present but too large for a `u32` -- so every one of those shapes can be
+/// tested without a call, a connection, or a daemon to answer one. The
+/// too-large case is not academic: `u32::try_from` failing folds a PID the
+/// daemon *did* tell us into the same `None` as a reply that never had one,
+/// and [`Supervisor::stop`] reports a different error for the two ("did not
+/// stop, even after being closed" vs. "did not say which process it is"), so
+/// getting this silently wrong changes which message the user sees.
+fn pid_from_reply(reply: &Value) -> Option<u32> {
+    reply.get("pid").and_then(Value::as_u64).and_then(|p| u32::try_from(p).ok())
+}
+
+/// Polls `gone` until it reports the thing waited for has gone, or `budget`
+/// runs out; sleeps `poll` between checks. Returns whether it went away in
+/// time.
+///
+/// The probe is checked *before* anything else, every time through the loop:
+/// an already-gone daemon returns `true` on the first call and never sleeps
+/// at all, which matters because the common case -- an idle daemon that was
+/// already on its way out -- must not be made to look slow. The deadline is
+/// only checked after that probe has come back negative, and the loop's last
+/// probe happens right at the deadline rather than up to one `poll` short of
+/// it: check, then check the clock, then sleep, in that order, never the
+/// reverse. That ordering is not cosmetic -- [`Supervisor::stop`] calls this
+/// with [`terminate`] on the other side of a `false`, and the one property
+/// the whole waiting scheme exists to guarantee is that `TerminateProcess`
+/// stays unreachable until the *full* budget has actually elapsed, not until
+/// a poll interval's worth of slack has been given away.
+///
+/// Takes the probe as a closure rather than calling [`pipe_exists`] directly
+/// so `stop`'s two waits -- the honest one before `terminate`, and the
+/// shorter confirmation after it -- can share this one loop instead of each
+/// hand-rolling it, and so a test can drive the loop from an in-process flag
+/// instead of a real named pipe.
+fn wait_until_gone(budget: Duration, poll: Duration, gone: &dyn Fn() -> bool) -> bool {
+    let deadline = Instant::now() + budget;
+    loop {
+        if gone() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(poll);
+    }
+}
+
 /// Last resort for a daemon that acknowledged `shutdown` and then wedged.
 fn terminate(pid: u32) -> Result<(), String> {
     use windows::Win32::Foundation::CloseHandle;
@@ -330,28 +379,25 @@ impl Supervisor {
     /// so a slow-but-honest shutdown is never the thing that gets terminated.
     pub fn stop(&self) -> Result<(), String> {
         let reply = self.call("shutdown", Map::new())?;
-        let pid = reply.get("pid").and_then(Value::as_u64).and_then(|p| u32::try_from(p).ok());
+        let pid = pid_from_reply(&reply);
 
-        let deadline = Instant::now() + SHUTDOWN_WAIT;
-        while Instant::now() < deadline {
-            if !pipe_exists() {
-                return Ok(());
-            }
-            std::thread::sleep(SHUTDOWN_POLL);
+        // `pipe_exists` reports whether the pipe is still there, i.e. the
+        // opposite of "gone" -- inverted here rather than changing what
+        // `pipe_exists` means everywhere else it's used.
+        let gone = || !pipe_exists();
+        if wait_until_gone(SHUTDOWN_WAIT, SHUTDOWN_POLL, &gone) {
+            return Ok(());
         }
 
         match pid {
             Some(pid) => {
                 terminate(pid)?;
                 // One more poll round: TerminateProcess is asynchronous.
-                let deadline = Instant::now() + Duration::from_secs(2);
-                while Instant::now() < deadline {
-                    if !pipe_exists() {
-                        return Ok(());
-                    }
-                    std::thread::sleep(SHUTDOWN_POLL);
+                if wait_until_gone(Duration::from_secs(2), SHUTDOWN_POLL, &gone) {
+                    Ok(())
+                } else {
+                    Err("the Trix recorder did not stop, even after being closed".into())
                 }
-                Err("the Trix recorder did not stop, even after being closed".into())
             }
             None => {
                 Err("the Trix recorder did not stop, and did not say which process it is".into())
@@ -362,6 +408,8 @@ impl Supervisor {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
 
     #[test]
@@ -452,5 +500,103 @@ mod tests {
             SHUTDOWN_POLL < Duration::from_secs(1),
             "the poll decides how quickly a fast shutdown is noticed"
         );
+    }
+
+    /// Already gone before the first check: the common case, an idle daemon
+    /// that had already let go of the pipe by the time `stop` got around to
+    /// looking. Must come back on the very first probe and must not sleep at
+    /// all — a real `SHUTDOWN_POLL` is 250 ms, and paying even one of those on
+    /// a daemon that was never there to wait for is exactly the "does not
+    /// look slow" property the module doc for `SHUTDOWN_POLL` promises.
+    #[test]
+    fn already_gone_returns_immediately_without_sleeping() {
+        let calls = AtomicUsize::new(0);
+        let probe = || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            true
+        };
+        let started = Instant::now();
+        let result = wait_until_gone(Duration::from_secs(10), Duration::from_millis(500), &probe);
+        let elapsed = started.elapsed();
+        assert!(result, "an already-gone probe must report gone");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "must return on the first probe, not loop");
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "must not have slept even once: {elapsed:?} elapsed against a 500 ms poll"
+        );
+    }
+
+    /// Gone after a few polls: the probe starts negative and flips true partway
+    /// through the budget. Must notice on the poll where it flips rather than
+    /// riding out the whole budget regardless.
+    #[test]
+    fn gone_after_a_few_polls_returns_true_before_the_budget_elapses() {
+        let calls = AtomicUsize::new(0);
+        let probe = || calls.fetch_add(1, Ordering::SeqCst) + 1 >= 3;
+        let budget = Duration::from_millis(500);
+        let started = Instant::now();
+        let result = wait_until_gone(budget, Duration::from_millis(10), &probe);
+        let elapsed = started.elapsed();
+        assert!(result, "a probe that eventually reports gone must return true");
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "must stop probing the moment it flips");
+        assert!(
+            elapsed < budget,
+            "must return well before the full budget when the daemon left partway through: \
+             {elapsed:?} against a {budget:?} budget"
+        );
+    }
+
+    /// Never gone: the probe that models a wedged daemon. Must return `false`,
+    /// and must not do so before the budget has actually elapsed — this is the
+    /// property [`Supervisor::stop`] leans on to keep `terminate` unreachable
+    /// until the honest wait has fully run out.
+    #[test]
+    fn never_gone_returns_false_only_after_the_budget_elapses() {
+        let calls = AtomicUsize::new(0);
+        let probe = || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            false
+        };
+        let budget = Duration::from_millis(80);
+        let started = Instant::now();
+        let result = wait_until_gone(budget, Duration::from_millis(10), &probe);
+        let elapsed = started.elapsed();
+        assert!(!result, "a probe that never reports gone must return false");
+        assert!(
+            elapsed >= budget,
+            "must not give up before the budget elapses: {elapsed:?} against a {budget:?} budget"
+        );
+        assert!(
+            calls.load(Ordering::SeqCst) > 1,
+            "must have actually polled more than once, not just checked once and slept out the clock"
+        );
+    }
+
+    #[test]
+    fn pid_from_reply_reads_a_well_formed_reply() {
+        let reply = serde_json::json!({"pid": 4242});
+        assert_eq!(pid_from_reply(&reply), Some(4242));
+    }
+
+    #[test]
+    fn pid_from_reply_is_none_without_a_pid_key() {
+        let reply = serde_json::json!({"status": "bye"});
+        assert_eq!(pid_from_reply(&reply), None, "no pid key, no PID to fall back on");
+    }
+
+    #[test]
+    fn pid_from_reply_is_none_when_pid_is_not_a_number() {
+        let reply = serde_json::json!({"pid": "4242"});
+        assert_eq!(pid_from_reply(&reply), None, "a string is not a PID, however numeric-looking");
+    }
+
+    /// A `pid` too large for `u32` must fold to `None`, the same as a reply
+    /// that never had one -- silently losing this would leave `stop` treating
+    /// "the daemon told us its PID" as "we can terminate it" when the value
+    /// cannot actually be used with `OpenProcess`.
+    #[test]
+    fn pid_from_reply_is_none_when_pid_overflows_u32() {
+        let reply = serde_json::json!({"pid": u64::from(u32::MAX) + 1});
+        assert_eq!(pid_from_reply(&reply), None, "must not silently truncate an oversized PID");
     }
 }
