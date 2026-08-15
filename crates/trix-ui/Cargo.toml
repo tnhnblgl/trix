@@ -21,6 +21,7 @@ trix-proto = { path = "../trix-proto" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+semver = "1"
 # `PeekNamedPipe` (Win32_System_Pipes) and `HANDLE` (Win32_Foundation), for the
 # non-blocking pipe reader in `src/pipe_reader.rs` -- see the long comment there.
 # `Win32_System_Threading` is `Supervisor::stop`'s `OpenProcess`/`TerminateProcess`
