@@ -30,6 +30,19 @@ pub(crate) const FIRST_RETRY: Duration = Duration::from_millis(400);
 /// quick enough that starting it from the tray feels instant here.
 pub(crate) const MAX_RETRY: Duration = Duration::from_secs(5);
 
+/// How long [`Supervisor::stop`] waits for the daemon to actually leave.
+///
+/// Disarming releases the capture stack, and that is not instant: the Intel
+/// driver stack has been measured holding on for about ten seconds after a
+/// disarm. Terminating inside that window would kill a daemon that was
+/// shutting down correctly, mid-mux, and cost the user the clip they had just
+/// saved. Fifteen seconds clears it with margin and still bounds a wedge.
+pub(crate) const SHUTDOWN_WAIT: Duration = Duration::from_secs(15);
+
+/// How often the pipe is probed while waiting. Fast enough that the common
+/// case -- an idle daemon, gone in well under a second -- does not look slow.
+pub(crate) const SHUTDOWN_POLL: Duration = Duration::from_millis(250);
+
 /// How long a connection has to last before it counts as one that really
 /// worked.
 ///
@@ -83,6 +96,41 @@ pub(crate) fn daemon_path_beside(ui_exe: &Path) -> Option<PathBuf> {
         return None;
     }
     Some(parent.join("trix-daemon.exe"))
+}
+
+/// Whether anything still owns the control pipe.
+///
+/// `WaitNamedPipe` rather than `CreateFile`: it asks whether the name exists
+/// without opening an instance, so probing cannot itself take the slot a
+/// reconnecting supervisor wants.
+///
+/// `WaitNamedPipeW` returns a raw `BOOL`, not a `windows::core::Result` --
+/// unlike `OpenProcess`/`TerminateProcess`/`CloseHandle` below, which are
+/// `Result`-returning wrappers. `BOOL::as_bool` is the direct read of it;
+/// there is no error value here worth keeping, only "does the name resolve".
+fn pipe_exists() -> bool {
+    use windows::Win32::System::Pipes::WaitNamedPipeW;
+    use windows::core::HSTRING;
+    // 1 ms, not zero: zero means "use the server's default timeout", which is
+    // whatever the daemon chose and not what is wanted here.
+    unsafe { WaitNamedPipeW(&HSTRING::from(PIPE_PATH), 1).as_bool() }
+}
+
+/// Last resort for a daemon that acknowledged `shutdown` and then wedged.
+fn terminate(pid: u32) -> Result<(), String> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, false, pid)
+            .map_err(|e| format!("could not open the recorder process: {e}"))?;
+        let result = TerminateProcess(handle, 1)
+            .map_err(|e| format!("could not stop the recorder process: {e}"));
+        // Closed on every path, success or failure: an error here is not worth
+        // surfacing over whatever `result` already carries, and leaking the
+        // handle would outlive the process it named.
+        let _ = CloseHandle(handle);
+        result
+    }
 }
 
 /// Lets the webview load `<dir>\*.mp4` and `*.jpg` through `asset:`.
@@ -266,6 +314,48 @@ impl Supervisor {
             .map_err(|e| format!("could not start the Trix daemon: {e}"))?;
         Ok(())
     }
+
+    /// Asks the daemon to exit and returns only once it actually has.
+    ///
+    /// The daemon's disappearance is observed on the pipe rather than on a
+    /// process handle: `\\.\pipe\trix-control` is bound with
+    /// `FILE_FLAG_FIRST_PIPE_INSTANCE`, so while the name resolves *some*
+    /// daemon owns it, and when it stops resolving the process is gone. That
+    /// works whether this app started the daemon or Windows did at login,
+    /// which a `Child` handle does not -- with "Start with Windows" on, the
+    /// supervisor never spawned it and holds nothing to wait on.
+    ///
+    /// The PID from the reply is the fallback for a daemon that answered and
+    /// then wedged. It is only ever used after [`SHUTDOWN_WAIT`] has elapsed,
+    /// so a slow-but-honest shutdown is never the thing that gets terminated.
+    pub fn stop(&self) -> Result<(), String> {
+        let reply = self.call("shutdown", Map::new())?;
+        let pid = reply.get("pid").and_then(Value::as_u64).and_then(|p| u32::try_from(p).ok());
+
+        let deadline = Instant::now() + SHUTDOWN_WAIT;
+        while Instant::now() < deadline {
+            if !pipe_exists() {
+                return Ok(());
+            }
+            std::thread::sleep(SHUTDOWN_POLL);
+        }
+
+        match pid {
+            Some(pid) => {
+                terminate(pid)?;
+                // One more poll round: TerminateProcess is asynchronous.
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while Instant::now() < deadline {
+                    if !pipe_exists() {
+                        return Ok(());
+                    }
+                    std::thread::sleep(SHUTDOWN_POLL);
+                }
+                Err("the Trix recorder did not stop, even after being closed".into())
+            }
+            None => Err("the Trix recorder did not stop, and did not say which process it is".into()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -338,6 +428,27 @@ mod tests {
         assert!(
             total > Duration::from_secs(20),
             "20 instant drops should take a minute or so, not a millisecond: {total:?}"
+        );
+    }
+
+    /// The wait is bounded because a wedged daemon must not be able to hang the
+    /// update forever, and generous because disarming releases the capture stack:
+    /// the Intel driver stack has been measured taking about ten seconds to let
+    /// go. A budget under that would terminate a daemon that was shutting down
+    /// correctly, mid-mux, costing the user the clip they just saved.
+    #[test]
+    fn the_shutdown_budget_outlasts_a_slow_driver_release() {
+        assert!(
+            SHUTDOWN_WAIT >= Duration::from_secs(12),
+            "the capture stack can take ~10 s to release; {SHUTDOWN_WAIT:?} would kill an honest shutdown"
+        );
+        assert!(
+            SHUTDOWN_WAIT <= Duration::from_secs(30),
+            "a user watching a progress bar will not wait {SHUTDOWN_WAIT:?} for a hung daemon"
+        );
+        assert!(
+            SHUTDOWN_POLL < Duration::from_secs(1),
+            "the poll decides how quickly a fast shutdown is noticed"
         );
     }
 }
