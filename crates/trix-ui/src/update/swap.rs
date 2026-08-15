@@ -209,9 +209,22 @@ fn roll_back<'a>(install: &Path, vacated: &[&'a str], rename: &Rename) -> Vec<&'
 /// purpose: a leftover `trix-ui.exe.old` is litter, not a fault, and the next
 /// launch tries again. Reporting it would be an error message about a file the
 /// user never knew existed.
+///
+/// The one thing it will not do is delete a `.old` file whose live name is
+/// empty. [`swap_in`] cannot leave the install that way -- its rollback closes
+/// that gap -- but something that stops this process outright between the two
+/// renames can, and then the `.old` file is the only copy of that program in
+/// existence. Sweeping it up would finish what the crash started, so it is put
+/// back instead. Everything else here is litter; this is a binary.
 pub fn cleanup(install: &Path) {
     for name in BINARIES {
-        let _ = std::fs::remove_file(install.join(format!("{name}{OLD_SUFFIX}")));
+        let live = install.join(name);
+        let old = install.join(format!("{name}{OLD_SUFFIX}"));
+        if live.is_file() {
+            let _ = std::fs::remove_file(&old);
+        } else if old.is_file() {
+            let _ = std::fs::rename(&old, &live);
+        }
     }
     let _ = std::fs::remove_dir_all(install.join(STAGING));
 }
@@ -342,6 +355,39 @@ mod tests {
         }
         assert!(!install.join(STAGING).exists());
         assert_eq!(contents(&install, "my-notes.txt"), "mine");
+        let _ = std::fs::remove_dir_all(&install);
+    }
+
+    /// The one case where deleting `.old` is the wrong move. A swap interrupted
+    /// between its two renames -- the machine lost power, the process was
+    /// killed -- leaves a name vacated, and the only copy of that program is the
+    /// `.old` file. Deleting it at the next launch would finish what the crash
+    /// started, so it goes back instead. Nothing else in this module can produce
+    /// that state; only something that stops the process outright can.
+    #[test]
+    fn cleanup_puts_back_a_binary_an_interrupted_swap_left_only_as_dot_old() {
+        let install = scratch("interrupted");
+        install_with(&install, "new");
+        std::fs::remove_file(install.join("trix-daemon.exe")).expect("remove");
+        std::fs::write(install.join(format!("trix-daemon.exe{OLD_SUFFIX}")), "old trix-daemon.exe")
+            .expect("write");
+        // An ordinary leftover beside it, which must still be swept away.
+        std::fs::write(install.join(format!("trix.exe{OLD_SUFFIX}")), "old trix.exe")
+            .expect("write");
+
+        cleanup(&install);
+
+        assert_eq!(
+            contents(&install, "trix-daemon.exe"),
+            "old trix-daemon.exe",
+            "the only copy left of a program must be restored, not deleted"
+        );
+        assert!(!install.join(format!("trix-daemon.exe{OLD_SUFFIX}")).exists());
+        assert_eq!(contents(&install, "trix.exe"), "new trix.exe", "the live build is untouched");
+        assert!(
+            !install.join(format!("trix.exe{OLD_SUFFIX}")).exists(),
+            "a leftover beside a live binary is still litter"
+        );
         let _ = std::fs::remove_dir_all(&install);
     }
 
