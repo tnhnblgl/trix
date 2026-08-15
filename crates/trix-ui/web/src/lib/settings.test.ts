@@ -65,3 +65,14 @@ describe('validate', () => {
     expect(validate('clip_hotkey', 'alt+f10')).toBeNull();
   });
 });
+
+describe('settings fields', () => {
+  it('renders check_for_updates, so nobody sees the unknown-settings banner', () => {
+    // config.get returns every Config key. A key with no FIELDS entry lands in
+    // unknownKeys, and Settings.svelte tells the user their app is out of date
+    // with their daemon -- which would be false and unfixable.
+    const fromDaemon = { check_for_updates: true, ...Object.fromEntries(READ_ONLY_EXTRAS.map((k) => [k, ''])) };
+    expect(unknownKeys(fromDaemon)).toEqual([]);
+    expect(FIELDS.find((f) => f.key === 'check_for_updates')?.kind).toBe('bool');
+  });
+});

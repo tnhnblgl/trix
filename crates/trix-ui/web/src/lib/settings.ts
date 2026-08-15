@@ -4,7 +4,7 @@ export type Field = {
   key: string;
   label: string;
   kind: FieldKind;
-  section: 'Capture' | 'Audio' | 'Quality' | 'Clips' | 'Trix';
+  section: 'Capture' | 'Audio' | 'Quality' | 'Clips' | 'Trix' | 'Updates';
   help: string;
   min?: number;
   max?: number;
@@ -59,6 +59,8 @@ export const FIELDS: Field[] = [
   { key: 'clip_hotkey', label: 'Clip hotkey', kind: 'hotkey', section: 'Trix', help: 'Press the combination to test it. Overlays can silently take a hotkey inside games.' },
   { key: 'autostart', label: 'Start with Windows', kind: 'bool', section: 'Trix', help: 'Off by default. Writes the registry Run entry, which is the source of truth.' },
   { key: 'stats_seconds', label: 'Stats interval', kind: 'number', section: 'Trix', ...span('stats_seconds'), help: 'Seconds between performance reports. 0 turns them off.' },
+
+  { key: 'check_for_updates', label: 'Check for updates', kind: 'bool', section: 'Updates', help: 'Asks github.com once per launch whether a newer Trix exists. Sends nothing about you. Updates are never installed without you clicking.' },
 ];
 
 function span(key: string): { min: number; max: number } {

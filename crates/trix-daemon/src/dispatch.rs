@@ -1006,6 +1006,38 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Checking for updates is the app's business, but the setting lives in the
+    /// daemon's config like every other one, so the settings page needs no second
+    /// persistence mechanism. The daemon stores it and never acts on it.
+    #[test]
+    fn check_for_updates_defaults_on_round_trips_and_needs_no_rearm() {
+        let (daemon, _config_path, _clip_dir) = with_scratch_config("check_for_updates");
+
+        let initial = daemon.dispatch(1, &request(1, "config.get"));
+        let data = initial.data.expect("config.get answers with data");
+        assert_eq!(
+            data.get("check_for_updates").and_then(Value::as_bool),
+            Some(true),
+            "updates reach nobody if the check ships off"
+        );
+
+        let response = daemon.dispatch(
+            1,
+            &request_with(2, "config.set", &[("check_for_updates", Value::Bool(false))]),
+        );
+        let data = response.data.expect("config.set answers with data");
+        assert_eq!(
+            data["accepted"].get("check_for_updates").and_then(Value::as_bool),
+            Some(false),
+            "the value is read back out of the saved config, not echoed"
+        );
+        assert_eq!(
+            data["requires_rearm"].as_array().map(Vec::len),
+            Some(0),
+            "a network preference has nothing to do with the capture session"
+        );
+    }
+
     /// The settings dropdowns' data source, over the wire. Named-array shape
     /// (`{"monitors":[…]}`) so a client never has to tell a bare array from an
     /// object, and `index` really is a `config.monitor_index` value.

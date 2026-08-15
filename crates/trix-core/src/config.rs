@@ -84,6 +84,14 @@ pub struct Config {
     /// writes it. The key exists here so it round-trips and so a third-party UI
     /// can offer the toggle.
     pub autostart: bool,
+    /// Whether the desktop app asks GitHub for a newer release on launch.
+    ///
+    /// Stored here so the settings page reaches it through the same
+    /// `config.get`/`config.set` plumbing as everything else. The daemon never
+    /// reads it -- `trix-ui` is the only consumer. It is deliberately not in
+    /// `REQUIRES_REARM`: it has nothing to do with the capture session.
+    #[serde(default = "default_true")]
+    pub check_for_updates: bool,
 }
 
 impl Default for Config {
@@ -103,8 +111,16 @@ impl Default for Config {
             system_volume: 100,
             mic_volume: 100,
             autostart: false,
+            check_for_updates: true,
         }
     }
+}
+
+/// `serde(default)` for a bool yields `false`, which would silently turn the
+/// update check off for every user upgrading from a config file written before
+/// this key existed.
+const fn default_true() -> bool {
+    true
 }
 
 impl Config {
