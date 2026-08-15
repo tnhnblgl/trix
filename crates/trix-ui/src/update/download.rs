@@ -6,7 +6,7 @@
 //! no clip metadata -- and keeping that true is easier when the only function
 //! that can reach the network is this one.
 
-use std::io::{Read as _, Write as _};
+use std::io::Write as _;
 use std::path::Path;
 
 use super::check::user_agent;
@@ -20,6 +20,15 @@ const ALLOWED_HOSTS: [&str; 3] = ["api.github.com", "github.com", "objects.githu
 /// response that never ends cannot fill the user's disk while a progress bar
 /// climbs forever.
 pub const MAX_BYTES: u64 = 64 * 1024 * 1024;
+// The product is ~3.4 MB. The bound exists so a response that never ends
+// cannot fill the user's disk, not to be a tight fit -- generous enough for
+// a real release to grow into (> 32 MB) but still small enough to actually
+// bound something (<= 128 MB), catching someone setting this to, say, a few
+// KB or a few GB by mistake. Compile-time rather than a #[test]: both sides
+// are known at compile time, so a runtime test would only trip clippy's
+// assertions_on_constants lint, and a bad value should fail the build, not
+// a test run.
+const _: () = assert!(MAX_BYTES > 32 * 1024 * 1024 && MAX_BYTES <= 128 * 1024 * 1024);
 
 /// How much is read per iteration. Large enough that the syscall cost is
 /// invisible, small enough that progress moves smoothly on a slow line.
@@ -123,32 +132,181 @@ pub fn fetch_to_file(url: &str, dest: &Path, progress: &dyn Fn(u64, u64)) -> Res
         .map_err(|e| format!("could not write the downloaded update: {e}"))?;
 
     let mut reader = response.body_mut().as_reader();
-    let mut buffer = vec![0u8; CHUNK];
-    let mut received: u64 = 0;
-    loop {
-        let read = reader.read(&mut buffer).map_err(|e| format!("the download stopped: {e}"))?;
-        if read == 0 {
-            break;
+    stream_to_file(dest, &mut file, &mut reader, total, progress)
+}
+
+/// Runs the copy loop and deletes `dest` if it fails partway through, for
+/// any reason -- a dropped connection and a full disk leave a half-written
+/// file exactly as surely as the size bound does. The loop is wrapped in an
+/// immediately-invoked closure rather than split into its own `fn`, so its
+/// `?` early-returns keep working as `?` instead of becoming a `match` at
+/// every call site, while the cleanup below still runs exactly once no
+/// matter which of those early returns fired -- a future error path added
+/// inside the loop is covered automatically, the way three of the four
+/// existing ones originally were not.
+///
+/// `reader` is a trait object rather than `Body`, and `file`/`dest` are
+/// passed in rather than opened here, so this whole thing -- cleanup
+/// included -- can be driven by a test with synthetic data instead of a
+/// network connection.
+fn stream_to_file(
+    dest: &Path,
+    file: &mut std::fs::File,
+    reader: &mut dyn std::io::Read,
+    total: u64,
+    progress: &dyn Fn(u64, u64),
+) -> Result<(), String> {
+    let result: Result<(), String> = (|| {
+        let mut buffer = vec![0u8; CHUNK];
+        let mut received: u64 = 0;
+        loop {
+            let read =
+                reader.read(&mut buffer).map_err(|e| format!("the download stopped: {e}"))?;
+            if read == 0 {
+                break;
+            }
+            received += read as u64;
+            // Checked against the bound as it arrives, not only against
+            // Content-Length: a server is free to send more than it declared, or
+            // to declare nothing at all.
+            if received > MAX_BYTES {
+                return Err("the download kept going past the size Trix expects".into());
+            }
+            file.write_all(&buffer[..read])
+                .map_err(|e| format!("could not write the downloaded update: {e}"))?;
+            progress(received, total.max(received));
         }
-        received += read as u64;
-        // Checked against the bound as it arrives, not only against
-        // Content-Length: a server is free to send more than it declared, or
-        // to declare nothing at all.
-        if received > MAX_BYTES {
-            let _ = std::fs::remove_file(dest);
-            return Err("the download kept going past the size Trix expects".into());
-        }
-        file.write_all(&buffer[..read])
-            .map_err(|e| format!("could not write the downloaded update: {e}"))?;
-        progress(received, total.max(received));
+        file.flush().map_err(|e| format!("could not finish writing the update: {e}"))?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(dest);
     }
-    file.flush().map_err(|e| format!("could not finish writing the update: {e}"))?;
-    Ok(())
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scratch path that removes itself even if an assertion above it
+    /// panics, and whose name cannot collide with another test's:
+    /// `process::id()` alone is only unique per process, but tests in one
+    /// binary run on multiple threads, so it is paired here with the thread
+    /// id too. Mirrors the `TempFile` in `verify.rs`'s test module rather
+    /// than importing it -- that one is private to that module, and sharing
+    /// it would mean making a test helper `pub` across the crate for one
+    /// file. This variant only names the path; unlike `verify.rs`'s, it does
+    /// not create the file, because these tests need to assert on cases
+    /// where `stream_to_file` is the one deciding whether the file exists
+    /// afterward.
+    struct TempFile(std::path::PathBuf);
+
+    impl TempFile {
+        fn named(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "trix-download-{tag}-{:?}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_file(&path);
+            Self(path)
+        }
+    }
+
+    impl std::ops::Deref for TempFile {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// Yields a few bytes once, then fails every call after -- models the
+    /// common case finding 1 was about, a connection dropped mid-download,
+    /// not the size bound.
+    struct DropsMidStream {
+        handed_out: bool,
+    }
+
+    impl std::io::Read for DropsMidStream {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.handed_out {
+                return Err(std::io::Error::other("connection reset"));
+            }
+            self.handed_out = true;
+            let n = buf.len().min(4);
+            buf[..n].copy_from_slice(&b"data"[..n]);
+            Ok(n)
+        }
+    }
+
+    /// Always claims to have filled the caller's buffer. `CHUNK` is 64 KiB,
+    /// so this crosses `MAX_BYTES` (64 MiB) in about a thousand calls
+    /// without the test holding 64 MB of real data anywhere -- the "small
+    /// buffer" is this struct's own (empty) state, not the chunk size,
+    /// which is `stream_to_file`'s to decide either way.
+    struct AlwaysFullBuffer;
+
+    impl std::io::Read for AlwaysFullBuffer {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+    }
+
+    #[test]
+    fn a_dropped_connection_leaves_no_partial_file() {
+        let dest = TempFile::named("dropped-connection");
+        let mut file = std::fs::File::create(&*dest).expect("create scratch file");
+        let mut reader = DropsMidStream { handed_out: false };
+
+        let result = stream_to_file(&dest, &mut file, &mut reader, 0, &|_, _| {});
+
+        assert!(result.is_err(), "a dropped connection must be reported as an error");
+        assert!(!dest.exists(), "no partial file must be left when the download drops");
+    }
+
+    #[test]
+    fn an_oversized_stream_leaves_no_partial_file_and_reports_the_existing_error() {
+        let dest = TempFile::named("oversized-stream");
+        let mut file = std::fs::File::create(&*dest).expect("create scratch file");
+        let mut reader = AlwaysFullBuffer;
+
+        let result = stream_to_file(&dest, &mut file, &mut reader, 0, &|_, _| {});
+
+        let error = result.expect_err("a stream past MAX_BYTES must be refused");
+        assert_eq!(error, "the download kept going past the size Trix expects");
+        assert!(!dest.exists(), "no partial file must be left when the download is oversized");
+    }
+
+    #[test]
+    fn a_normal_stream_is_written_whole_and_progress_ends_at_the_total_received() {
+        let dest = TempFile::named("normal-stream");
+        let mut file = std::fs::File::create(&*dest).expect("create scratch file");
+        let payload = b"the entire contents of a small update file";
+        let mut reader: &[u8] = payload;
+        let last_progress = std::cell::Cell::new((0u64, 0u64));
+
+        let result = stream_to_file(
+            &dest,
+            &mut file,
+            &mut reader,
+            payload.len() as u64,
+            &|received, total| {
+                last_progress.set((received, total));
+            },
+        );
+
+        assert!(result.is_ok(), "a normal stream must succeed");
+        assert_eq!(std::fs::read(&*dest).expect("read back scratch file"), payload);
+        assert_eq!(last_progress.get(), (payload.len() as u64, payload.len() as u64));
+    }
 
     #[test]
     fn the_three_hosts_the_release_flow_uses_are_allowed() {
@@ -186,13 +344,5 @@ mod tests {
     fn a_url_that_is_not_a_url_is_refused() {
         assert!(allowed("not a url").is_err());
         assert!(allowed("file:///C:/Windows/System32/cmd.exe").is_err());
-    }
-
-    /// The product is ~3.4 MB. The bound exists so a response that never ends
-    /// cannot fill the user's disk, not to be a tight fit.
-    #[test]
-    fn the_size_bound_is_generous_but_finite() {
-        assert!(MAX_BYTES > 32 * 1024 * 1024, "a real release must fit with room to grow");
-        assert!(MAX_BYTES <= 128 * 1024 * 1024, "but it must actually bound something");
     }
 }
