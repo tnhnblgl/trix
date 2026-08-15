@@ -13,11 +13,13 @@ use sha2::{Digest as _, Sha256};
 
 /// The digest `SHA256SUMS.txt` publishes for `name`.
 ///
-/// Lines are `<64 hex>  <filename>`, which is what `Get-FileHash` piped through
-/// `ship-zip.ps1` produces and what `sha256sum` reads.
+/// Lines must be exactly `<64 hex>  <filename>` (two spaces), which is what
+/// `Get-FileHash` piped through `ship-zip.ps1` produces and what `sha256sum`
+/// reads. Any other format is treated as "no checksum published" and the
+/// install is blocked—this module must enforce the format, not infer it.
 pub fn digest_for(sums: &str, name: &str) -> Result<String, String> {
     sums.lines()
-        .filter_map(|line| line.split_once("  ").or_else(|| line.split_once(' ')))
+        .filter_map(|line| line.split_once("  "))
         .find(|(_, file)| file.trim() == name)
         .map(|(digest, _)| digest.trim().to_ascii_lowercase())
         .ok_or_else(|| format!("the release does not publish a checksum for {name}"))
@@ -134,5 +136,14 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  trix-v0.5.0-wi
             error.contains("trix-v0.5.0-win-x64.zip"),
             "the message has to say which file failed: {error}"
         );
+    }
+
+    /// The sums file must use two spaces. A single space is not the published
+    /// format and must not be inferred as one, lest we install against a checksum
+    /// that was never published.
+    #[test]
+    fn single_space_separator_is_not_accepted() {
+        let single_space_sums = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 trix-v0.5.0-win-x64.zip\n";
+        assert!(digest_for(single_space_sums, "trix-v0.5.0-win-x64.zip").is_err());
     }
 }
