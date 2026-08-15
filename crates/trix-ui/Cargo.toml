@@ -23,6 +23,10 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 semver = "1"
 sha2 = "0.10"
+# `native-tls` rather than `rustls`: on Windows it resolves to schannel and uses
+# the certificate store the OS already maintains, which is both smaller and
+# correct on machines with a corporate trust root.
+ureq = { version = "3", default-features = false, features = ["native-tls"] }
 # `PeekNamedPipe` (Win32_System_Pipes) and `HANDLE` (Win32_Foundation), for the
 # non-blocking pipe reader in `src/pipe_reader.rs` -- see the long comment there.
 # `Win32_System_Threading` is `Supervisor::stop`'s `OpenProcess`/`TerminateProcess`
