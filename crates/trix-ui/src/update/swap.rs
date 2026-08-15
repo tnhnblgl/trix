@@ -236,7 +236,35 @@ mod tests {
     /// A scratch directory of this test's own. Never the real install: this
     /// module renames and deletes executables, and pointing it at a developer's
     /// own folder is the one mistake here that cannot be undone by rerunning.
-    fn scratch(name: &str) -> PathBuf {
+    ///
+    /// It removes itself even when an assertion above the cleanup line panics —
+    /// the `TempFile` shape from `download.rs` and `verify.rs`, widened to a
+    /// directory rather than reinvented. That matters more here than there: the
+    /// name carries the process id, so a run that leaves one behind never
+    /// reclaims it, and a module whose failing tests are the interesting ones
+    /// would otherwise pile up a fake install per failure, forever.
+    struct Scratch(PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<Path> for Scratch {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch(name: &str) -> Scratch {
         let dir = std::env::temp_dir().join(format!(
             "trix-swap-{name}-{}-{:?}",
             std::process::id(),
@@ -244,7 +272,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch dir");
-        dir
+        Scratch(dir)
     }
 
     fn install_with(dir: &Path, marker: &str) {
@@ -450,7 +478,7 @@ mod tests {
     }
 
     /// Sets up an install and a payload beside it, both fully populated.
-    fn install_and_payload(name: &str) -> (PathBuf, PathBuf) {
+    fn install_and_payload(name: &str) -> (Scratch, PathBuf) {
         let install = scratch(name);
         install_with(&install, "old");
         let payload = install.join(STAGING).join("staged");
