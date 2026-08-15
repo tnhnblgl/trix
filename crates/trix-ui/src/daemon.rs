@@ -353,7 +353,9 @@ impl Supervisor {
                 }
                 Err("the Trix recorder did not stop, even after being closed".into())
             }
-            None => Err("the Trix recorder did not stop, and did not say which process it is".into()),
+            None => {
+                Err("the Trix recorder did not stop, and did not say which process it is".into())
+            }
         }
     }
 }
