@@ -27,6 +27,25 @@ sha2 = "0.10"
 # the certificate store the OS already maintains, which is both smaller and
 # correct on machines with a corporate trust root.
 ureq = { version = "3", default-features = false, features = ["native-tls"] }
+# Reading the release zip, and nothing else. `default-features = false` drops
+# AES, bzip2, zstd, lzma, xz, ppmd and deflate64 -- a `ZipFile::CreateFromDirectory`
+# archive uses none of them, and every codec left enabled is parser surface that
+# runs over bytes downloaded from the internet.
+#
+# `deflate-flate2-zlib-rs` rather than the `deflate` umbrella: under zip 8
+# `deflate` expands to `deflate-zopfli` + `deflate-flate2-zlib-rs`, and zopfli
+# is a *compressor*. Trix only ever reads a zip, so the umbrella pulls in a
+# crate no code path here can reach. Bare `deflate-flate2` is not the answer
+# either -- zip depends on flate2 with `default-features = false`, so it selects
+# no backend at all and flate2 fails the build with "You need to choose a zlib
+# backend". `-zlib-rs` names one, and it is the pure-Rust port, so this adds no
+# C to the link.
+#
+# Version 8, not the 2 the plan named: 2.x is superseded, and `ZipArchive::extract`
+# is precisely the function RUSTSEC-2025-0168 (arbitrary file write via symlinked
+# paths) was filed against. Current majors carry that fix by construction rather
+# than by a version floor nobody re-checks.
+zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 # `PeekNamedPipe` (Win32_System_Pipes) and `HANDLE` (Win32_Foundation), for the
 # non-blocking pipe reader in `src/pipe_reader.rs` -- see the long comment there.
 # `Win32_System_Threading` is `Supervisor::stop`'s `OpenProcess`/`TerminateProcess`
