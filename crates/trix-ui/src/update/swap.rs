@@ -106,6 +106,18 @@ fn payload_root(extracted: &Path) -> Result<PathBuf, String> {
 type Rename = dyn Fn(&Path, &Path) -> std::io::Result<()>;
 
 /// Moves the payload into place, or puts everything back.
+///
+/// **A failed swap consumes the payload; a retry must not reuse it.** Any
+/// binary that swapped successfully before a later one failed already had
+/// its payload copy renamed away into the install directory, so after a
+/// rollback the payload directory is missing exactly the files that made it
+/// that far -- it is no longer the complete set [`unpack`] produced. A
+/// caller offering the user a "Retry" button against the same payload path
+/// would hit this function's own preflight, which reports "the downloaded
+/// update is missing `<name>`, so nothing was changed" -- true of the
+/// payload as it now sits on disk, but misleading as a description of what
+/// was actually downloaded. A retry must re-unpack or re-download rather
+/// than call this function again on the same payload directory.
 pub fn swap_in(install: &Path, payload: &Path) -> Result<(), String> {
     swap_with(install, payload, &|from, to| std::fs::rename(from, to))
 }
@@ -174,11 +186,14 @@ fn undo(install: &Path, vacated: &[&str], cause: &str, rename: &Rename) -> Strin
     let names =
         stranded.iter().map(|name| format!("{name}{OLD_SUFFIX}")).collect::<Vec<_>>().join(", ");
     format!(
-        "{cause}, and putting the previous version back failed too, so this Trix install now has \
-         mismatched versions. In {}, for each of {names}: drop the \"{OLD_SUFFIX}\" ending to \
-         restore it. If the name without \"{OLD_SUFFIX}\" is missing, that is a plain rename; if \
-         it already exists, it is a different version, and the rename will overwrite it with the \
-         \"{OLD_SUFFIX}\" copy. Or download Trix again from the releases page.",
+        "{cause}, and putting the previous version back failed too, so some of Trix's programs \
+         are now missing or left at a different version. Fix this before starting Trix again: \
+         starting it first may permanently delete the \"{OLD_SUFFIX}\" copy named below, since \
+         Trix clears out leftover \"{OLD_SUFFIX}\" files at startup and cannot tell this one \
+         apart from ordinary litter. In {}, for each of {names}: drop the \"{OLD_SUFFIX}\" \
+         ending to restore it. If the name without \"{OLD_SUFFIX}\" is missing, that is a plain \
+         rename; if it already exists, it is a different version, and the rename will overwrite \
+         it with the \"{OLD_SUFFIX}\" copy. Or download Trix again from the releases page.",
         install.display()
     )
 }
@@ -219,17 +234,33 @@ fn roll_back<'a>(install: &Path, vacated: &[&'a str], rename: &Rename) -> Vec<&'
 /// existence. Sweeping it up would finish what the crash started, so it is put
 /// back instead. Everything else here is litter; this is a binary.
 ///
-/// **Cannot repair a vacated `trix-ui.exe` when it is only called from
-/// `trix-ui.exe`.** [`swap_in`] moves the [`BINARIES`] one at a time and only
-/// advances to the next once the current one's pair of renames has both
-/// completed, so a crash between them can strand at most one name at a time.
-/// If that name is `trix-ui.exe`, there is no `trix-ui.exe` left on disk to
-/// double-click, and code running inside this process can restore `trix.exe`
-/// and `trix-daemon.exe` but never itself. `trix.exe` swaps first in
-/// [`BINARIES`], so it is guaranteed to already be a complete, runnable binary
-/// in exactly that scenario. **The caller must therefore also call `cleanup`
-/// from `trix.exe`'s own startup, not only from `trix-ui.exe`'s** -- that is
-/// the only path by which a stranded `trix-ui.exe` ever gets restored.
+/// Restoring a name this way does not necessarily put the install fully back
+/// to where it was. Any binary earlier than the restored one in [`BINARIES`]
+/// has already swapped to the new build by the time the interruption
+/// happens, and this same pass also removes the staging directory, so
+/// whatever new payload copies were never moved into place -- including the
+/// interrupted binary's own -- are discarded along with it. Restoring
+/// `trix-ui.exe` this way, for instance, happens after `trix.exe` and
+/// `trix-daemon.exe` have already swapped to the new build, so the repaired
+/// install ends up with two new binaries and one old one. A caller that
+/// observes this function perform a restore should treat the update as
+/// incomplete and re-run the update check rather than assume the install is
+/// now fully current.
+///
+/// **Cannot repair a vacated `trix-ui.exe`, because this function only ever
+/// runs from inside `trix-ui.exe` itself.** [`swap_in`] moves the
+/// [`BINARIES`] one at a time and only advances to the next once the current
+/// one's pair of renames has both completed, so a crash between them can
+/// strand at most one name at a time. If that name is `trix.exe` or
+/// `trix-daemon.exe`, the restore branch above puts it back the next time
+/// `trix-ui.exe` starts and calls this function. If that name is
+/// `trix-ui.exe` itself, there is no `trix-ui.exe` left on disk to
+/// double-click, and nothing is left running to call `cleanup` on its
+/// behalf. This is a deliberate, accepted tradeoff, not an oversight -- the
+/// window for it is narrow, since it requires the interruption to land
+/// between `trix-ui.exe`'s own two renames specifically, not anywhere else
+/// in the swap. The user's recovery in that case is manual: rename
+/// `trix-ui.exe.old` back to `trix-ui.exe`, or download Trix again.
 ///
 /// **Must run before the daemon supervisor starts.** The restore branch above
 /// is the only thing that repairs a crash-vacated `trix-daemon.exe`. A caller
@@ -499,6 +530,16 @@ mod tests {
     /// `std::fs::write` is refused either way. That is checked directly
     /// below rather than assumed, and the test skips with a clear reason
     /// instead of asserting something it did not actually verify.
+    ///
+    /// `RestoreAcl`'s `Drop` clears the deny ACE on every normal exit and on
+    /// a panic, but not if the test binary is killed outright -- Ctrl-C, a
+    /// CI timeout -- between the `/deny` call below and the `/reset` one.
+    /// The scratch directory is then denied-all for the running user, so
+    /// ordinary deletion, Disk Cleanup, and temp-folder sweeps all fail on
+    /// it too. It is still recoverable: the owner keeps `WRITE_DAC` even
+    /// under its own deny ACE, which is exactly what lets `/reset` work, so
+    /// a directory stuck this way can be freed by hand by running
+    /// `icacls <path> /reset`.
     #[test]
     fn writable_fails_when_write_access_is_denied() {
         let Ok(user) = std::env::var("USERNAME") else {
@@ -675,7 +716,7 @@ mod tests {
         let error = swap_with(&install, &payload, &rename).expect_err("the swap must fail");
 
         assert!(
-            error.contains("mismatched versions"),
+            error.contains("missing or left at a different version"),
             "a stranded install must not read like an ordinary failed update: {error}"
         );
         assert!(
@@ -717,7 +758,7 @@ mod tests {
         let error = swap_with(&install, &payload, &rename).expect_err("the swap must fail");
 
         assert!(
-            error.contains("mismatched versions"),
+            error.contains("missing or left at a different version"),
             "this is not an ordinary failed update: {error}"
         );
         assert!(
