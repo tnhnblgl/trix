@@ -16,7 +16,7 @@ use std::sync::Arc;
 use serde_json::{Map, Value};
 use tauri::{AppHandle, Emitter as _, State};
 
-use crate::daemon::Supervisor;
+use crate::daemon::{self, Supervisor};
 use check::Release;
 
 /// Keeps a console off the screen when this windowed app spawns one of the
@@ -88,7 +88,29 @@ fn reported<T>(app: &AppHandle, result: Result<T, String>) -> Result<T, String> 
     result
 }
 
-/// Deletes the previous build. Called once at startup, before the window opens.
+/// Clears away the previous build, and repairs an update that was interrupted.
+///
+/// Hands the install directory to [`swap::cleanup`], which is where the
+/// load-bearing half lives. Deleting the `.old` copies and the staging folder
+/// is the ordinary case; the branch that matters is the other one. Where a
+/// binary's live name is *missing* and only its `.old` copy exists, that copy
+/// is renamed back rather than deleted — [`swap::swap_in`] cannot leave the
+/// install in that state, because its rollback closes the gap, but something
+/// that stops the process outright between two renames can, and then the
+/// `.old` file is the only copy of that program in existence.
+///
+/// A restore is not the same as a completed update, and this function has no
+/// way to say so: any binary earlier in [`swap::BINARIES`] has already moved to
+/// the new build, and the same pass deletes the staging folder the rest of the
+/// payload was sitting in, so the install is left mixed-version and the update
+/// has to be run again. A vacated `trix-ui.exe` cannot be repaired here at all,
+/// since this only ever runs from inside `trix-ui.exe`. `swap::cleanup`'s own
+/// doc has the full account.
+///
+/// Called once at startup, before the window opens and before the daemon
+/// supervisor starts — the restore branch is the only thing that puts back a
+/// `trix-daemon.exe` an interrupted update renamed away, and a supervisor
+/// started first would be handed a moment where that binary is genuinely gone.
 pub fn clean_up_after_update() {
     if let Ok(dir) = swap::install_dir() {
         swap::cleanup(&dir);
@@ -112,12 +134,22 @@ pub fn update_current_version() -> String {
 /// check exists at all — which is also why both are produced rather than one.
 #[tauri::command]
 pub async fn update_check(app: AppHandle) -> Result<Option<Release>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    // Cloned before the move so the join failure has somewhere to be reported
+    // too. `Checking` has already been emitted by then, and a task that cannot
+    // be joined emits nothing of its own, so without this the banner sits on
+    // "Checking…" for as long as the window is open.
+    let scheduling = app.clone();
+    let joined = tauri::async_runtime::spawn_blocking(move || {
         emit(&app, &UpdateState::Checking);
         reported(&app, look_for_a_newer_release(&app))
     })
     .await
-    .map_err(|e| format!("the update check could not be scheduled: {e}"))?
+    .map_err(|e| format!("the update check could not be scheduled: {e}"));
+    // Two layers: the outer is whether the task ran at all, the inner is what
+    // it decided. Only the outer is reported here -- the inner has already been
+    // through `reported` inside the closure, and doing it twice would put two
+    // `Failed` events on the channel for one failure.
+    reported(&scheduling, joined)?
 }
 
 fn look_for_a_newer_release(app: &AppHandle) -> Result<Option<Release>, String> {
@@ -141,26 +173,47 @@ pub async fn update_install(
     release: Release,
 ) -> Result<(), String> {
     let supervisor = Arc::clone(&supervisor);
-    tauri::async_runtime::spawn_blocking(move || {
+    // Same shape as `update_check`, and it matters more here: this command
+    // returns only on failure, so a join error with nothing on the event
+    // channel would leave the progress bar sitting exactly where it stopped
+    // with no explanation beside it.
+    let scheduling = app.clone();
+    let joined = tauri::async_runtime::spawn_blocking(move || {
         reported(&app, install(&app, &supervisor, &release))
     })
     .await
-    .map_err(|e| format!("the update could not be scheduled: {e}"))?
+    .map_err(|e| format!("the update could not be scheduled: {e}"));
+    reported(&scheduling, joined)?
 }
 
 fn install(app: &AppHandle, supervisor: &Supervisor, release: &Release) -> Result<(), String> {
-    // Preflight, in the order that costs least to refuse. Recording first: a
-    // user mid-session must be told to stop, not have the recorder pulled out
-    // from under them.
+    // Where the files come from, before a byte of them is fetched. `release`
+    // is a command argument, so it is whatever the webview passed in, not
+    // necessarily what `update_check` built -- and the host allowlist further
+    // down cannot tell this repository's releases from anyone else's, because
+    // both are `github.com`.
+    release.assets_are_ours()?;
+
+    // Then the preflight, in the order that costs least to refuse. Recording
+    // first: a user mid-session must be told to stop, not have the recorder
+    // pulled out from under them.
     //
-    // Asked only while the socket is actually up. The app is fully usable with
-    // the daemon down -- that is what spec §4.5's "not running" panel is for,
-    // and it is also the state a user is in when the daemon is the thing that
-    // is broken. Letting a disconnected socket answer here would make the one
-    // build that could fix that the one build that cannot be installed, and it
-    // would refuse with "not connected to the Trix daemon", which says nothing
-    // about the update the user just asked for. Nothing can be recording if
-    // nothing is running, so there is nothing to refuse.
+    // Asked only while the socket is actually up, because a socket is the only
+    // way to ask it at all: "armed" is the daemon's own answer about its own
+    // state, not something observable from out here. The app is fully usable
+    // with the daemon down -- that is what spec §4.5's "not running" panel is
+    // for, and it is also the state a user is in when the daemon is the thing
+    // that is broken. Letting a disconnected socket answer here would make the
+    // one build that could fix that the one build that cannot be installed,
+    // and it would refuse with "not connected to the Trix daemon", which says
+    // nothing about the update the user just asked for.
+    //
+    // `is_connected` is not the same question as "is a daemon running", and
+    // this is the only place it is allowed to stand in for it. The supervisor
+    // reconnects with backoff, so a perfectly live daemon reads as
+    // disconnected for seconds at a time and this check is simply skipped
+    // then. The swap guard below must not be skipped in that window, so it
+    // asks `pipe_exists` instead, and it re-asks this one on the way past.
     if supervisor.is_connected() {
         let status = supervisor.call("status", Map::new())?;
         if status.get("armed").and_then(Value::as_bool) == Some(true) {
@@ -191,21 +244,52 @@ fn install(app: &AppHandle, supervisor: &Supervisor, release: &Release) -> Resul
     verify_payload_version(&payload, &release.version)?;
 
     emit(app, &UpdateState::Installing);
-    // Same reasoning as the preflight, and the same test: a daemon that is not
-    // running does not need stopping, and asking a dead socket to shut down
-    // would fail the update at the one point where everything has already been
-    // downloaded, verified and staged.
-    if supervisor.is_connected() {
-        supervisor.stop()?;
+    // `pipe_exists`, not `is_connected`: the question here is whether a daemon
+    // is *running*, and a running daemon this app has momentarily lost its
+    // socket to is still running. Getting that wrong is silent rather than
+    // loud, which is what makes it worth the extra care -- Windows lets a
+    // running executable be renamed (the loader opens images with
+    // FILE_SHARE_DELETE), so `swap_in` would succeed, report success, and
+    // leave the old daemon executing out of `trix-daemon.exe.old` with the new
+    // UI talking to it. `swap::cleanup` cannot delete a mapped image either,
+    // so the next launch would not fix it, and the user would be told they had
+    // been updated while the capture daemon was the previous build.
+    if daemon::pipe_exists() {
+        // The preflight above could not ask this if the socket happened to be
+        // down when the user pressed Install. By now it may well be up, and
+        // this is the last moment before the recorder is shut down under
+        // whatever it was doing. A call that fails tells us nothing either way
+        // and is left to `stop` below, which reports the real problem.
+        if let Ok(status) = supervisor.call("status", Map::new())
+            && status.get("armed").and_then(Value::as_bool) == Some(true)
+        {
+            return Err("Stop recording before updating Trix.".into());
+        }
+
+        // A daemon can leave between the check above and this call -- an idle
+        // one exiting on its own, the user quitting it from the tray -- and
+        // `stop` would then fail for want of anything to stop. Asking again is
+        // what tells the two apart: nothing owns the pipe any more, so there
+        // was nothing left to stop and the update carries on; something still
+        // does, so the failure is real and swapping under it is exactly what
+        // this guard exists to prevent.
+        if let Err(e) = supervisor.stop()
+            && daemon::pipe_exists()
+        {
+            return Err(format!(
+                "{e}. The Trix recorder has to stop before its program can be replaced, so \
+                 nothing was changed."
+            ));
+        }
     }
-    swap::swap_in(&dir, &payload).map_err(|e| {
-        format!(
-            "{e} Trix was not changed. If it will not start, rename the files ending in \
-             \"{}\" in {} back to their original names.",
-            swap::OLD_SUFFIX,
-            dir.display()
-        )
-    })?;
+    // `swap_in`'s message, passed through exactly as it comes. It already ends
+    // by telling the user where they stand, and it says two different things:
+    // "the version you were running is still installed" when the rollback
+    // worked, and a repair procedure -- including the warning that dropping a
+    // ".old" suffix can overwrite a working file rather than fill a gap --
+    // when it did not. Appending anything about Trix being unchanged would
+    // contradict the second, and it would be the last thing the user reads.
+    swap::swap_in(&dir, &payload)?;
 
     emit(app, &UpdateState::Restarting);
     let helper = dir.join("trix.exe");
@@ -311,6 +395,25 @@ mod tests {
         let json = serde_json::to_string(&release).expect("serialises");
         let back: Release = serde_json::from_str(&json).expect("deserialises");
         assert_eq!(back, release, "what the webview hands back must be what it was given");
+
+        // Spelled out as literals rather than derived from the struct, which
+        // is the only way a test can notice a renamed field: a round trip
+        // through this crate's own `Serialize`/`Deserialize` agrees with
+        // itself whatever the names are, while the banner is written against
+        // these five strings and would quietly stop finding one.
+        let value: Value = serde_json::from_str(&json).expect("is JSON");
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .expect("a Release is a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["notes_url", "size", "sums_url", "version", "zip_url"],
+            "these are the field names the webview reads; renaming one is a frontend change too"
+        );
     }
 
     /// The command line `trix.exe` is relaunched with, pinned from this side.

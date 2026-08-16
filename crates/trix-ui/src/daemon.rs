@@ -104,11 +104,20 @@ pub(crate) fn daemon_path_beside(ui_exe: &Path) -> Option<PathBuf> {
 /// without opening an instance, so probing cannot itself take the slot a
 /// reconnecting supervisor wants.
 ///
+/// This, and not [`Supervisor::is_connected`], is the question "is a daemon
+/// running". `is_connected` answers whether *this app* is holding a socket
+/// right now, which goes false for seconds at a time whenever [`Supervisor::run`]
+/// is between attempts — an ordinary transient state, not a stopped daemon.
+/// The pipe is bound with `FILE_FLAG_FIRST_PIPE_INSTANCE`, so while the name
+/// resolves some daemon owns it, no matter who started it or who is talking
+/// to it. `pub(crate)` for the updater, which has to get this exactly right
+/// before it renames `trix-daemon.exe`.
+///
 /// `WaitNamedPipeW` returns a raw `BOOL`, not a `windows::core::Result` --
 /// unlike `OpenProcess`/`TerminateProcess`/`CloseHandle` below, which are
 /// `Result`-returning wrappers. `BOOL::as_bool` is the direct read of it;
 /// there is no error value here worth keeping, only "does the name resolve".
-fn pipe_exists() -> bool {
+pub(crate) fn pipe_exists() -> bool {
     use windows::Win32::System::Pipes::WaitNamedPipeW;
     use windows::core::HSTRING;
     // 1 ms, not zero: zero means "use the server's default timeout", which is
