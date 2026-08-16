@@ -704,7 +704,7 @@ mod tests {
     /// one asks the user to do something. The message has to be able to tell
     /// them apart, and to name the file left under `.old`.
     #[test]
-    fn a_rollback_that_cannot_restore_a_file_says_the_install_has_mismatched_versions() {
+    fn a_rollback_that_cannot_restore_a_vacated_file_leaves_the_name_empty() {
         let (install, payload) = install_and_payload("stranded");
         let rename = rename_refusing(vec![
             // Fails the swap of trix-ui.exe ...
