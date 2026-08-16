@@ -45,9 +45,64 @@ pub const RELEASE_API: &str = concat!("https://api.github.com/repos/", repo!(), 
 pub const RELEASE_DOWNLOAD_PREFIX: &str =
     concat!("https://github.com/", repo!(), "/releases/download/");
 
+/// The checksums file every release publishes beside the zip.
+///
+/// Written once because it is two things at once: the asset [`newer_release`]
+/// insists on finding in the feed, and the last path segment
+/// [`from_our_releases`] requires the sums URL to end in.
+const SUMS_NAME: &str = "SHA256SUMS.txt";
+
+/// The zip a release of `version` publishes.
+///
+/// One spelling, because three separate things key off it: the asset
+/// [`newer_release`] looks for, the final path segment the zip URL has to end
+/// in, and the filename `verify::check` looks up in `SHA256SUMS.txt`. It is
+/// also the name the download is written under, which is why nothing may build
+/// it out of a `version` that has not been through
+/// [`version_can_name_a_file`] first.
+fn zip_name(version: &str) -> String {
+    format!("trix-v{version}-win-x64.zip")
+}
+
 /// GitHub rejects API requests that send no User-Agent.
 pub fn user_agent() -> String {
     format!("trix/{}", env!("CARGO_PKG_VERSION"))
+}
+
+/// Whether `version` is made only of what a version number is made of.
+///
+/// `update_install` takes its [`Release`] as a command argument, so `version`
+/// is whatever the webview passed in — and it is the field that reaches the
+/// filesystem: it is interpolated into [`zip_name`], joined onto the staging
+/// directory, and handed to a `create_dir_all` and a `File::create`. A
+/// `version` carrying `..\` or a drive letter walks that path straight out of
+/// the staging folder and writes wherever it likes.
+///
+/// Deliberately not "does semver parse it". [`is_newer`] asks that a moment
+/// later and its answer happens to exclude a path separator, but only as an
+/// accident of what a version number looks like — not because anything decided
+/// a separator was unsafe here. The rule that keeps a filename a filename is
+/// worth stating in its own right.
+fn version_can_name_a_file(version: &str) -> bool {
+    !version.is_empty()
+        && version.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+}
+
+/// Whether `candidate` is a version worth moving to from `current`.
+///
+/// One comparison, asked in two places. [`newer_release`] asks it about the tag
+/// on GitHub's `latest`, so a downgrade is never offered; [`Release::asset_to_install`]
+/// asks it again about the release the webview handed back, so a downgrade
+/// cannot be installed either — the second is the one whose input an attacker
+/// gets to choose, and pointing it at a *genuine* older release is otherwise a
+/// silent, fully-verified downgrade. Two spellings of "is this newer" would be
+/// two chances to get the direction wrong.
+fn is_newer(candidate: &str, current: &str) -> Result<bool, String> {
+    let offered = semver::Version::parse(candidate)
+        .map_err(|e| format!("release version {candidate:?} is not a version: {e}"))?;
+    let running = semver::Version::parse(current)
+        .map_err(|e| format!("this build's own version {current:?} is not a version: {e}"))?;
+    Ok(offered > running)
 }
 
 /// A release that is newer than what is running, and complete enough to install.
@@ -66,6 +121,41 @@ pub struct Release {
 }
 
 impl Release {
+    /// Everything about a release that has to be true before a byte of it is
+    /// fetched, and the filename to fetch.
+    ///
+    /// `update_install` takes its `Release` as a command argument, so every
+    /// field below is whatever the webview passed in — not necessarily what
+    /// [`newer_release`] built, and not necessarily anything GitHub ever
+    /// published. Three separate claims have to be established: that the
+    /// version is a version and not a path, that it is actually an upgrade,
+    /// and that both files come from this account's releases.
+    ///
+    /// It hands back the asset filename rather than `()` because that is what
+    /// stops the three from being skipped. The name the download is written
+    /// under, the name the checksum is looked up by and the name the zip URL
+    /// has to end in are all the same string, and it does not exist until this
+    /// function has produced it.
+    pub fn asset_to_install(&self, running: &str) -> Result<String, String> {
+        if !version_can_name_a_file(&self.version) {
+            return Err(format!(
+                "the update calls itself version {:?}, which is not a version number, so nothing \
+                 was downloaded",
+                self.version
+            ));
+        }
+        if !is_newer(&self.version, running)? {
+            return Err(format!(
+                "the update offers Trix {}, which is not newer than the {running} already \
+                 installed, so nothing was downloaded",
+                self.version
+            ));
+        }
+        let zip = zip_name(&self.version);
+        self.assets_are_ours(&zip)?;
+        Ok(zip)
+    }
+
     /// Refuses a release whose files do not come from this account's releases.
     ///
     /// Both URLs, in one place, so no caller can check the zip and forget the
@@ -73,9 +163,14 @@ impl Release {
     /// checksums are the only thing the zip is measured against, and an
     /// attacker who supplies both is verifying their download against their
     /// own digest. See [`RELEASE_DOWNLOAD_PREFIX`] for what this is closing.
-    pub fn assets_are_ours(&self) -> Result<(), String> {
-        for url in [&self.zip_url, &self.sums_url] {
-            if !from_our_releases(url) {
+    ///
+    /// Private, and reached only through [`Release::asset_to_install`]: the
+    /// filename each URL has to end in is derived from a `version` that has
+    /// been checked by then, and a caller that could ask this question on its
+    /// own could ask it with a name of its own choosing.
+    fn assets_are_ours(&self, zip: &str) -> Result<(), String> {
+        for (url, file) in [(&self.zip_url, zip), (&self.sums_url, SUMS_NAME)] {
+            if !from_our_releases(url, file) {
                 return Err(format!(
                     "the update points at {url}, which is not a file published on Trix's own \
                      releases page, so nothing was downloaded"
@@ -86,7 +181,7 @@ impl Release {
     }
 }
 
-/// Whether `url` is a file published under this repository's releases.
+/// Whether `url` is `file`, published under this repository's releases.
 ///
 /// A prefix match on the whole of [`RELEASE_DOWNLOAD_PREFIX`], which ends at
 /// `/download/` and so cannot be satisfied by a repository whose name merely
@@ -94,19 +189,38 @@ impl Release {
 /// has to come next. A prefix found anywhere later in the URL is not a prefix
 /// and never matches.
 ///
-/// The `..` rule is the other half, and a prefix check is not sound without
-/// it: a URL is resolved against its own path before it is fetched, so
-/// `.../releases/download/../../someone-else/...` is a URL that starts with
-/// the prefix and asks for a file outside it. Nothing `ship-zip.ps1` publishes
-/// contains one, so refusing them outright costs nothing.
-fn from_our_releases(url: &str) -> bool {
-    url.starts_with(RELEASE_DOWNLOAD_PREFIX) && !url.contains("..")
+/// The rest of this function is about the gap between a string prefix and a
+/// path prefix, because a URL is resolved against its own path before it is
+/// fetched: `.../releases/download/../../someone-else/...` starts with the
+/// prefix and asks for a file outside it. Refusing `..` is the obvious half,
+/// and on its own it refuses one *spelling*. `%2e%2e` contains no dot at all,
+/// starts with the prefix, and passes [`super::download::allowed`] because the
+/// host really is `github.com` — and then resolves to whatever the origin
+/// decodes it to. A backslash is the same trick aimed at a different
+/// normaliser. So the remainder is constrained rather than the spellings
+/// blacklisted: no `..`, no `%`, no `\`, and a final path segment that is
+/// exactly the file this release claims to be. Nothing `ship-zip.ps1`
+/// publishes contains any of them, so refusing them costs nothing — and the
+/// last rule is the one that holds even against an encoding nobody here
+/// thought of, since a URL that resolves somewhere else has to name something
+/// else at the end of it.
+fn from_our_releases(url: &str, file: &str) -> bool {
+    let Some(rest) = url.strip_prefix(RELEASE_DOWNLOAD_PREFIX) else { return false };
+    // Asked of the whole URL rather than of `rest`: the prefix contains none of
+    // these today, and if it ever did the refusal should be total and obvious
+    // rather than quietly confined to the part after it.
+    !url.contains("..")
+        && !url.contains('%')
+        && !url.contains('\\')
+        && rest.rsplit('/').next() == Some(file)
 }
 
 /// `Ok(None)` means "nothing to offer" and is not a problem: it covers the
 /// common case (already current) and the awkward one (a release whose assets
 /// are still uploading). `Err` is reserved for a body that could not be
-/// understood at all, which is worth a log line.
+/// understood at all, and reaches the user only as `update_check`'s returned
+/// `Err` and the `Failed` event emitted beside it — this crate has no logger
+/// and no console, so there is nowhere else for it to go.
 pub fn newer_release(body: &str, current: &str) -> Result<Option<Release>, String> {
     let json: Value =
         serde_json::from_str(body).map_err(|e| format!("release feed was not JSON: {e}"))?;
@@ -114,22 +228,18 @@ pub fn newer_release(body: &str, current: &str) -> Result<Option<Release>, Strin
     let tag = json.get("tag_name").and_then(Value::as_str).ok_or("release feed has no tag_name")?;
     let version = tag.strip_prefix('v').unwrap_or(tag);
 
-    let latest = semver::Version::parse(version)
-        .map_err(|e| format!("release tag {tag:?} is not a version: {e}"))?;
-    let running = semver::Version::parse(current)
-        .map_err(|e| format!("this build's own version {current:?} is not a version: {e}"))?;
-    if latest <= running {
+    if !is_newer(version, current)? {
         return Ok(None);
     }
 
     let assets = json.get("assets").and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
-    let zip_name = format!("trix-v{version}-win-x64.zip");
+    let zip_name = zip_name(version);
 
     // Both assets or neither. A zip with no digest beside it cannot be
     // verified, and an unverifiable download is not an update -- it is a
     // failure waiting to happen halfway through the swap.
     let Some(zip) = find_asset(assets, &zip_name) else { return Ok(None) };
-    let Some(sums) = find_asset(assets, "SHA256SUMS.txt") else { return Ok(None) };
+    let Some(sums) = find_asset(assets, SUMS_NAME) else { return Ok(None) };
 
     Ok(Some(Release {
         version: version.to_string(),
@@ -256,6 +366,23 @@ mod tests {
         }
     }
 
+    /// A URL under this repository's release downloads for `version`.
+    fn ours(version: &str, file: &str) -> String {
+        format!("https://github.com/tnhnblgl/trix/releases/download/v{version}/{file}")
+    }
+
+    /// A wholly genuine release of `version` — real URLs, real asset names —
+    /// so a test that changes one thing about it is testing that one thing.
+    fn genuine(version: &str) -> Release {
+        Release {
+            version: version.to_string(),
+            notes_url: format!("https://github.com/tnhnblgl/trix/releases/tag/v{version}"),
+            zip_url: ours(version, &zip_name(version)),
+            sums_url: ours(version, SUMS_NAME),
+            size: 3_400_000,
+        }
+    }
+
     /// The URLs a real release actually carries, so the guard cannot be the
     /// kind that refuses everything and passes its negative tests.
     #[test]
@@ -263,7 +390,54 @@ mod tests {
         let release = newer_release(&full_release("v0.5.0"), "0.4.0")
             .expect("parses")
             .expect("0.5.0 is newer");
-        release.assets_are_ours().expect("a release built from this repository's feed must pass");
+        assert_eq!(
+            release
+                .asset_to_install("0.4.0")
+                .expect("a release built from this repository's feed must pass"),
+            "trix-v0.5.0-win-x64.zip",
+            "and it must hand back the filename the download, the checksum and the URL all key off"
+        );
+    }
+
+    /// The one field the webview supplies that reaches the filesystem.
+    /// `update_install` interpolates it into the asset filename and joins that
+    /// onto the staging directory, and `download::fetch_to_file` creates the
+    /// parent before it writes — so a separator here does not fail, it writes
+    /// somewhere else.
+    #[test]
+    fn a_version_that_could_name_something_other_than_a_file_is_refused() {
+        for version in
+            [r"..\..\..\Windows\System32\evil", "0.5.0/../../evil", r"0.5.0\evil", "C:/evil", ""]
+        {
+            let mut release = genuine("0.5.0");
+            release.version = version.to_string();
+            let Err(error) = release.asset_to_install("0.4.0") else {
+                panic!("{version:?} must never become part of a path");
+            };
+            assert!(
+                error.contains("not a version number"),
+                "the refusal must be about the version, not about whatever failed later: {error}"
+            );
+        }
+    }
+
+    /// `newer_release` refuses to *offer* a downgrade, and until this check
+    /// existed that was the only place the question was asked. `update_install`
+    /// takes its release from the webview, so naming a genuine older release
+    /// passed the origin check, the checksum and the version probe — every one
+    /// of them, honestly — and installed an older Trix over a newer one.
+    #[test]
+    fn a_genuine_older_release_is_still_refused_at_install_time() {
+        for version in ["0.3.0", "0.4.0"] {
+            let Err(error) = genuine(version).asset_to_install("0.4.0") else {
+                panic!("{version} is not newer than the running 0.4.0 and must not install");
+            };
+            assert!(
+                error.contains("not newer"),
+                "the user has to be told why an otherwise valid release was refused: {error}"
+            );
+        }
+        genuine("0.5.0").asset_to_install("0.4.0").expect("and a real upgrade must still pass");
     }
 
     /// The host allowlist in `download.rs` cannot make this distinction: every
@@ -278,7 +452,7 @@ mod tests {
             "https://github.com/tnhnblgl/notes/releases/download/v0.5.0/trix-v0.5.0-win-x64.zip",
         ] {
             let error = release_with(url, url)
-                .assets_are_ours()
+                .asset_to_install("0.4.0")
                 .expect_err("another account's release must not be installable");
             assert!(error.contains(url), "the message must name the URL it refused: {error}");
         }
@@ -306,8 +480,71 @@ mod tests {
             // Scheme is part of the prefix, so this cannot pass either.
             "http://github.com/tnhnblgl/trix/releases/download/v0.5.0/trix.zip",
         ] {
-            assert!(!from_our_releases(url), "{url} must not read as a Trix release");
+            // The URL's own last segment, so every case here is refused by the
+            // rule it was written for rather than incidentally by the
+            // filename rule -- which the three tests below cover on their own.
+            let file = url.rsplit('/').next().expect("a URL has a last segment");
+            assert!(!from_our_releases(url, file), "{url} must not read as a Trix release");
         }
+    }
+
+    /// The spelling `!url.contains("..")` cannot see. There is no dot in it at
+    /// all, it starts with the prefix, and `download::allowed` passes it
+    /// because the host really is `github.com` — so if the origin decodes
+    /// before it normalises, this fetches an attacker's release, verifies it
+    /// against the `SHA256SUMS.txt` they supplied beside it, and runs the
+    /// `trix.exe` inside. Blacklisting spellings is what this test exists to
+    /// stop anyone going back to.
+    #[test]
+    fn a_percent_encoded_traversal_is_refused() {
+        const ENCODED: &str = "https://github.com/tnhnblgl/trix/releases/download/%2e%2e/%2e%2e/attacker/trix/releases/download/v0.5.0/trix-v0.5.0-win-x64.zip";
+        assert!(
+            !ENCODED.contains(".."),
+            "the premise: the literal `..` rule sees nothing wrong with this URL"
+        );
+        assert!(ENCODED.starts_with(RELEASE_DOWNLOAD_PREFIX), "and the prefix rule passes it");
+
+        let error = release_with(ENCODED, &ours("0.5.0", SUMS_NAME))
+            .asset_to_install("0.4.0")
+            .expect_err("a percent-encoded traversal must not read as a Trix release");
+        assert!(error.contains(ENCODED), "the message must name the URL it refused: {error}");
+    }
+
+    /// A backslash is not a URL path character, and nothing `ship-zip.ps1`
+    /// publishes contains one — but it is a path separator to some
+    /// normalisers and not to others, which is the whole reason a URL would
+    /// carry one. The case below is chosen so that the backslash rule is the
+    /// only thing that can refuse it: the traversal spellings are already
+    /// caught by `..`, and the filename at the end is the right one.
+    #[test]
+    fn a_url_containing_a_backslash_is_refused() {
+        const BACKSLASH: &str =
+            r"https://github.com/tnhnblgl/trix/releases/download/v0.5.0\x/trix-v0.5.0-win-x64.zip";
+        assert!(!BACKSLASH.contains("..") && !BACKSLASH.contains('%'), "the premise");
+        assert!(!from_our_releases(BACKSLASH, "trix-v0.5.0-win-x64.zip"));
+    }
+
+    /// The last rule, and the one that holds against an encoding nobody here
+    /// thought of: a URL that resolves somewhere else has to name something
+    /// else at the end of it. It also closes an ordinary mix-up — a zip URL
+    /// for a different version downloads one build, saves it under the name of
+    /// another, and fails at the checksum with a message about GitHub.
+    #[test]
+    fn a_url_whose_last_segment_is_not_the_file_it_should_be_is_refused() {
+        let wrong_zip =
+            release_with(&ours("0.5.0", "trix-v0.4.0-win-x64.zip"), &ours("0.5.0", SUMS_NAME));
+        let error = wrong_zip.asset_to_install("0.4.0").expect_err("a zip URL naming another file");
+        assert!(error.contains("trix-v0.4.0-win-x64.zip"), "{error}");
+
+        // The checksums half, which is the worse one to get wrong: the sums
+        // file is what the zip is measured against.
+        let wrong_sums = release_with(
+            &ours("0.5.0", "trix-v0.5.0-win-x64.zip"),
+            &ours("0.5.0", "not-the-checksums.txt"),
+        );
+        let error =
+            wrong_sums.asset_to_install("0.4.0").expect_err("a sums URL naming another file");
+        assert!(error.contains("not-the-checksums.txt"), "{error}");
     }
 
     /// The zip is the payload, but the checksums file is what the payload is
@@ -322,9 +559,9 @@ mod tests {
         const THEIRS: &str =
             "https://github.com/attacker/trix/releases/download/v0.5.0/SHA256SUMS.txt";
 
-        release_with(OURS, OUR_SUMS).assets_are_ours().expect("both from this repository");
+        release_with(OURS, OUR_SUMS).asset_to_install("0.4.0").expect("both from this repository");
         let error = release_with(OURS, THEIRS)
-            .assets_are_ours()
+            .asset_to_install("0.4.0")
             .expect_err("a genuine zip beside someone else's checksums is not a Trix release");
         assert!(error.contains(THEIRS), "the sums URL is the one at fault here: {error}");
     }

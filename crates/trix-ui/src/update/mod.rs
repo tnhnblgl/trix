@@ -12,6 +12,7 @@ pub mod swap;
 pub mod verify;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{Map, Value};
 use tauri::{AppHandle, Emitter as _, State};
@@ -46,6 +47,66 @@ const RESTART_PID_FLAG: &str = "--wait-pid";
 /// The exact argument vector handed to `trix.exe`.
 fn restart_args(pid: u32) -> [String; 3] {
     [RESTART_SUBCOMMAND.to_string(), RESTART_PID_FLAG.to_string(), pid.to_string()]
+}
+
+/// Set for exactly as long as one install is running.
+///
+/// One flag, held by the module that owns the install, rather than a disabled
+/// button in the webview. Tauri runs invokes concurrently and hands each one
+/// its own `spawn_blocking` thread, so "the user cannot press Install twice"
+/// is a claim about a frontend, and this module has to hold whether or not
+/// that frontend is the one talking to it. Same call this crate already makes
+/// twice over: `tauri_plugin_single_instance` in `main.rs` and the daemon's
+/// `FILE_FLAG_FIRST_PIPE_INSTANCE` both refuse at the layer that owns the
+/// resource rather than trusting whoever is asking.
+///
+/// What two concurrent installs do to each other is not subtle. They share one
+/// staging path, so the second one's `remove_dir_all` deletes the first one's
+/// half-finished download and both then write the same zip; the user is shown
+/// `verify::check`'s checksum mismatch, which blames GitHub for a race Trix
+/// caused itself. The worse interleaving reaches the swap: the second run
+/// finds no pipe, because the first has already stopped the daemon, so it
+/// skips the guard that exists for exactly that and calls `swap_in` on a
+/// payload directory the first run has already consumed — the un-retryable
+/// state `swap.rs` documents at length.
+static INSTALLING: AtomicBool = AtomicBool::new(false);
+
+/// Held for the length of one install, and given back on every way out of it.
+///
+/// A guard rather than a pair of `store` calls, because `install` below has a
+/// dozen `?`s in it and a flag left set after one of them fires is worse than
+/// no flag at all: every later install would be refused, for the rest of the
+/// run, with a message about an install that is not happening.
+struct InstallGuard;
+
+impl InstallGuard {
+    /// `None` when an install is already running.
+    fn claim() -> Option<Self> {
+        INSTALLING
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+            .then_some(Self)
+    }
+}
+
+impl Drop for InstallGuard {
+    fn drop(&mut self) {
+        INSTALLING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Whether an install is in flight, for [`crate::commands::start_daemon`].
+///
+/// The window that matters is between `install`'s `stop()` and its `swap_in`:
+/// by then the supervisor has emitted `trix-disconnected` and the frontend is
+/// showing spec §4.5's "not running" panel, whose whole purpose is a Start
+/// button. Pressing it launches the *old* `trix-daemon.exe` straight into the
+/// gap the `pipe_exists` guard just cleared, and Windows lets a running
+/// executable be renamed — so the swap reports success and leaves the previous
+/// daemon executing out of `trix-daemon.exe.old`, which `swap::cleanup` cannot
+/// remove either.
+pub(crate) fn install_in_progress() -> bool {
+    INSTALLING.load(Ordering::SeqCst)
 }
 
 /// What the frontend renders. `state` is the tag it switches on.
@@ -135,9 +196,10 @@ pub fn update_current_version() -> String {
 #[tauri::command]
 pub async fn update_check(app: AppHandle) -> Result<Option<Release>, String> {
     // Cloned before the move so the join failure has somewhere to be reported
-    // too. `Checking` has already been emitted by then, and a task that cannot
-    // be joined emits nothing of its own, so without this the banner sits on
-    // "Checking…" for as long as the window is open.
+    // too. A task that cannot be joined emits nothing of its own, and it may
+    // never have run at all -- so the banner is sitting either on "Checking…"
+    // or on whatever preceded it, and without this it stays there for as long
+    // as the window is open.
     let scheduling = app.clone();
     let joined = tauri::async_runtime::spawn_blocking(move || {
         emit(&app, &UpdateState::Checking);
@@ -162,16 +224,30 @@ fn look_for_a_newer_release(app: &AppHandle) -> Result<Option<Release>, String> 
     Ok(found)
 }
 
-/// Downloads, verifies, stops the daemon, swaps, and restarts.
+/// Downloads, verifies, stops the recorder, swaps, puts the recorder back, and
+/// restarts the app.
 ///
 /// Returns only on failure: on success the process is replaced by a newly
-/// spawned one and this one exits.
+/// spawned one and this one exits. One at a time — see [`INSTALLING`].
 #[tauri::command]
 pub async fn update_install(
     app: AppHandle,
     supervisor: State<'_, Arc<Supervisor>>,
     release: Release,
 ) -> Result<(), String> {
+    // Claimed before the task is even scheduled, so a double-clicked Install
+    // cannot get two runs as far as the shared staging directory.
+    //
+    // Refused with a bare `Err` rather than through `reported`, and this is the
+    // one place in this module that is right. `reported` exists because a
+    // rejected promise with nothing on the event channel leaves the progress
+    // bar sitting where it stopped -- but here the bar is not stopped, it is
+    // being driven by the install that is actually running. A `Failed` event
+    // would paint a failure over a download proceeding normally: an answer
+    // about the second press, told as a lie about the first.
+    let Some(guard) = InstallGuard::claim() else {
+        return Err("Trix is already installing an update.".to_string());
+    };
     let supervisor = Arc::clone(&supervisor);
     // Same shape as `update_check`, and it matters more here: this command
     // returns only on failure, so a join error with nothing on the event
@@ -179,6 +255,10 @@ pub async fn update_install(
     // with no explanation beside it.
     let scheduling = app.clone();
     let joined = tauri::async_runtime::spawn_blocking(move || {
+        // Moved in rather than held out here, so it is dropped on whichever
+        // way the closure ends -- including the task being dropped without
+        // ever having run.
+        let _guard = guard;
         reported(&app, install(&app, &supervisor, &release))
     })
     .await
@@ -186,13 +266,40 @@ pub async fn update_install(
     reported(&scheduling, joined)?
 }
 
+/// Starts the recorder again, if this update is what stopped it.
+///
+/// `stopped` rather than an unconditional relaunch: a user who had the
+/// recorder off before pressing Install must not find it on afterwards. The
+/// update restores the state it found, it does not choose a new one.
+///
+/// The result is dropped, and there is nowhere better for it to go. On the
+/// success path a failed relaunch must not turn an update that worked into a
+/// reported failure, and on the failure path `swap_in`'s own message is
+/// already the thing the user has to act on -- its stranded-install branch
+/// asks them to rename files by hand, and appending a second problem after
+/// that would bury it. `trix-ui` has no logger and no console either. What a
+/// dropped error actually costs is bounded: the app is left showing spec
+/// §4.5's "not running" panel, which is the same panel the user was looking at
+/// a moment ago and the one screen in Trix whose entire content is a button
+/// that starts the recorder.
+fn put_the_recorder_back(supervisor: &Supervisor, stopped: bool) {
+    if stopped {
+        let _ = supervisor.launch();
+    }
+}
+
 fn install(app: &AppHandle, supervisor: &Supervisor, release: &Release) -> Result<(), String> {
-    // Where the files come from, before a byte of them is fetched. `release`
-    // is a command argument, so it is whatever the webview passed in, not
-    // necessarily what `update_check` built -- and the host allowlist further
-    // down cannot tell this repository's releases from anyone else's, because
-    // both are `github.com`.
-    release.assets_are_ours()?;
+    // What this release claims about itself, settled before a byte of it is
+    // fetched. `release` is a command argument, so it is whatever the webview
+    // passed in, not necessarily what `update_check` built: the version it
+    // names, whether it is an upgrade at all, and where its files live are
+    // three separate claims, and the host allowlist further down can check
+    // none of them -- it cannot even tell this repository's releases from
+    // anyone else's, because both are `github.com`. The asset filename comes
+    // back from that check rather than being built here, so the name every
+    // later step keys off cannot exist before the version has been vouched
+    // for.
+    let zip_name = release.asset_to_install(env!("CARGO_PKG_VERSION"))?;
 
     // Then the preflight, in the order that costs least to refuse. Recording
     // first: a user mid-session must be told to stop, not have the recorder
@@ -225,10 +332,11 @@ fn install(app: &AppHandle, supervisor: &Supervisor, release: &Release) -> Resul
     swap::writable(&dir)?;
 
     let staging = dir.join(swap::STAGING);
-    // A staging folder from an update that failed before cleanup ran.
+    // A staging folder from an update that failed before cleanup ran. Safe to
+    // remove outright only because `INSTALLING` guarantees no other install is
+    // downloading into it right now.
     let _ = std::fs::remove_dir_all(&staging);
 
-    let zip_name = format!("trix-v{}-win-x64.zip", release.version);
     let zip_path = staging.join("download").join(&zip_name);
 
     let progress_app = app.clone();
@@ -244,6 +352,12 @@ fn install(app: &AppHandle, supervisor: &Supervisor, release: &Release) -> Resul
     verify_payload_version(&payload, &release.version)?;
 
     emit(app, &UpdateState::Installing);
+
+    // Whether the recorder is down *because of this update*, which is the only
+    // thing that earns it a relaunch below. A user who pressed Install with the
+    // daemon already stopped must not find it running afterwards.
+    let mut stopped_the_recorder = false;
+
     // `pipe_exists`, not `is_connected`: the question here is whether a daemon
     // is *running*, and a running daemon this app has momentarily lost its
     // socket to is still running. Getting that wrong is silent rather than
@@ -281,6 +395,11 @@ fn install(app: &AppHandle, supervisor: &Supervisor, release: &Release) -> Resul
                  nothing was changed."
             ));
         }
+        // Past this line a daemon was running and now is not, and this update
+        // is why. Set here rather than only on the clean `stop()` -- the
+        // branch above has already established that nothing owns the pipe any
+        // more, which is the same outcome by a rougher road.
+        stopped_the_recorder = true;
     }
     // `swap_in`'s message, passed through exactly as it comes. It already ends
     // by telling the user where they stand, and it says two different things:
@@ -289,7 +408,21 @@ fn install(app: &AppHandle, supervisor: &Supervisor, release: &Release) -> Resul
     // ".old" suffix can overwrite a working file rather than fill a gap --
     // when it did not. Appending anything about Trix being unchanged would
     // contradict the second, and it would be the last thing the user reads.
-    swap::swap_in(&dir, &payload)?;
+    if let Err(e) = swap::swap_in(&dir, &payload) {
+        // A rollback that worked has put the old binaries back, so the old
+        // daemon is once again the right thing to be running -- and the copy
+        // above talks only about files, so a user reading "the version you
+        // were running is still installed" would have no idea their recorder
+        // had been switched off underneath it.
+        put_the_recorder_back(supervisor, stopped_the_recorder);
+        return Err(e);
+    }
+    // After the swap, so it is the new `trix-daemon.exe` that starts. Before
+    // the relaunch of this app rather than after, because `restart-ui` starts
+    // `trix-ui.exe` and nothing else: without this line every successful
+    // update ended with the recorder off and the "not running" panel on
+    // screen, which is not the state the user handed over.
+    put_the_recorder_back(supervisor, stopped_the_recorder);
 
     emit(app, &UpdateState::Restarting);
     let helper = dir.join("trix.exe");
@@ -414,6 +547,24 @@ mod tests {
             ["notes_url", "size", "sums_url", "version", "zip_url"],
             "these are the field names the webview reads; renaming one is a frontend change too"
         );
+    }
+
+    /// Two installs cannot run at once, and a finished one gives the flag back
+    /// however it finished.
+    ///
+    /// The second half is the one worth pinning: `install` is a dozen `?`s
+    /// long, and a guard that only cleared itself on the success path would
+    /// leave a failed update refusing every retry -- and `start_daemon`
+    /// refusing to start the recorder -- for the rest of the process's life.
+    #[test]
+    fn a_second_install_is_refused_while_the_first_is_running() {
+        let first = InstallGuard::claim().expect("nothing else in this suite claims it");
+        assert!(install_in_progress(), "this is what start_daemon reads");
+        assert!(InstallGuard::claim().is_none(), "a second install must not start");
+
+        drop(first);
+        assert!(!install_in_progress(), "and a finished install must give it back");
+        assert!(InstallGuard::claim().is_some(), "so the next one is allowed");
     }
 
     /// The command line `trix.exe` is relaunched with, pinned from this side.

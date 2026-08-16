@@ -40,6 +40,22 @@ pub async fn trix_call(
 
 #[tauri::command]
 pub fn start_daemon(supervisor: State<'_, Arc<Supervisor>>) -> Result<(), String> {
+    // Refused for the length of an install, and refused here rather than by
+    // hiding the button. An update stops the daemon before it renames
+    // `trix-daemon.exe`, and the supervisor emits `trix-disconnected` the
+    // moment it does -- so for those few seconds the window is showing spec
+    // §4.5's "not running" panel, whose entire content is an offer to start
+    // the thing the updater just stopped. Taking that offer launches the old
+    // daemon into the gap `update::install`'s `pipe_exists` guard just
+    // cleared, and Windows lets a running executable be renamed: the swap
+    // would report success and leave the previous build executing out of
+    // `trix-daemon.exe.old`, where the next launch's cleanup cannot delete it
+    // either. The updater puts the recorder back itself when it is done.
+    if crate::update::install_in_progress() {
+        return Err("Trix is installing an update, so the recorder cannot be started right now. \
+                    Try again once the update has finished."
+            .to_string());
+    }
     supervisor.launch()
 }
 
