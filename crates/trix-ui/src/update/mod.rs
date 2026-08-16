@@ -11,6 +11,7 @@ pub mod download;
 pub mod swap;
 pub mod verify;
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -43,6 +44,20 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// once instead of an argument list nobody is watching.
 const RESTART_SUBCOMMAND: &str = "restart-ui";
 const RESTART_PID_FLAG: &str = "--wait-pid";
+
+/// The recorder's own binary, by name.
+///
+/// [`swap::BINARIES`] is the set that gets renamed; this is the one member of
+/// it this module has to ask about on its own, because it is the only one
+/// whose image is mapped by a process the updater starts.
+///
+/// Taken from that array rather than spelled again beside it, and pinned to
+/// the name it is expected to be: a rename or a reorder over there would
+/// otherwise leave [`a_failed_swap_stranded_the_daemon`] quietly asking about
+/// `trix.exe`, or about a file that can no longer exist — and a check that can
+/// never fire is indistinguishable from one that found nothing wrong.
+const DAEMON_EXE: &str = swap::BINARIES[1];
+const _: () = assert!(matches!(DAEMON_EXE.as_bytes(), b"trix-daemon.exe"));
 
 /// The exact argument vector handed to `trix.exe`.
 fn restart_args(pid: u32) -> [String; 3] {
@@ -149,6 +164,47 @@ fn reported<T>(app: &AppHandle, result: Result<T, String>) -> Result<T, String> 
     result
 }
 
+/// The check's half of `trix-update`, silent while an install owns the channel.
+///
+/// Both entry points in this module emit on one channel and the banner holds
+/// one state, so the last emit wins — which is harmless in one direction and
+/// not in the other. The install's events are what the user is watching, and
+/// they are sparse: during `Downloading` the next chunk repaints within
+/// milliseconds, but `Verifying`, `Installing` and `Restarting` each sit there
+/// alone. A check completing in one of those windows leaves "Up to date" on
+/// screen for the whole swap, until the app disappears to restart — or worse,
+/// re-renders an offer to install the release that is at that moment being
+/// installed.
+///
+/// Nothing is lost by staying quiet. `update_check` also *returns* what it
+/// found, and both of its callers read that return value: the launch check
+/// discards it, and Settings' "Check now" renders from it directly rather
+/// than from this channel.
+///
+/// Asked at each emit rather than once at the top of the check, because an
+/// install can start at any point during a network round trip. That still
+/// leaves the width of one `emit` call between the question and the answer,
+/// which is as close as a shared channel gets.
+fn emit_check(app: &AppHandle, state: &UpdateState) {
+    if !install_in_progress() {
+        emit(app, state);
+    }
+}
+
+/// [`reported`] for the check, under [`emit_check`]'s rule.
+///
+/// A failed check is the worst of the three to paint over an install: the
+/// banner would show the user a failure, in words about GitHub being
+/// unreachable, while the update they are watching is proceeding normally. The
+/// `Err` is still returned untouched, which is the half `update_check`'s
+/// callers actually read.
+fn reported_check<T>(app: &AppHandle, result: Result<T, String>) -> Result<T, String> {
+    if install_in_progress() {
+        return result;
+    }
+    reported(app, result)
+}
+
 /// Clears away the previous build, and repairs an update that was interrupted.
 ///
 /// Hands the install directory to [`swap::cleanup`], which is where the
@@ -202,24 +258,24 @@ pub async fn update_check(app: AppHandle) -> Result<Option<Release>, String> {
     // as the window is open.
     let scheduling = app.clone();
     let joined = tauri::async_runtime::spawn_blocking(move || {
-        emit(&app, &UpdateState::Checking);
-        reported(&app, look_for_a_newer_release(&app))
+        emit_check(&app, &UpdateState::Checking);
+        reported_check(&app, look_for_a_newer_release(&app))
     })
     .await
     .map_err(|e| format!("the update check could not be scheduled: {e}"));
     // Two layers: the outer is whether the task ran at all, the inner is what
     // it decided. Only the outer is reported here -- the inner has already been
-    // through `reported` inside the closure, and doing it twice would put two
-    // `Failed` events on the channel for one failure.
-    reported(&scheduling, joined)?
+    // through `reported_check` inside the closure, and doing it twice would put
+    // two `Failed` events on the channel for one failure.
+    reported_check(&scheduling, joined)?
 }
 
 fn look_for_a_newer_release(app: &AppHandle) -> Result<Option<Release>, String> {
     let body = download::fetch_text(check::RELEASE_API)?;
     let found = check::newer_release(&body, env!("CARGO_PKG_VERSION"))?;
     match &found {
-        Some(release) => emit(app, &UpdateState::Available { release: release.clone() }),
-        None => emit(app, &UpdateState::UpToDate),
+        Some(release) => emit_check(app, &UpdateState::Available { release: release.clone() }),
+        None => emit_check(app, &UpdateState::UpToDate),
     }
     Ok(found)
 }
@@ -266,26 +322,57 @@ pub async fn update_install(
     reported(&scheduling, joined)?
 }
 
-/// Starts the recorder again, if this update is what stopped it.
+/// Starts the recorder again, if it was running when this update went to stop
+/// it and the `trix-daemon.exe` on disk is a file Trix may safely map.
 ///
 /// `stopped` rather than an unconditional relaunch: a user who had the
 /// recorder off before pressing Install must not find it on afterwards. The
 /// update restores the state it found, it does not choose a new one.
 ///
-/// The result is dropped, and there is nowhere better for it to go. On the
-/// success path a failed relaunch must not turn an update that worked into a
-/// reported failure, and on the failure path `swap_in`'s own message is
-/// already the thing the user has to act on -- its stranded-install branch
-/// asks them to rename files by hand, and appending a second problem after
-/// that would bury it. `trix-ui` has no logger and no console either. What a
-/// dropped error actually costs is bounded: the app is left showing spec
-/// §4.5's "not running" panel, which is the same panel the user was looking at
-/// a moment ago and the one screen in Trix whose entire content is a button
-/// that starts the recorder.
-fn put_the_recorder_back(supervisor: &Supervisor, stopped: bool) {
-    if stopped {
-        let _ = supervisor.launch();
+/// `stranded` is the second half, and it is only ever true after a swap that
+/// failed *and* could not put itself back — see
+/// [`a_failed_swap_stranded_the_daemon`], which is the one thing allowed to
+/// answer it. Launching then would map the new `trix-daemon.exe` while
+/// [`swap::swap_in`]'s own message is asking the user to rename
+/// `trix-daemon.exe.old` over that very file; on Windows that rename is
+/// `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, which has to delete the
+/// target, and a mapped image cannot be deleted. The user would follow Trix's
+/// instructions exactly and get a sharing violation, on the one recovery path
+/// this project has decided is manual. It would also leave a new-build daemon
+/// talking to an old-build `trix-ui.exe` over the control protocol.
+///
+/// `launch` is injected rather than the `&Supervisor` it comes from, for the
+/// reason `daemon.rs`'s `wait_until_gone` takes its probe and `swap.rs`'s
+/// `Rename` takes its rename: the decision is the part worth pinning, and a
+/// regression in either direction here is silent — a recorder left off after
+/// an update that worked, or switched on for a user who had it off.
+fn put_the_recorder_back(stopped: bool, stranded: bool, launch: &dyn Fn()) {
+    if stopped && !stranded {
+        launch();
     }
+}
+
+/// Whether a swap that *failed* left `trix-daemon.exe` holding the new build.
+///
+/// Only meaningful after [`swap::swap_in`] has returned `Err`, and deliberately
+/// not a question that can be asked at any other moment: a swap that worked
+/// leaves a `trix-daemon.exe.old` too, on purpose, for [`swap::cleanup`] to
+/// remove at the next launch. What gives the file its meaning here is the
+/// failure beside it. `swap_in`'s rollback restores every name it vacated and
+/// leaves no `.old` behind when it succeeds — `swap.rs`'s own
+/// `assert_install_is_untouched` pins exactly that — so after a failure this
+/// file is present only when the rollback could not put the old daemon back.
+///
+/// That is precise on every sub-case, including a failure before
+/// `trix-daemon.exe` was ever moved aside: no `.old` was created there either,
+/// the live binary is untouched, and relaunching it is right.
+///
+/// Read off the install directory rather than out of the returned message.
+/// `swap_in`'s copy already says which shape it is in, but that string is
+/// written for a person, and matching on it would make the recorder's
+/// behaviour depend on wording another module is free to improve.
+fn a_failed_swap_stranded_the_daemon(install: &Path) -> bool {
+    install.join(format!("{DAEMON_EXE}{}", swap::OLD_SUFFIX)).exists()
 }
 
 fn install(app: &AppHandle, supervisor: &Supervisor, release: &Release) -> Result<(), String> {
@@ -353,9 +440,9 @@ fn install(app: &AppHandle, supervisor: &Supervisor, release: &Release) -> Resul
 
     emit(app, &UpdateState::Installing);
 
-    // Whether the recorder is down *because of this update*, which is the only
-    // thing that earns it a relaunch below. A user who pressed Install with the
-    // daemon already stopped must not find it running afterwards.
+    // Whether the recorder was running when this update went to stop it, which
+    // is half of what earns it a relaunch below. A user who pressed Install
+    // with the daemon already stopped must not find it running afterwards.
     let mut stopped_the_recorder = false;
 
     // `pipe_exists`, not `is_connected`: the question here is whether a daemon
@@ -390,17 +477,49 @@ fn install(app: &AppHandle, supervisor: &Supervisor, release: &Release) -> Resul
         if let Err(e) = supervisor.stop()
             && daemon::pipe_exists()
         {
+            // The message speaks only about the files, and has to. `stop` can
+            // reach `TerminateProcess` and still return `Err`: its
+            // post-terminate poll is two seconds, against a capture stack this
+            // crate documents taking about ten to let go, so the recorder can
+            // be dead and the pipe still resolving when this line is reached.
+            // "Nothing was changed" would be read by a user whose recorder had
+            // just been killed. What is true in every shape this branch can be
+            // produced in is that no program of Trix's was replaced.
             return Err(format!(
-                "{e}. The Trix recorder has to stop before its program can be replaced, so \
-                 nothing was changed."
+                "{e}. The Trix recorder has to stop before its program can be replaced, so none \
+                 of Trix's programs were replaced."
             ));
         }
-        // Past this line a daemon was running and now is not, and this update
-        // is why. Set here rather than only on the clean `stop()` -- the
+        // Past this line a daemon was running when this block started and is
+        // not now. Set here rather than only on the clean `stop()` -- the
         // branch above has already established that nothing owns the pipe any
         // more, which is the same outcome by a rougher road.
+        //
+        // Not necessarily an outcome this update caused, and the guard above
+        // is there precisely because that cannot be known: an idle daemon
+        // exiting on its own, or a user quitting it from the tray, lands here
+        // too and gets switched back on below. That is more than
+        // `put_the_recorder_back` promises -- it restores the state it found
+        // rather than choosing a new one -- and it is the defensible half of
+        // the trade. The window is a few hundred milliseconds; the other side
+        // of it is leaving the recorder off after an update that stopped it,
+        // every time.
         stopped_the_recorder = true;
     }
+    // The relaunch's error is dropped, and there is nowhere better for it to
+    // go. On the success path a failed relaunch must not turn an update that
+    // worked into a reported failure, and on the failure path `swap_in`'s own
+    // message is already the thing the user has to act on -- its
+    // stranded-install branch asks them to rename files by hand, and appending
+    // a second problem after that would bury it. `trix-ui` has no logger and
+    // no console either. What a dropped error actually costs is bounded: the
+    // app is left showing spec §4.5's "not running" panel, which is the same
+    // panel the user was looking at a moment ago and the one screen in Trix
+    // whose entire content is a button that starts the recorder.
+    let relaunch = || {
+        let _ = supervisor.launch();
+    };
+
     // `swap_in`'s message, passed through exactly as it comes. It already ends
     // by telling the user where they stand, and it says two different things:
     // "the version you were running is still installed" when the rollback
@@ -413,8 +532,14 @@ fn install(app: &AppHandle, supervisor: &Supervisor, release: &Release) -> Resul
         // daemon is once again the right thing to be running -- and the copy
         // above talks only about files, so a user reading "the version you
         // were running is still installed" would have no idea their recorder
-        // had been switched off underneath it.
-        put_the_recorder_back(supervisor, stopped_the_recorder);
+        // had been switched off underneath it. A rollback that could not put
+        // `trix-daemon.exe` back is the opposite case, and the only thing that
+        // separates the two out here is what is on disk.
+        put_the_recorder_back(
+            stopped_the_recorder,
+            a_failed_swap_stranded_the_daemon(&dir),
+            &relaunch,
+        );
         return Err(e);
     }
     // After the swap, so it is the new `trix-daemon.exe` that starts. Before
@@ -422,7 +547,16 @@ fn install(app: &AppHandle, supervisor: &Supervisor, release: &Release) -> Resul
     // `trix-ui.exe` and nothing else: without this line every successful
     // update ended with the recorder off and the "not running" panel on
     // screen, which is not the state the user handed over.
-    put_the_recorder_back(supervisor, stopped_the_recorder);
+    //
+    // Not stranded, and that is a statement about the swap rather than about
+    // the folder. `swap_in` returned `Ok`, so every rename completed and
+    // `trix-daemon.exe` holds the build that was just installed -- while a
+    // `trix-daemon.exe.old` does sit beside it, because a clean swap always
+    // leaves one for `swap::cleanup` to remove at the next launch. Asking
+    // `a_failed_swap_stranded_the_daemon` here would therefore refuse the
+    // relaunch after every successful update, which is why the discriminator
+    // is computed on the failure path and nowhere else.
+    put_the_recorder_back(stopped_the_recorder, false, &relaunch);
 
     emit(app, &UpdateState::Restarting);
     let helper = dir.join("trix.exe");
@@ -451,7 +585,7 @@ fn install(app: &AppHandle, supervisor: &Supervisor, release: &Release) -> Resul
 /// again before installing. It costs one process spawn and it is the only check
 /// that compares the *binaries* against the version being promised, rather than
 /// comparing one piece of metadata with another.
-fn verify_payload_version(payload: &std::path::Path, expected: &str) -> Result<(), String> {
+fn verify_payload_version(payload: &Path, expected: &str) -> Result<(), String> {
     use std::os::windows::process::CommandExt as _;
 
     let output = std::process::Command::new(payload.join("trix.exe"))
@@ -565,6 +699,67 @@ mod tests {
         drop(first);
         assert!(!install_in_progress(), "and a finished install must give it back");
         assert!(InstallGuard::claim().is_some(), "so the next one is allowed");
+    }
+
+    /// Both questions `put_the_recorder_back` answers, and both fail silently
+    /// when they are answered wrong: a recorder left off after an update that
+    /// stopped it, a recorder switched on for a user who had it off, or a new
+    /// `trix-daemon.exe` mapped into memory while the user is being asked to
+    /// rename a file over it.
+    #[test]
+    fn the_recorder_comes_back_only_when_this_update_stopped_it_and_nothing_is_stranded() {
+        for (stopped, stranded, expected) in
+            [(true, false, 1), (false, false, 0), (true, true, 0), (false, true, 0)]
+        {
+            let launches = std::cell::Cell::new(0);
+            put_the_recorder_back(stopped, stranded, &|| launches.set(launches.get() + 1));
+            assert_eq!(
+                launches.get(),
+                expected,
+                "stopped={stopped}, stranded={stranded} must launch the recorder {expected} times"
+            );
+        }
+    }
+
+    /// The discriminator itself, against real files. It is deliberately narrow:
+    /// the daemon is the only binary the updater starts, so it is the only one
+    /// whose `.old` file can be turned into a sharing violation by a relaunch.
+    /// A `trix.exe.old` left behind by the same failure is the user's to repair
+    /// and no reason to leave their recorder off.
+    #[test]
+    fn only_a_stranded_trix_daemon_holds_the_recorder_back() {
+        struct Scratch(std::path::PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = Scratch(std::env::temp_dir().join(format!(
+            "trix-update-stranded-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        )));
+        let _ = std::fs::remove_dir_all(&dir.0);
+        std::fs::create_dir_all(&dir.0).expect("scratch dir");
+
+        assert!(
+            !a_failed_swap_stranded_the_daemon(&dir.0),
+            "a rollback that worked leaves no .old files at all"
+        );
+
+        std::fs::write(dir.0.join(format!("trix.exe{}", swap::OLD_SUFFIX)), "old trix.exe")
+            .expect("write");
+        assert!(
+            !a_failed_swap_stranded_the_daemon(&dir.0),
+            "another binary stranded is not a reason to leave the recorder off"
+        );
+
+        std::fs::write(dir.0.join(format!("{DAEMON_EXE}{}", swap::OLD_SUFFIX)), "old daemon")
+            .expect("write");
+        assert!(
+            a_failed_swap_stranded_the_daemon(&dir.0),
+            "this is the file swap_in's repair procedure asks the user to rename back"
+        );
     }
 
     /// The command line `trix.exe` is relaunched with, pinned from this side.

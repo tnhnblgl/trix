@@ -50,7 +50,16 @@ pub fn start_daemon(supervisor: State<'_, Arc<Supervisor>>) -> Result<(), String
     // cleared, and Windows lets a running executable be renamed: the swap
     // would report success and leave the previous build executing out of
     // `trix-daemon.exe.old`, where the next launch's cleanup cannot delete it
-    // either. The updater puts the recorder back itself when it is done.
+    // either.
+    //
+    // The updater puts the recorder back itself when it was the thing that
+    // stopped it and the install left a `trix-daemon.exe` fit to run. It does
+    // not always manage both -- an update that fails because the recorder will
+    // not stop puts nothing back, and neither does one whose rollback strands
+    // the daemon binary. What holds in every case is that this refusal lasts
+    // no longer than the install does: the flag is given up on the way out
+    // however the install ended, so the offer on that panel is live again by
+    // the time the user can act on it.
     if crate::update::install_in_progress() {
         return Err("Trix is installing an update, so the recorder cannot be started right now. \
                     Try again once the update has finished."

@@ -198,12 +198,19 @@ impl Release {
 /// host really is `github.com` — and then resolves to whatever the origin
 /// decodes it to. A backslash is the same trick aimed at a different
 /// normaliser. So the remainder is constrained rather than the spellings
-/// blacklisted: no `..`, no `%`, no `\`, and a final path segment that is
-/// exactly the file this release claims to be. Nothing `ship-zip.ps1`
-/// publishes contains any of them, so refusing them costs nothing — and the
-/// last rule is the one that holds even against an encoding nobody here
-/// thought of, since a URL that resolves somewhere else has to name something
-/// else at the end of it.
+/// blacklisted: no `..`, no `%`, no `\`, no `?`, no `#`, and a final path
+/// segment that is exactly the file this release claims to be. Nothing
+/// `ship-zip.ps1` publishes contains any of them, so refusing them costs
+/// nothing.
+///
+/// The last three go together. A final-segment rule is only worth anything
+/// while the end of the string is also the end of what gets fetched, and a
+/// query string or a fragment is exactly where that stops being true:
+/// `…/download/v0.3.0/trix-v0.3.0-win-x64.zip#/trix-v0.5.0-win-x64.zip` has no
+/// `..`, no `%` and no `\`, starts with the prefix, ends in the name a 0.5.0
+/// release should carry — and fetches the 0.3.0 zip in front of the `#`.
+/// [`super::download::allowed`] already splits the host on `?` and `#` for the
+/// same reason; this is the other place a URL stops meaning what it reads as.
 fn from_our_releases(url: &str, file: &str) -> bool {
     let Some(rest) = url.strip_prefix(RELEASE_DOWNLOAD_PREFIX) else { return false };
     // Asked of the whole URL rather than of `rest`: the prefix contains none of
@@ -212,6 +219,8 @@ fn from_our_releases(url: &str, file: &str) -> bool {
     !url.contains("..")
         && !url.contains('%')
         && !url.contains('\\')
+        && !url.contains('?')
+        && !url.contains('#')
         && rest.rsplit('/').next() == Some(file)
 }
 
@@ -524,11 +533,13 @@ mod tests {
         assert!(!from_our_releases(BACKSLASH, "trix-v0.5.0-win-x64.zip"));
     }
 
-    /// The last rule, and the one that holds against an encoding nobody here
-    /// thought of: a URL that resolves somewhere else has to name something
-    /// else at the end of it. It also closes an ordinary mix-up — a zip URL
-    /// for a different version downloads one build, saves it under the name of
-    /// another, and fails at the checksum with a message about GitHub.
+    /// The final-segment rule: a URL that resolves somewhere else has to name
+    /// something else at the end of it — as long as the end of the string is
+    /// also the end of what gets fetched, which is what the `?` and `#` rules
+    /// are for and what the test below pins. It also closes an ordinary
+    /// mix-up — a zip URL for a different version downloads one build, saves
+    /// it under the name of another, and fails at the checksum with a message
+    /// about GitHub.
     #[test]
     fn a_url_whose_last_segment_is_not_the_file_it_should_be_is_refused() {
         let wrong_zip =
@@ -545,6 +556,34 @@ mod tests {
         let error =
             wrong_sums.asset_to_install("0.4.0").expect_err("a sums URL naming another file");
         assert!(error.contains("not-the-checksums.txt"), "{error}");
+    }
+
+    /// Where the final-segment rule stops being able to speak for itself. A
+    /// query string and a fragment both end the part of a URL that is fetched
+    /// without ending the string, so the last segment names one asset while
+    /// the request resolves to another — and every other rule here passes,
+    /// which is exactly what makes this the shape worth pinning. Both URLs
+    /// below are genuine releases of this repository up to the separator.
+    #[test]
+    fn a_url_that_names_one_asset_and_fetches_another_is_refused() {
+        const NAMED: &str = "trix-v0.5.0-win-x64.zip";
+        for url in [
+            "https://github.com/tnhnblgl/trix/releases/download/v0.3.0/trix-v0.3.0-win-x64.zip#/trix-v0.5.0-win-x64.zip",
+            "https://github.com/tnhnblgl/trix/releases/download/v0.3.0/trix-v0.3.0-win-x64.zip?x=/trix-v0.5.0-win-x64.zip",
+        ] {
+            assert!(
+                !url.contains("..") && !url.contains('%') && !url.contains('\\'),
+                "the premise: none of the other rules see anything wrong with {url}"
+            );
+            assert!(url.starts_with(RELEASE_DOWNLOAD_PREFIX), "and the prefix rule passes it");
+            assert_eq!(
+                url.rsplit('/').next(),
+                Some(NAMED),
+                "and it ends in the name a 0.5.0 release should carry, while what would be \
+                 fetched is the 0.3.0 zip in front of the separator"
+            );
+            assert!(!from_our_releases(url, NAMED), "{url} must not read as a Trix release");
+        }
     }
 
     /// The zip is the payload, but the checksums file is what the payload is
