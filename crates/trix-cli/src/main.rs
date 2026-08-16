@@ -119,26 +119,79 @@ fn main() -> Result<()> {
     }
 }
 
+/// How long to wait for the old `trix-ui.exe` to exit before giving up and
+/// starting the new one anyway.
+///
+/// Not `INFINITE`: the wait is keyed on a process *ID*, and Windows recycles
+/// those. Between the old `trix-ui.exe` reading its own PID and this code
+/// calling `OpenProcess` on it, that number can already belong to an
+/// unrelated, long-lived process -- and `INFINITE` on the wrong process could
+/// mean the update never comes back, silently, with this process orphaned
+/// until reboot. A bounded wait is strictly better on both real paths: the
+/// normal case is already dead within milliseconds, and in the recycled-PID
+/// case the real `trix-ui.exe` is long gone by the time the cap expires, so
+/// starting anyway does not reopen the single-instance race this subcommand
+/// exists to prevent.
+const WAIT_FOR_OLD_UI_MS: u32 = 60_000;
+// Generous next to the few-millisecond normal case, but finite -- well short
+// of the `u32::MAX` Windows treats as INFINITE -- so a recycled PID cannot
+// hang this forever. Compile-time rather than a #[test]: both sides are known
+// at compile time, so a runtime assertion on a constant would only trip
+// clippy's assertions_on_constants lint, and a bad value should fail the
+// build, not a test run.
+const _: () = assert!(WAIT_FOR_OLD_UI_MS >= 30_000 && WAIT_FOR_OLD_UI_MS < u32::MAX);
+
+/// How long to pause before starting the new UI when `OpenProcess` itself
+/// fails.
+///
+/// A failure is not proof `pid` is gone: `ERROR_ACCESS_DENIED` against a
+/// process that is very much alive looks the same from here as "no such
+/// process". Spawning instantly on any failure would recreate the exact
+/// single-instance race this subcommand exists to prevent, so this pauses
+/// instead of assuming -- just long enough to outlast the moment between the
+/// old UI spawning this process and the old UI actually exiting.
+const GRACE_ON_OPEN_FAILURE_MS: u64 = 2_000;
+// Much shorter than WAIT_FOR_OLD_UI_MS: this is a brief grace period, not a
+// second wait loop. See WAIT_FOR_OLD_UI_MS's comment for why this is a
+// compile-time assertion rather than a #[test].
+const _: () = assert!(GRACE_ON_OPEN_FAILURE_MS * 10 <= WAIT_FOR_OLD_UI_MS as u64);
+
 /// Waits for `pid` to exit, then starts `trix-ui.exe` from beside this binary.
 ///
 /// The wait is on a real process handle rather than a poll, so there is no
 /// window in which the new app starts while the old one still holds the
-/// single-instance lock. `OpenProcess` failing means the process is already
-/// gone, which is success, not an error.
+/// single-instance lock -- but only up to [`WAIT_FOR_OLD_UI_MS`], and a
+/// failed `OpenProcess` gets a short pause rather than an instant launch. See
+/// those constants' doc comments for why: a bare `INFINITE` wait or a "failed
+/// means gone" assumption both trust a process ID that Windows is free to
+/// have already handed to someone else.
 fn restart_ui(pid: u32) -> Result<()> {
-    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
     use windows::Win32::System::Threading::{
-        INFINITE, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
     };
 
     unsafe {
-        if let Ok(handle) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
-            // INFINITE is safe here: the process being waited on is the one
-            // that spawned this, and it exits immediately after doing so. If
-            // it somehow never exits, the user still has a working install --
-            // they just have to start Trix themselves.
-            WaitForSingleObject(handle, INFINITE);
-            let _ = CloseHandle(handle);
+        match OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+            Ok(handle) => {
+                let outcome = WaitForSingleObject(handle, WAIT_FOR_OLD_UI_MS);
+                let _ = CloseHandle(handle);
+                if outcome != WAIT_OBJECT_0 {
+                    tracing::warn!(
+                        pid,
+                        outcome = outcome.0,
+                        "did not see the old trix-ui.exe exit before the timeout; starting the new one anyway"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    pid,
+                    %error,
+                    "could not open the old trix-ui.exe process; pausing before starting the new one anyway"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(GRACE_ON_OPEN_FAILURE_MS));
+            }
         }
     }
 
@@ -238,9 +291,11 @@ mod tests {
         assert_eq!(env!("CARGO_BIN_NAME"), "trix");
     }
 
-    /// The updater spawns this by name; a rename or a changed flag breaks the
-    /// relaunch silently, leaving the user with an updated install and no
-    /// running app.
+    /// Pins the subcommand name, the `--wait-pid` flag name, and that it stays
+    /// hidden from `--help`. Nothing spawns this yet -- the updater that does
+    /// is written in a later task -- but once it exists it will spawn this by
+    /// name, and a rename or a changed flag would break that relaunch
+    /// silently, leaving the user with an updated install and no running app.
     #[test]
     fn restart_ui_parses_the_flag_the_updater_sends() {
         let cli =
