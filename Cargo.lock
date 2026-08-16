@@ -4226,6 +4226,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "trix-core",
+ "windows 0.62.2",
 ]
 
 [[package]]

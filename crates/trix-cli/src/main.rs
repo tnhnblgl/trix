@@ -2,6 +2,7 @@ use trix_core::{capture, config, control, probe, record, replay};
 
 use std::path::PathBuf;
 
+use anyhow::Context as _;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
@@ -55,6 +56,18 @@ enum Command {
         #[arg(long, value_name = "SECONDS", hide = true)]
         exit_after: Option<u64>,
     },
+    /// Wait for a process to exit, then start trix-ui.exe from beside this exe
+    ///
+    /// Used by the updater. The app cannot relaunch itself directly: the new
+    /// process would start while the old one is still alive, and
+    /// tauri-plugin-single-instance would hand it to the dying instance and
+    /// exit, leaving nothing running.
+    #[command(hide = true)]
+    RestartUi {
+        /// The process to wait for -- the trix-ui.exe that is updating
+        #[arg(long, value_name = "PID")]
+        wait_pid: u32,
+    },
 }
 
 fn main() -> Result<()> {
@@ -102,7 +115,42 @@ fn main() -> Result<()> {
                 },
             )
         }
+        Command::RestartUi { wait_pid } => restart_ui(wait_pid),
     }
+}
+
+/// Waits for `pid` to exit, then starts `trix-ui.exe` from beside this binary.
+///
+/// The wait is on a real process handle rather than a poll, so there is no
+/// window in which the new app starts while the old one still holds the
+/// single-instance lock. `OpenProcess` failing means the process is already
+/// gone, which is success, not an error.
+fn restart_ui(pid: u32) -> Result<()> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        INFINITE, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
+
+    unsafe {
+        if let Ok(handle) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+            // INFINITE is safe here: the process being waited on is the one
+            // that spawned this, and it exits immediately after doing so. If
+            // it somehow never exits, the user still has a working install --
+            // they just have to start Trix themselves.
+            WaitForSingleObject(handle, INFINITE);
+            let _ = CloseHandle(handle);
+        }
+    }
+
+    let exe = std::env::current_exe().context("could not locate trix.exe")?;
+    let ui = exe
+        .parent()
+        .map(|dir| dir.join("trix-ui.exe"))
+        .context("could not work out where trix-ui.exe is")?;
+    std::process::Command::new(&ui)
+        .spawn()
+        .with_context(|| format!("could not start {}", ui.display()))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -188,5 +236,25 @@ mod tests {
     #[test]
     fn binary_name_is_trix() {
         assert_eq!(env!("CARGO_BIN_NAME"), "trix");
+    }
+
+    /// The updater spawns this by name; a rename or a changed flag breaks the
+    /// relaunch silently, leaving the user with an updated install and no
+    /// running app.
+    #[test]
+    fn restart_ui_parses_the_flag_the_updater_sends() {
+        let cli =
+            Cli::try_parse_from(["trix", "restart-ui", "--wait-pid", "4321"]).expect("parses");
+        assert!(matches!(cli.command, Command::RestartUi { wait_pid: 4321 }));
+    }
+
+    /// Hidden from --help: it is machinery, not a feature, and a user who runs
+    /// it by hand gets a process that waits for a PID that is not there.
+    #[test]
+    fn restart_ui_is_hidden_from_help() {
+        use clap::CommandFactory as _;
+
+        let help = Cli::command().render_help().to_string();
+        assert!(!help.contains("restart-ui"), "restart-ui must not appear in --help");
     }
 }
