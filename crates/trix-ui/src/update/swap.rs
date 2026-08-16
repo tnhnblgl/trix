@@ -174,9 +174,11 @@ fn undo(install: &Path, vacated: &[&str], cause: &str, rename: &Rename) -> Strin
     let names =
         stranded.iter().map(|name| format!("{name}{OLD_SUFFIX}")).collect::<Vec<_>>().join(", ");
     format!(
-        "{cause}, and putting the previous version back failed too, so this Trix install is now \
-         incomplete. In {}, rename {names} to drop the \"{OLD_SUFFIX}\" from each name — or \
-         download Trix again from the releases page.",
+        "{cause}, and putting the previous version back failed too, so this Trix install now has \
+         mismatched versions. In {}, for each of {names}: drop the \"{OLD_SUFFIX}\" ending to \
+         restore it. If the name without \"{OLD_SUFFIX}\" is missing, that is a plain rename; if \
+         it already exists, it is a different version, and the rename will overwrite it with the \
+         \"{OLD_SUFFIX}\" copy. Or download Trix again from the releases page.",
         install.display()
     )
 }
@@ -216,6 +218,24 @@ fn roll_back<'a>(install: &Path, vacated: &[&'a str], rename: &Rename) -> Vec<&'
 /// renames can, and then the `.old` file is the only copy of that program in
 /// existence. Sweeping it up would finish what the crash started, so it is put
 /// back instead. Everything else here is litter; this is a binary.
+///
+/// **Cannot repair a vacated `trix-ui.exe` when it is only called from
+/// `trix-ui.exe`.** [`swap_in`] moves the [`BINARIES`] one at a time and only
+/// advances to the next once the current one's pair of renames has both
+/// completed, so a crash between them can strand at most one name at a time.
+/// If that name is `trix-ui.exe`, there is no `trix-ui.exe` left on disk to
+/// double-click, and code running inside this process can restore `trix.exe`
+/// and `trix-daemon.exe` but never itself. `trix.exe` swaps first in
+/// [`BINARIES`], so it is guaranteed to already be a complete, runnable binary
+/// in exactly that scenario. **The caller must therefore also call `cleanup`
+/// from `trix.exe`'s own startup, not only from `trix-ui.exe`'s** -- that is
+/// the only path by which a stranded `trix-ui.exe` ever gets restored.
+///
+/// **Must run before the daemon supervisor starts.** The restore branch above
+/// is the only thing that repairs a crash-vacated `trix-daemon.exe`. A caller
+/// that starts the supervisor first hands it a moment where that binary is
+/// genuinely missing, and gets a spawn failure for a file `cleanup` would have
+/// put back if it had run first.
 pub fn cleanup(install: &Path) {
     for name in BINARIES {
         let live = install.join(name);
@@ -449,8 +469,91 @@ mod tests {
         let dir = scratch("writable");
         writable(&dir).expect("a temp dir is writable");
         assert_eq!(std::fs::read_dir(&dir).expect("read").count(), 0, "the probe must clean up");
-        assert!(writable(Path::new(r"C:\Windows\System32\__trix_nope__")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Runs `icacls` and reports whether it succeeded, without surfacing its
+    /// output -- the tests below only care whether the ACL change took.
+    fn icacls(args: &[&str]) -> bool {
+        std::process::Command::new("icacls")
+            .args(args)
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    }
+
+    /// The one assertion `writable` exists to make: that it can tell a denied
+    /// directory apart from a merely absent one. A first version of this test
+    /// probed a path under `C:\Windows\System32` that has never existed, so
+    /// it failed with `NotFound` no matter who ran it -- the same result
+    /// `writable` would give for any other typo, and no evidence it can
+    /// detect a permission problem at all.
+    ///
+    /// `C:\Windows\System32` itself was considered and rejected as the fix:
+    /// it *is* writable when the test happens to run elevated, so asserting
+    /// against it would pass for the right reason on an ordinary dev machine
+    /// and the wrong one under an admin shell. An explicit deny ACE on a
+    /// directory this process owns has neither problem -- Windows evaluates
+    /// an explicit deny before any allow, including the allow an elevated
+    /// token gets from Administrators group membership, so a plain
+    /// `std::fs::write` is refused either way. That is checked directly
+    /// below rather than assumed, and the test skips with a clear reason
+    /// instead of asserting something it did not actually verify.
+    #[test]
+    fn writable_fails_when_write_access_is_denied() {
+        let Ok(user) = std::env::var("USERNAME") else {
+            eprintln!("skipping writable_fails_when_write_access_is_denied: no USERNAME set");
+            return;
+        };
+        let dir = scratch("denied");
+        let path = dir.to_str().expect("scratch path must be valid UTF-8").to_string();
+
+        if !icacls(&[&path, "/deny", &format!("{user}:(F)")]) {
+            eprintln!(
+                "skipping writable_fails_when_write_access_is_denied: icacls could not set a \
+                 deny ACE on {path}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        // Restores the ACL before `dir`'s own `Drop` tries to remove it --
+        // whether the assertions below pass, fail, or panic. A directory this
+        // process has denied itself all access to cannot otherwise be
+        // deleted. Declared after `dir`, so it drops first: Rust drops
+        // locals in reverse declaration order.
+        struct RestoreAcl(String);
+        impl Drop for RestoreAcl {
+            fn drop(&mut self) {
+                let _ =
+                    std::process::Command::new("icacls").args([self.0.as_str(), "/reset"]).output();
+            }
+        }
+        let _restore = RestoreAcl(path);
+
+        match std::fs::write(dir.join(".trix-deny-probe"), b"x") {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {}
+            Ok(_) => {
+                eprintln!(
+                    "skipping writable_fails_when_write_access_is_denied: this process could \
+                     still write under its own deny ACE (an unusual token, e.g. SYSTEM); not \
+                     exercising a real permission denial here"
+                );
+                return;
+            }
+            Err(e) => {
+                eprintln!(
+                    "skipping writable_fails_when_write_access_is_denied: unexpected error \
+                     probing the denied directory: {e}"
+                );
+                return;
+            }
+        }
+
+        assert!(
+            writable(&dir).is_err(),
+            "a directory that denies this process write access must not read as writable"
+        );
     }
 
     // ---- the paths that only appear when something goes wrong ----------------
@@ -560,7 +663,7 @@ mod tests {
     /// one asks the user to do something. The message has to be able to tell
     /// them apart, and to name the file left under `.old`.
     #[test]
-    fn a_rollback_that_cannot_restore_a_file_says_the_install_is_incomplete() {
+    fn a_rollback_that_cannot_restore_a_file_says_the_install_has_mismatched_versions() {
         let (install, payload) = install_and_payload("stranded");
         let rename = rename_refusing(vec![
             // Fails the swap of trix-ui.exe ...
@@ -572,7 +675,7 @@ mod tests {
         let error = swap_with(&install, &payload, &rename).expect_err("the swap must fail");
 
         assert!(
-            error.contains("incomplete"),
+            error.contains("mismatched versions"),
             "a stranded install must not read like an ordinary failed update: {error}"
         );
         assert!(
@@ -587,6 +690,63 @@ mod tests {
         // The two the rollback could reach are still put back, rather than
         // being abandoned because an earlier one failed.
         for name in ["trix.exe", "trix-daemon.exe"] {
+            assert_eq!(contents(&install, name), format!("old {name}"));
+            assert!(!install.join(format!("{name}{OLD_SUFFIX}")).exists());
+        }
+        let _ = std::fs::remove_dir_all(&install);
+    }
+
+    /// The other stranded shape, and the one the plain "rename it back" advice
+    /// used to get wrong. Here the name that fails to roll back is not empty:
+    /// it finished swapping before a *later* binary's move-aside failed, so
+    /// when its own rollback then fails too, the name exists under both
+    /// spellings at once -- `trix.exe` holds the new build, `trix.exe.old`
+    /// holds the old one -- and restoring it means overwriting a file that is
+    /// there and works, not filling a gap.
+    #[test]
+    fn a_rollback_that_cannot_restore_an_already_swapped_file_leaves_both_versions_on_disk() {
+        let (install, payload) = install_and_payload("mixed-version");
+        let rename = rename_refusing(vec![
+            // trix.exe swaps cleanly, so it is fully done before ...
+            install.join("trix-daemon.exe"),
+            // ... this move-aside fails, forcing a rollback ...
+            install.join(format!("trix.exe{OLD_SUFFIX}")),
+            // ... that then can't restore trix.exe either.
+        ]);
+
+        let error = swap_with(&install, &payload, &rename).expect_err("the swap must fail");
+
+        assert!(
+            error.contains("mismatched versions"),
+            "this is not an ordinary failed update: {error}"
+        );
+        assert!(
+            error.contains(&format!("trix.exe{OLD_SUFFIX}")),
+            "the user has to be told which file is involved: {error}"
+        );
+        assert!(
+            error.contains("overwrite"),
+            "dropping the .old suffix here replaces a file that exists and works, not a plain \
+             rename -- the message must say so: {error}"
+        );
+
+        // The premise: trix.exe exists under both spellings, at two different
+        // versions, unlike the vacated-name shape where the live name is
+        // empty.
+        assert_eq!(
+            contents(&install, "trix.exe"),
+            "new trix.exe",
+            "the live file is the new build"
+        );
+        assert_eq!(
+            contents(&install, &format!("trix.exe{OLD_SUFFIX}")),
+            "old trix.exe",
+            "the .old file beside it is the previous build that could not be restored"
+        );
+        // trix-daemon.exe's move-aside is what failed, so it was never
+        // touched, and trix-ui.exe is swapped last, so the loop never reached
+        // it.
+        for name in ["trix-daemon.exe", "trix-ui.exe"] {
             assert_eq!(contents(&install, name), format!("old {name}"));
             assert!(!install.join(format!("{name}{OLD_SUFFIX}")).exists());
         }
