@@ -34,6 +34,14 @@ fn main() {
             }
         }))
         .setup(|app| {
+            // Before the window, and before the supervisor: this deletes the
+            // previous build's binaries, which nothing holds open now that this
+            // process is the new one — and it is also the only thing that puts
+            // back a `trix-daemon.exe` an interrupted update left renamed away.
+            // Starting the supervisor first would hand it a moment where that
+            // binary is genuinely missing, and a spawn failure for a file that
+            // would have existed had these two lines been the other way round.
+            update::clean_up_after_update();
             let supervisor = daemon::Supervisor::start(app.handle().clone());
             app.manage(supervisor);
             Ok(())
@@ -42,6 +50,9 @@ fn main() {
             commands::trix_call,
             commands::start_daemon,
             commands::daemon_connected,
+            update::update_check,
+            update::update_install,
+            update::update_current_version,
         ])
         .run(tauri::generate_context!())
         .expect("the Tauri runtime failed to start");

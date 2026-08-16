@@ -17,7 +17,12 @@ pub fn user_agent() -> String {
 }
 
 /// A release that is newer than what is running, and complete enough to install.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+///
+/// `Deserialize` as well as `Serialize`, because this makes a whole round trip
+/// through the webview: `update_check` hands one out, the banner holds it while
+/// the user decides, and `update_install` takes the same object back as a
+/// command argument — which Tauri can only deliver by deserialising it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Release {
     pub version: String,
     pub notes_url: String,

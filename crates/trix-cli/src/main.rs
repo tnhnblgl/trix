@@ -292,10 +292,17 @@ mod tests {
     }
 
     /// Pins the subcommand name, the `--wait-pid` flag name, and that it stays
-    /// hidden from `--help`. Nothing spawns this yet -- the updater that does
-    /// is written in a later task -- but once it exists it will spawn this by
-    /// name, and a rename or a changed flag would break that relaunch
-    /// silently, leaving the user with an updated install and no running app.
+    /// hidden from `--help`. The updater spawns this by name, and a rename or a
+    /// changed flag would break that relaunch silently, leaving the user with
+    /// an updated install and no running app.
+    ///
+    /// The other half of the pair is `restart_args` in
+    /// `crates/trix-ui/src/update/mod.rs`, pinned there by
+    /// `the_relaunch_sends_the_command_line_trix_exe_parses`. Nothing links the
+    /// two crates -- `trix-ui` must not depend on `trix-core`, and so cannot
+    /// depend on this one -- so the names have to be changed in both places or
+    /// in neither, and both suites stay green either way. Changing this test is
+    /// the moment to go and change that one.
     #[test]
     fn restart_ui_parses_the_flag_the_updater_sends() {
         let cli =
