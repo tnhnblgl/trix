@@ -1480,12 +1480,21 @@ fn needs_sound_cache_rebuild(chosen: &str, cache_exists: bool, sidecar: Option<&
 /// A rename on the same volume is atomic, so the cache is either the old sound
 /// or the new one and never a prefix of either.
 ///
+/// An `Err` from this function means exactly one thing: the cache file is not
+/// in place, because the temp write or the rename that publishes it failed.
+/// That is the only case a caller needs to reason about -- `set_config`'s
+/// caller deletes whatever is at the final path on `Err` precisely because an
+/// `Err` here guarantees that file, if it exists at all, is stale (built for
+/// some earlier sound, or never built).
+///
 /// The sidecar is written only after that rename lands, so it is never in
-/// place ahead of the cache it describes. If this sidecar write itself fails,
-/// the cache stands with no sidecar at all rather than a wrong one -- and a
-/// missing sidecar is one of [`needs_sound_cache_rebuild`]'s own rebuild
-/// conditions, so the next startup heals it instead of trusting a cache
-/// nothing vouches for.
+/// place ahead of the cache it describes -- and its write is best-effort. A
+/// cache that landed correctly must never be thrown away over a bookkeeping
+/// file failing to write beside it, so a failed sidecar write is logged and
+/// swallowed rather than returned: a missing sidecar is already one of
+/// [`needs_sound_cache_rebuild`]'s own rebuild conditions, so the next
+/// startup's `repair_sound_cache` heals it without anyone having to notice in
+/// between.
 fn write_sound_cache(config_path: &std::path::Path, wav: &[u8], source: &str) -> Result<()> {
     let final_path = Config::sound_cache_path(config_path);
     let temp_path = final_path.with_extension("wav.tmp");
@@ -1503,8 +1512,19 @@ fn write_sound_cache(config_path: &std::path::Path, wav: &[u8], source: &str) ->
         return Err(e).with_context(|| format!("could not replace {}", final_path.display()));
     }
     let sidecar_path = Config::sound_src_path(config_path);
-    std::fs::write(&sidecar_path, source)
-        .with_context(|| format!("could not write {}", sidecar_path.display()))?;
+    if let Err(e) = std::fs::write(&sidecar_path, source) {
+        // Not `?`: the cache above is already on disk and correct, and
+        // failing this call over the sidecar would make its caller delete
+        // that good cache believing it was never written at all. A missing
+        // sidecar reads as "needs rebuild" on its own, so this heals itself
+        // at the next startup instead.
+        tracing::warn!(
+            error = %format!("{e:#}"),
+            path = %sidecar_path.display(),
+            "the sound cache landed but its sidecar could not be written; the next startup \
+             will rebuild it"
+        );
+    }
     Ok(())
 }
 
@@ -2317,6 +2337,104 @@ mod tests {
             std::fs::read_to_string(Config::sound_src_path(&config_path)).unwrap(),
             r"C:\sounds\airhorn.mp3",
             "the sidecar must name exactly the source `write_sound_cache` was given"
+        );
+
+        cleanup(&dir);
+    }
+
+    /// The review fix this closes: a sidecar write failing must not throw
+    /// away a cache that landed correctly. Before this, `write_sound_cache`
+    /// returned `Err` for *any* failure past the rename, including this one,
+    /// and `set_config`'s caller treated every `Err` alike -- deleting the
+    /// cache it had just correctly written, because it could not tell "the
+    /// cache never landed" from "the cache landed but the bookkeeping file
+    /// beside it didn't."
+    ///
+    /// The failure is injected by creating a directory at the sidecar's own
+    /// path -- the same trick `a_failed_cache_write_does_not_strand_a_stale_cache`
+    /// uses one file over, on `clip-sound.wav.tmp` -- so only the sidecar
+    /// write fails; the cache's temp-then-rename has already landed by the
+    /// time it runs.
+    ///
+    /// No decode involved, so no Media Foundation needed -- straight at
+    /// `write_sound_cache`, like its neighbour above.
+    #[test]
+    fn write_sound_cache_survives_a_failed_sidecar_write() {
+        let (_daemon, config_path, dir) = with_scratch_config("sound-sidecar-fail");
+        let wav = trix_core::sound::wav_from_pcm(&[0u8; 8], 2, 44_100, 16);
+
+        let cache = Config::sound_cache_path(&config_path);
+        let sidecar = Config::sound_src_path(&config_path);
+        // `with_scratch_config` already created `dir`, the parent both paths
+        // share, so this is the only setup the injected failure needs.
+        std::fs::create_dir_all(&sidecar).unwrap();
+
+        write_sound_cache(&config_path, &wav, r"C:\sounds\airhorn.mp3").expect(
+            "a sidecar write failing must not fail the whole call -- the cache it describes \
+             already landed",
+        );
+
+        assert_eq!(
+            std::fs::read(&cache).unwrap(),
+            wav,
+            "the newly converted sound must survive a sidecar failure, not be discarded over a \
+             bookkeeping file"
+        );
+        assert!(
+            needs_sound_cache_rebuild(
+                r"C:\sounds\airhorn.mp3",
+                cache.exists(),
+                std::fs::read_to_string(&sidecar).ok().as_deref()
+            ),
+            "an unreadable sidecar must still read as needing a rebuild -- that is the healing \
+             this fix relies on instead of deleting the cache on the spot"
+        );
+
+        cleanup(&dir);
+    }
+
+    /// The same failure as `write_sound_cache_survives_a_failed_sidecar_write`,
+    /// but end to end through `set_config`: proves Settings actually keeps
+    /// the newly chosen sound in place, not only that the pure function
+    /// returns `Ok` in isolation.
+    ///
+    /// Needs Media Foundation to decode the fixture sound, so this is
+    /// `#[ignore]`d like every other test in the codebase that exercises a
+    /// real decode -- see `trix_core::sound::decode`'s
+    /// `a_real_file_decodes_to_a_capped_wav`.
+    #[test]
+    #[ignore = "needs Media Foundation; run by hand with --ignored"]
+    fn a_failed_sidecar_write_still_keeps_the_new_sound_through_set_config() {
+        let (daemon, config_path, dir) = with_scratch_config("sound-sidecar-fail-e2e");
+
+        let sound = dir.join("chosen.wav");
+        let pcm = vec![0u8; 4 * 44_100]; // one second of silence, real WAV bytes
+        std::fs::write(&sound, trix_core::sound::wav_from_pcm(&pcm, 2, 44_100, 16)).unwrap();
+
+        let cache = Config::sound_cache_path(&config_path);
+        let sidecar = Config::sound_src_path(&config_path);
+        // Same trick as the pure-function test above, applied through
+        // `set_config` this time: the rename inside `write_sound_cache` has
+        // already published the new cache by the time this write is tried.
+        std::fs::create_dir_all(&sidecar).unwrap();
+
+        let mut values = Map::new();
+        values.insert("clip_sound_path".into(), Value::from(sound.to_string_lossy().as_ref()));
+        daemon.set_config(&values).expect(
+            "a sidecar write failure must not surface as a config.set error -- the cache it was \
+             supposed to describe already landed",
+        );
+
+        assert!(
+            cache.exists(),
+            "the newly converted sound must survive a sidecar failure -- `set_config` must not \
+             delete a cache that was never stale"
+        );
+        assert_eq!(
+            std::fs::read(&cache).unwrap(),
+            trix_core::sound::decode::to_wav(&sound).unwrap(),
+            "the surviving cache must hold the newly chosen sound, not a leftover from before \
+             this call"
         );
 
         cleanup(&dir);
