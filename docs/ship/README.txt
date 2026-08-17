@@ -1,4 +1,4 @@
-Trix 0.4.0
+Trix 0.5.0
 ==========
 
 A clip recorder for Windows, for people whose PC cannot spare the frames.
