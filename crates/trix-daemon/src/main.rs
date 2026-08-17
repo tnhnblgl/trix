@@ -188,6 +188,9 @@ fn main() -> anyhow::Result<()> {
     // daemon's own single-instance guarantee is `FILE_FLAG_FIRST_PIPE_INSTANCE`
     // on the pipe name (see `pipe.rs`).
     let daemon = Arc::new(Daemon::new(config));
+    // After the daemon exists and before the socket opens: a hand-edited
+    // config or a deleted cache is repaired before the first clip can need it.
+    daemon.repair_sound_cache();
     // `set` can only fail if something already filled the slot, and nothing
     // else ever writes to it.
     let _ = slot.set(Arc::clone(&daemon));

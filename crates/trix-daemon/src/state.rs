@@ -851,6 +851,30 @@ impl Daemon {
             library::ensure_writable(&updated.clip_dir_path())?;
         }
 
+        // Decoded here, before anything is written, for the same all-or-nothing
+        // reason as the gate above: a file that is not audio must leave the
+        // user with the sound they already had. The bytes are held rather than
+        // written because the config file has not been saved yet -- a new cache
+        // beside an unchanged config is exactly the mismatch this ordering
+        // exists to prevent.
+        //
+        // Guarded on the key being present, so five unrelated keys do not start
+        // Media Foundation to save a bitrate.
+        let converted = if values.contains_key("clip_sound_path") {
+            let chosen = updated.clip_sound_path.trim();
+            if chosen.is_empty() {
+                // Reset: nothing to convert, and the cache must go.
+                Some(None)
+            } else {
+                Some(Some(
+                    trix_core::sound::decode::to_wav(std::path::Path::new(chosen))
+                        .context("that file cannot be used as a sound")?,
+                ))
+            }
+        } else {
+            None
+        };
+
         // Disk first, then memory — the same order the clip library uses. A
         // failed write leaves the daemon agreeing with the file rather than
         // capturing at a setting no restart would reproduce.
@@ -878,6 +902,24 @@ impl Daemon {
         }
 
         updated.save_to(path).context("config.set could not save the config")?;
+
+        // After the config is on disk, not before. If this fails the config is
+        // still correct and `repair_sound_cache` rebuilds the cache at the next
+        // startup, which is a far smaller hole than a cache that plays a sound
+        // the saved config does not name.
+        match converted {
+            Some(Some(wav)) => {
+                if let Err(e) = write_sound_cache(path, &wav) {
+                    tracing::warn!(error = %format!("{e:#}"), "could not save the converted sound");
+                }
+            }
+            Some(None) => {
+                // Best-effort: there is usually no cache to remove, because the
+                // user was on the built-in sound already.
+                let _ = std::fs::remove_file(Config::sound_cache_path(path));
+            }
+            None => {}
+        }
 
         let after = config_object(&updated)?;
         let mut accepted = Map::new();
@@ -914,6 +956,40 @@ impl Daemon {
         let clip_dir_resolved = config.clip_dir_path().to_string_lossy().into_owned();
 
         Ok(ConfigUpdate { accepted, requires_rearm, clip_dir_resolved })
+    }
+
+    /// Rebuilds the converted sound if it is missing.
+    ///
+    /// Two things reach this state and both are ordinary: a `config.toml`
+    /// edited by hand, which names a sound no conversion ever ran for, and a
+    /// cache someone deleted while tidying `%APPDATA%`.
+    ///
+    /// Called at startup rather than from the constructor so no test builds a
+    /// `Daemon` that starts Media Foundation.
+    pub fn repair_sound_cache(&self) {
+        let Some(config_path) = self.config_path.as_deref() else {
+            return;
+        };
+        let chosen = self.lock_config().clip_sound_path.trim().to_string();
+        if chosen.is_empty() || Config::sound_cache_path(config_path).exists() {
+            return;
+        }
+
+        match trix_core::sound::decode::to_wav(std::path::Path::new(&chosen)) {
+            Ok(wav) => {
+                if let Err(e) = write_sound_cache(config_path, &wav) {
+                    tracing::warn!(error = %format!("{e:#}"), "could not rebuild the clip sound");
+                }
+            }
+            // The setting is deliberately left alone. Putting the file back and
+            // restarting is then all it takes; clearing it here would quietly
+            // discard a choice the user still wants.
+            Err(e) => tracing::warn!(
+                error = %format!("{e:#}"),
+                sound = %chosen,
+                "the chosen clip sound could not be read; using the built-in one"
+            ),
+        }
     }
 
     // --- Statistics ---------------------------------------------------------
@@ -1258,6 +1334,26 @@ impl Daemon {
     }
 }
 
+/// Writes the converted sound beside the config file, through a temporary name.
+///
+/// Temp-then-rename rather than a direct write: a half-written cache is a valid
+/// path with an invalid file at it, and `PlaySound` answers that with silence.
+/// A rename on the same volume is atomic, so the cache is either the old sound
+/// or the new one and never a prefix of either.
+fn write_sound_cache(config_path: &std::path::Path, wav: &[u8]) -> Result<()> {
+    let final_path = Config::sound_cache_path(config_path);
+    let temp_path = final_path.with_extension("wav.tmp");
+    if let Some(parent) = final_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("could not create {}", parent.display()))?;
+    }
+    std::fs::write(&temp_path, wav)
+        .with_context(|| format!("could not write {}", temp_path.display()))?;
+    std::fs::rename(&temp_path, &final_path)
+        .with_context(|| format!("could not replace {}", final_path.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -1344,6 +1440,24 @@ mod tests {
     /// directory is not worth failing a passing test over.
     fn cleanup(dir: &Path) {
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A daemon whose `config.set` writes to a scratch file rather than the
+    /// developer's real `%APPDATA%\trix\config.toml`, returning both halves of
+    /// the isolation the sound tests below need: the scratch config path
+    /// (`Config::sound_cache_path` derives the cache from it) and the scratch
+    /// `clip_dir`.
+    ///
+    /// `dispatch.rs` has a helper of the same name and shape, but it is
+    /// private to that module's own test module and out of scope here, so
+    /// this is state.rs's own copy rather than a shared import.
+    fn with_scratch_config(name: &str) -> (Daemon, PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("trix-config-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let config = Config { clip_dir: dir.to_string_lossy().into_owned(), ..Config::default() };
+        (Daemon::new_at(config, Some(path.clone())), path, dir)
     }
 
     /// `config.get` must report the registry, not the file (spec §7.3).
@@ -1886,5 +2000,57 @@ mod tests {
         assert_eq!(daemon.gains.system_percent(), 40);
         assert_eq!(daemon.gains.mic_percent(), 30, "the level set a moment ago survives");
         cleanup(&dir);
+    }
+
+    /// The gate must refuse before anything is written, like every other gate in
+    /// `set_config`. A user who picks a text file must end up with the sound they
+    /// had, not with a config pointing at something that will never play.
+    #[test]
+    fn a_file_that_is_not_audio_is_refused_and_changes_nothing() {
+        let (daemon, config_path, dir) = with_scratch_config("sound-refused");
+        let bogus = dir.join("not-audio.mp3");
+        std::fs::write(&bogus, b"this is text, not audio").unwrap();
+
+        let mut values = Map::new();
+        values.insert("clip_sound_path".into(), Value::from(bogus.to_string_lossy().as_ref()));
+        let refused = daemon.set_config(&values);
+
+        assert!(refused.is_err(), "a text file must not be accepted as a sound");
+        let message = format!("{:#}", refused.unwrap_err());
+        assert!(message.contains("not-audio.mp3"), "the error must name the file: {message}");
+        assert_eq!(daemon.lock_config().clip_sound_path, "", "the old value must still stand");
+        assert!(
+            !Config::sound_cache_path(&config_path).exists(),
+            "a refused sound must not leave a cache behind"
+        );
+    }
+
+    /// Clearing the key is "Reset to default", and the cache has to go with it --
+    /// otherwise the next play finds a stale file beside a config that says
+    /// "built-in" and plays the sound the user just removed.
+    #[test]
+    fn clearing_the_path_deletes_the_cache() {
+        let (daemon, config_path, _dir) = with_scratch_config("sound-reset");
+        let cache = Config::sound_cache_path(&config_path);
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(&cache, b"RIFF____WAVEstale").unwrap();
+
+        let mut values = Map::new();
+        values.insert("clip_sound_path".into(), Value::from(""));
+        daemon.set_config(&values).expect("clearing the sound must be accepted");
+
+        assert!(!cache.exists(), "Reset must remove the converted copy");
+    }
+
+    /// A missing path is refused by name rather than by codec error, because that
+    /// is the mistake people actually make.
+    #[test]
+    fn a_path_that_does_not_exist_is_refused() {
+        let (daemon, _config_path, _dir) = with_scratch_config("sound-missing");
+        let mut values = Map::new();
+        values.insert("clip_sound_path".into(), Value::from(r"Z:\nope\ghost.mp3"));
+
+        let message = format!("{:#}", daemon.set_config(&values).unwrap_err());
+        assert!(message.contains("ghost.mp3"), "the error must name the file: {message}");
     }
 }
