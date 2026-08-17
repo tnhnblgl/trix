@@ -903,14 +903,29 @@ impl Daemon {
 
         updated.save_to(path).context("config.set could not save the config")?;
 
-        // After the config is on disk, not before. If this fails the config is
-        // still correct and `repair_sound_cache` rebuilds the cache at the next
-        // startup, which is a far smaller hole than a cache that plays a sound
-        // the saved config does not name.
+        // After the config is on disk, not before. A failed write here is
+        // repaired at the next startup only *because* the arm below deletes
+        // whatever cache is left -- it is not true on its own.
+        // `repair_sound_cache`'s only guard is "a cache file exists," with no
+        // record of which sound produced it, so leaving a stale cache in
+        // place (the rename in `write_sound_cache` is atomic, so a failure
+        // here can only leave the *previous* sound's cache standing, never a
+        // half-written one) would have every future startup see a cache
+        // present, assume it matches the config it sits beside, and never
+        // rebuild it. The daemon would keep playing the old sound forever
+        // while `config.get` reports the new one, with no automatic recovery.
+        // Deleting it here is what keeps "cache exists" meaning "cache
+        // matches the configured sound."
         match converted {
             Some(Some(wav)) => {
                 if let Err(e) = write_sound_cache(path, &wav) {
                     tracing::warn!(error = %format!("{e:#}"), "could not save the converted sound");
+                    // Best-effort, for the reason above: a cache that still
+                    // names the old sound is worse than no cache at all.
+                    // Playback already falls back to the built-in chime when
+                    // the cache is absent, so this is an honest intermediate
+                    // state rather than a wrong one.
+                    let _ = std::fs::remove_file(Config::sound_cache_path(path));
                 }
             }
             Some(None) => {
@@ -1349,8 +1364,13 @@ fn write_sound_cache(config_path: &std::path::Path, wav: &[u8]) -> Result<()> {
     }
     std::fs::write(&temp_path, wav)
         .with_context(|| format!("could not write {}", temp_path.display()))?;
-    std::fs::rename(&temp_path, &final_path)
-        .with_context(|| format!("could not replace {}", final_path.display()))?;
+    if let Err(e) = std::fs::rename(&temp_path, &final_path) {
+        // Best-effort: a failed rename must not also leave the temp file
+        // behind. Nothing else ever revisits `clip-sound.wav.tmp`, so
+        // without this an error return here would litter it permanently.
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(e).with_context(|| format!("could not replace {}", final_path.display()));
+    }
     Ok(())
 }
 
@@ -2011,6 +2031,19 @@ mod tests {
         let bogus = dir.join("not-audio.mp3");
         std::fs::write(&bogus, b"this is text, not audio").unwrap();
 
+        // A real write first, so the "unchanged" assertion below compares a
+        // file that exists against itself rather than against absence.
+        // Without this, the decode gate moving to *after* `updated.save_to`
+        // would still leave the file simply absent both before and after --
+        // the in-memory write happens later in the function regardless of
+        // where the gate sits, and the cache write is never reached on this
+        // refusal path either way, so only a real on-disk comparison catches
+        // the gate moving. Mirrors
+        // `config_set_refuses_an_out_of_range_value_for_every_bounded_key` in
+        // dispatch.rs.
+        daemon.set_config(&one("fps", 30)).expect("the seed write must land");
+        let before = std::fs::read(&config_path).unwrap();
+
         let mut values = Map::new();
         values.insert("clip_sound_path".into(), Value::from(bogus.to_string_lossy().as_ref()));
         let refused = daemon.set_config(&values);
@@ -2023,6 +2056,14 @@ mod tests {
             !Config::sound_cache_path(&config_path).exists(),
             "a refused sound must not leave a cache behind"
         );
+        assert_eq!(
+            std::fs::read(&config_path).unwrap(),
+            before,
+            "a refused clip_sound_path must leave the file on disk byte-unchanged -- this is \
+             what catches the decode gate moving to after the save"
+        );
+
+        cleanup(&dir);
     }
 
     /// Clearing the key is "Reset to default", and the cache has to go with it --
@@ -2030,7 +2071,7 @@ mod tests {
     /// "built-in" and plays the sound the user just removed.
     #[test]
     fn clearing_the_path_deletes_the_cache() {
-        let (daemon, config_path, _dir) = with_scratch_config("sound-reset");
+        let (daemon, config_path, dir) = with_scratch_config("sound-reset");
         let cache = Config::sound_cache_path(&config_path);
         std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
         std::fs::write(&cache, b"RIFF____WAVEstale").unwrap();
@@ -2040,17 +2081,71 @@ mod tests {
         daemon.set_config(&values).expect("clearing the sound must be accepted");
 
         assert!(!cache.exists(), "Reset must remove the converted copy");
+
+        cleanup(&dir);
     }
 
     /// A missing path is refused by name rather than by codec error, because that
     /// is the mistake people actually make.
     #[test]
     fn a_path_that_does_not_exist_is_refused() {
-        let (daemon, _config_path, _dir) = with_scratch_config("sound-missing");
+        let (daemon, _config_path, dir) = with_scratch_config("sound-missing");
         let mut values = Map::new();
         values.insert("clip_sound_path".into(), Value::from(r"Z:\nope\ghost.mp3"));
 
         let message = format!("{:#}", daemon.set_config(&values).unwrap_err());
         assert!(message.contains("ghost.mp3"), "the error must name the file: {message}");
+
+        cleanup(&dir);
+    }
+
+    /// Finding 1's fix, proven against a real `write_sound_cache` failure
+    /// rather than only reasoned about: even though the write fails, a stale
+    /// cache from a *previous* sound must not survive it, because
+    /// `repair_sound_cache`'s only guard is "does a cache file exist" -- one
+    /// left behind here would be trusted as current forever, and the daemon
+    /// would keep playing sound A while `config.get` reports sound B.
+    ///
+    /// The failure is injected by pre-creating `clip-sound.wav.tmp` as a
+    /// directory, so `write_sound_cache`'s own write to that path fails
+    /// without ever touching the final cache path -- the closest a test gets
+    /// to "disk full" or "antivirus lock" without either, and it leaves the
+    /// stale cache itself unlocked, so a passing test proves the delete
+    /// actually ran rather than merely that both sides failed together.
+    ///
+    /// Needs Media Foundation to decode the fixture sound, so this is
+    /// `#[ignore]`d like every other test in the codebase that exercises a
+    /// real decode -- see `trix_core::sound::decode`'s
+    /// `a_real_file_decodes_to_a_capped_wav`.
+    #[test]
+    #[ignore = "needs Media Foundation; run by hand with --ignored"]
+    fn a_failed_cache_write_does_not_strand_a_stale_cache() {
+        let (daemon, config_path, dir) = with_scratch_config("sound-write-fail");
+
+        let sound = dir.join("chosen.wav");
+        let pcm = vec![0u8; 4 * 44_100]; // one second of silence, real WAV bytes
+        std::fs::write(&sound, trix_core::sound::wav_from_pcm(&pcm, 2, 44_100, 16)).unwrap();
+
+        let cache = Config::sound_cache_path(&config_path);
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(&cache, b"RIFF____WAVEstale-audio-from-a-previous-sound").unwrap();
+        // Forces the write inside `write_sound_cache` to fail without
+        // touching `cache` at all, so the fix's best-effort delete of
+        // `cache` is not fighting the same failure that broke the write.
+        let temp = cache.with_extension("wav.tmp");
+        std::fs::create_dir_all(&temp).unwrap();
+
+        let mut values = Map::new();
+        values.insert("clip_sound_path".into(), Value::from(sound.to_string_lossy().as_ref()));
+        daemon.set_config(&values).expect("decode succeeds even though the cache write fails");
+
+        assert!(
+            !cache.exists(),
+            "a failed cache write must not strand the previous sound's cache -- the next \
+             startup has to see it missing and rebuild, not trust a file that names the \
+             wrong sound"
+        );
+
+        cleanup(&dir);
     }
 }
