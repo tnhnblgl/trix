@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
+  import { invoke } from '@tauri-apps/api/core';
   import { call, onDaemonEvent } from '../lib/ipc';
-  import { app } from '../lib/state.svelte';
+  import { app, updates } from '../lib/state.svelte';
   import { FIELDS, SECTIONS, unknownKeys, validate } from '../lib/settings';
   import Field from '../components/Field.svelte';
   import type { Monitor } from '../lib/types';
@@ -92,6 +93,34 @@
     parts.push(key);
     capture = parts.join('+');
   }
+
+  let version = $state('');
+  let checking = $state(false);
+  let checked = $state<string | null>(null);
+
+  invoke<string>('update_current_version').then((v) => (version = v));
+
+  /**
+   * Unlike the check on launch, this one reports either way -- the user asked,
+   * so silence would read as a broken button.
+   *
+   * Renders from `update_check`'s return value, never from the `trix-update`
+   * channel: that channel stays deliberately silent while an install is in
+   * flight (see `update/mod.rs`'s `emit_check`), so a channel-driven button
+   * would go dead with no feedback the moment it mattered most.
+   */
+  async function checkNow() {
+    checking = true;
+    checked = null;
+    try {
+      const found = await invoke<{ version: string } | null>('update_check');
+      checked = found ? `Trix ${found.version} is available.` : 'Trix is up to date.';
+    } catch (e) {
+      checked = `Could not reach GitHub: ${e}`;
+    } finally {
+      checking = false;
+    }
+  }
 </script>
 
 <h1>Settings</h1>
@@ -123,6 +152,18 @@
         }}
       />
     {/each}
+    {#if section === 'Updates'}
+      <div class="row">
+        <label for="current-version">Version</label>
+        <div class="control">
+          <input id="current-version" readonly value={version} />
+          <button onclick={checkNow} disabled={checking || updates.busy}>
+            {checking ? 'Checking…' : 'Check now'}
+          </button>
+        </div>
+        {#if checked}<p class="help">{checked}</p>{/if}
+      </div>
+    {/if}
   </section>
 {/each}
 
@@ -135,7 +176,9 @@
 <style>
   h1 { font-size: 18px; margin: 0 0 18px; }
   h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim); margin: 22px 0 10px; }
-  .help { margin: 0; font-size: 12px; color: var(--dim); }
+  .row { display: grid; grid-template-columns: 180px 1fr; gap: 6px 14px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .control { display: flex; align-items: center; gap: 8px; }
+  .help { grid-column: 2; margin: 0; font-size: 12px; color: var(--dim); }
   .notice { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border: 1px solid var(--accent); border-radius: 8px; margin-bottom: 16px; }
   .notice button { margin-left: auto; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font: inherit; cursor: pointer; }
 </style>

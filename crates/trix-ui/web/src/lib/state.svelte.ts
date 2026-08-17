@@ -1,3 +1,5 @@
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { call, daemonConnected, onConnected, onDaemonEvent, onDisconnected } from './ipc';
 import { mergeSaved } from './clips';
 import type { ClipMeta, Status } from './types';
@@ -195,9 +197,18 @@ async function onDaemonUp() {
     // not close it.
     const config = await call<Record<string, unknown>>('config.get');
     if (config['config_file_exists'] === false) app.view = 'firstrun';
+    // Reached only once config.get has actually resolved, which is what
+    // makes "skip the automatic check when config.get fails" automatic --
+    // the catch below never reaches this line at all. checkOnceAtLaunch
+    // itself is what makes this once per launch rather than once per
+    // connect, since a reconnect runs onDaemonUp again.
+    updates.checkOnceAtLaunch(config['check_for_updates'] !== false);
   } catch {
     // A config.get that fails is not a reason to force a wizard on someone
     // who may have a perfectly good config; the grid is the safer default.
+    // The automatic update check is skipped for the same reason: something
+    // is already wrong, and a background check is the least important thing
+    // on screen.
   }
   await app.loadClips();
   // Stats drive the ring meter; per spec §4.4 the daemon measures nothing
@@ -283,4 +294,168 @@ export function wireDaemon() {
         break;
     }
   });
+}
+
+export type Release = {
+  version: string;
+  notes_url: string;
+  zip_url: string;
+  sums_url: string;
+  size: number;
+};
+
+export type UpdateEvent =
+  | { state: 'checking' }
+  | { state: 'up-to-date' }
+  | { state: 'available'; release: Release }
+  | { state: 'downloading'; received: number; total: number }
+  | { state: 'verifying' }
+  | { state: 'installing' }
+  | { state: 'restarting' }
+  | { state: 'failed'; message: string };
+
+/**
+ * The update banner's whole state.
+ *
+ * Separate from AppState because its lifetime is different: an update is
+ * offered once and then either taken or dismissed, while AppState tracks the
+ * daemon for the life of the window.
+ */
+export class UpdateStore {
+  release = $state<Release | null>(null);
+  phase = $state<UpdateEvent['state']>('up-to-date');
+  received = $state(0);
+  total = $state(0);
+  error = $state<string | null>(null);
+
+  /**
+   * Set the moment `install()` is called, and never cleared afterwards.
+   *
+   * Gates `apply`'s handling of a `failed` event: a failure only earns the
+   * banner once the user has actually asked Trix to install something.
+   * Without this, a `failed` event from the automatic launch check -- the
+   * ordinary shape of "Trix started while offline" -- would paint a red
+   * error bar on every single launch, which is the bug this flag exists to
+   * avoid.
+   */
+  installTriggered = false;
+
+  /**
+   * Whether the once-per-launch automatic check has already run, or been
+   * skipped. Read and set only by `checkOnceAtLaunch`, which is the sole
+   * caller allowed to arm it -- see the note there.
+   */
+  autoCheckDone = false;
+
+  /** `null` means render nothing at all -- see the note on the quiet case. */
+  get banner(): { version: string; error: string | null } | null {
+    if (this.error) return { version: this.release?.version ?? '', error: this.error };
+    if (!this.release) return null;
+    return { version: this.release.version, error: null };
+  }
+
+  get percent(): number {
+    return this.total > 0 ? Math.round((this.received / this.total) * 100) : 0;
+  }
+
+  get busy(): boolean {
+    return ['downloading', 'verifying', 'installing', 'restarting'].includes(this.phase);
+  }
+
+  /**
+   * True only for the two phases where this update itself is the reason the
+   * daemon looks gone: between `install()` stopping the recorder and the
+   * restarted app reconnecting to it.
+   *
+   * Deliberately narrower than `busy`. `downloading` and `verifying` happen
+   * with the daemon untouched and still running, so a disconnect during
+   * either of those is a genuine "not running" and `DaemonDown` is the right
+   * thing to show. Only `installing` and `restarting` are phases this
+   * update itself caused the daemon to disappear for.
+   */
+  get swapping(): boolean {
+    return this.phase === 'installing' || this.phase === 'restarting';
+  }
+
+  apply(event: UpdateEvent) {
+    if (event.state === 'failed' && !this.installTriggered) {
+      // Dropped, not shown -- see the note on `installTriggered`. `check()`'s
+      // own catch below already puts an automatic check's own failure on the
+      // console; this is the same failure arriving the other way, over the
+      // event channel, and there is nowhere better for it to go than nowhere
+      // at all.
+      return;
+    }
+    this.phase = event.state;
+    if (event.state === 'failed') {
+      this.error = event.message;
+      return;
+    }
+    this.error = null;
+    if (event.state === 'available') this.release = event.release;
+    if (event.state === 'up-to-date') this.release = null;
+    if (event.state === 'downloading') {
+      this.received = event.received;
+      this.total = event.total;
+    }
+  }
+
+  async check() {
+    try {
+      await invoke('update_check');
+    } catch (e) {
+      // An automatic check that fails is a console warning and no more. The
+      // user asked to open a clip recorder, not to check for updates;
+      // interrupting them because a background request failed is not an
+      // acceptable trade.
+      console.warn('update check failed', e);
+    }
+  }
+
+  /**
+   * Runs the automatic launch check, but only once per launch and only when
+   * `shouldCheck` is true.
+   *
+   * Called from `onDaemonUp` above, after `config.get` has already resolved
+   * -- `checkForUpdates !== false` is computed there, off the same `config`
+   * read `onDaemonUp` already does, so this method does not need to know
+   * about config keys at all. The guard here, rather than at the call site,
+   * is what makes this once per *launch* rather than once per *connect*: the
+   * supervisor can reconnect, `onDaemonUp` runs again for it, and a second
+   * automatic check on top of the first is exactly what `autoCheckDone`
+   * exists to refuse.
+   */
+  checkOnceAtLaunch(shouldCheck: boolean) {
+    if (this.autoCheckDone) return;
+    this.autoCheckDone = true;
+    if (!shouldCheck) return;
+    void this.check();
+  }
+
+  async install() {
+    if (!this.release) return;
+    this.installTriggered = true;
+    try {
+      await invoke('update_install', { release: $state.snapshot(this.release) });
+    } catch (e) {
+      this.apply({ state: 'failed', message: String(e) });
+    }
+  }
+}
+
+export const updates = new UpdateStore();
+
+/**
+ * Subscribes the store to install events. Call once, from App.svelte,
+ * alongside `wireDaemon()`.
+ *
+ * Only the subscription lives here -- the automatic check itself fires from
+ * `onDaemonUp`, after `config.get`. Registering the listener unconditionally
+ * at wire time, while gating the automatic check on a setting that is only
+ * known once `config.get` returns, is deliberate: install events (always
+ * something the user chose to trigger) must never be missed, regardless of
+ * `check_for_updates`.
+ */
+export function wireUpdates() {
+  listen<UpdateEvent>('trix-update', (event) => updates.apply(event.payload));
 }

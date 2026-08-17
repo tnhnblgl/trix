@@ -18,7 +18,25 @@ vi.mock('./ipc', () => ({
   onDisconnected: vi.fn(),
 }));
 
-const { app, wireDaemon } = await import('./state.svelte');
+// state.svelte.ts talks to Tauri directly for the update commands (they are
+// not daemon calls, so they do not go through `./ipc`'s `call`). Mocked the
+// same way clips.test.ts mocks this module: a bare `invoke` would otherwise
+// hit the real `@tauri-apps/api/core`, which has nothing to talk to outside
+// a webview.
+const invokeMock = vi.fn();
+
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: (...args: unknown[]) => invokeMock(...args),
+}));
+
+// Nothing here drives wireUpdates() itself, but state.svelte.ts imports
+// `listen` at module scope, and the real `@tauri-apps/api/event` reaches for
+// the same Tauri runtime `@tauri-apps/api/core` does.
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(),
+}));
+
+const { app, wireDaemon, UpdateStore } = await import('./state.svelte');
 const { onConnected, onDaemonEvent } = await import('./ipc');
 
 /**
@@ -75,6 +93,7 @@ const clip = (id: string): ClipMeta => ({
 
 beforeEach(() => {
   callMock.mockReset();
+  invokeMock.mockReset();
   vi.mocked(onDaemonEvent).mockClear();
   vi.mocked(onConnected).mockClear();
   app.clips = [];
@@ -448,5 +467,53 @@ describe('onDaemonUp: first-run routing', () => {
 
     await vi.waitFor(() => expect(callMock).toHaveBeenCalledWith('config.get'));
     expect(app.view).toBe('grid');
+  });
+});
+
+describe('update state', () => {
+  it('shows nothing when the check finds nothing', async () => {
+    // The common case by far. A quiet result must leave the banner absent --
+    // an "you are up to date" bar every launch is noise the user never asked
+    // for.
+    const state = new UpdateStore();
+    state.apply({ state: 'up-to-date' });
+    expect(state.banner).toBe(null);
+  });
+
+  it('shows the version and keeps it while downloading', () => {
+    const state = new UpdateStore();
+    state.apply({ state: 'available', release: { version: '0.5.0', notes_url: 'https://x', zip_url: '', sums_url: '', size: 10 } });
+    expect(state.banner?.version).toBe('0.5.0');
+    state.apply({ state: 'downloading', received: 5, total: 10 });
+    expect(state.banner?.version).toBe('0.5.0');
+    expect(state.percent).toBe(50);
+  });
+
+  // A failure only earns the banner once the user has actually asked Trix to
+  // install something (resolution #1: a failed *automatic* check must not
+  // show the banner). Driven through install() rather than asserted on a
+  // fresh store -- see the test right after this one for the fresh-store
+  // case, which is the one this store must stay quiet for.
+  it('keeps the failure message visible so the user can act on it', async () => {
+    const state = new UpdateStore();
+    state.apply({
+      state: 'available',
+      release: { version: '0.5.0', notes_url: 'https://x', zip_url: '', sums_url: '', size: 10 },
+    });
+    invokeMock.mockRejectedValueOnce(new Error('checksum did not match'));
+
+    await state.install();
+
+    expect(state.banner?.error).toContain('checksum did not match');
+  });
+
+  // The bug this store exists to avoid: launching Trix offline must not
+  // paint a red error bar just because the automatic check could not reach
+  // GitHub. No install() call ever happened here, so the failure must be
+  // dropped rather than shown.
+  it('drops a failed event when no install was ever started, so an offline launch stays quiet', () => {
+    const state = new UpdateStore();
+    state.apply({ state: 'failed', message: 'could not reach GitHub' });
+    expect(state.banner).toBe(null);
   });
 });
