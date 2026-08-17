@@ -92,6 +92,19 @@ pub struct Config {
     /// `REQUIRES_REARM`: it has nothing to do with the capture session.
     #[serde(default = "default_true")]
     pub check_for_updates: bool,
+    /// Whether the daemon plays a sound when it saves a clip.
+    ///
+    /// Defaulted `true` for the same reason as `check_for_updates`: a config
+    /// file written before this key existed must not read as "off".
+    #[serde(default = "default_true")]
+    pub clip_sound: bool,
+    /// The sound file the user chose, or empty for Trix's built-in chime.
+    ///
+    /// This is the **original** — the mp3 they picked — and the daemon never
+    /// plays it directly. `PlaySound` decodes only WAV, so the file is
+    /// converted once when it is chosen and the converted copy is what plays.
+    /// This value exists to be shown in settings and to be reconverted from.
+    pub clip_sound_path: String,
 }
 
 impl Default for Config {
@@ -112,6 +125,8 @@ impl Default for Config {
             mic_volume: 100,
             autostart: false,
             check_for_updates: true,
+            clip_sound: true,
+            clip_sound_path: String::new(),
         }
     }
 }
@@ -167,6 +182,17 @@ impl Config {
     pub fn path() -> Option<PathBuf> {
         let appdata = std::env::var_os("APPDATA")?;
         Some(PathBuf::from(appdata).join("trix").join("config.toml"))
+    }
+
+    /// Where the converted copy of the user's sound lives: beside the config
+    /// file, so `%APPDATA%\trix\config.toml` gives `%APPDATA%\trix\clip-sound.wav`.
+    ///
+    /// Derived from the config path rather than from `%APPDATA%` directly, and
+    /// that is the whole point: the daemon already carries a `config_path` that
+    /// tests point at a scratch directory, so the cache follows it there
+    /// without a second thing to remember to isolate.
+    pub fn sound_cache_path(config_path: &Path) -> PathBuf {
+        config_path.with_file_name("clip-sound.wav")
     }
 
     pub fn load() -> Self {
@@ -339,5 +365,37 @@ mod tests {
         config.clamp_volumes();
         assert_eq!(config.system_volume, 100, "500% must clamp to the documented maximum");
         assert_eq!(config.mic_volume, 100, "9001% must clamp to the documented maximum");
+    }
+
+    /// `serde(default)` on a bool is `false`, so a config file written before
+    /// these keys existed would silently turn the sound off for every upgrading
+    /// user. `check_for_updates` learned this the same way.
+    #[test]
+    fn clip_sound_defaults_on_for_a_config_written_before_it_existed() {
+        let old = "fps = 60\nbitrate_kbps = 8000\n";
+        let config: Config = toml::from_str(old).expect("an old config must still parse");
+        assert!(config.clip_sound, "a missing clip_sound must read as on");
+        assert_eq!(config.clip_sound_path, "", "a missing path must read as the built-in");
+    }
+
+    #[test]
+    fn the_sound_keys_round_trip_through_toml() {
+        let config = Config {
+            clip_sound: false,
+            clip_sound_path: r"C:\Users\someone\airhorn.mp3".into(),
+            ..Config::default()
+        };
+        let round: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert!(!round.clip_sound);
+        assert_eq!(round.clip_sound_path, r"C:\Users\someone\airhorn.mp3");
+    }
+
+    /// The cache is a sibling of the config file, which is what makes it scratch
+    /// in tests for free: a `Daemon` built with a scratch `config_path` gets a
+    /// scratch cache without a second seam to remember.
+    #[test]
+    fn the_sound_cache_sits_beside_the_config_file() {
+        let cache = Config::sound_cache_path(std::path::Path::new(r"C:\x\trix\config.toml"));
+        assert_eq!(cache, std::path::PathBuf::from(r"C:\x\trix\clip-sound.wav"));
     }
 }
