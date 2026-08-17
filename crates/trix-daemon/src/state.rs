@@ -623,17 +623,24 @@ impl Daemon {
         // taking it after `library` here would introduce the first place in
         // the daemon where those two are held the other way round.
         //
-        // Two separate `lock_config` calls rather than one held across both
-        // checks: `custom_sound_source` takes the same lock internally, and
-        // holding this guard while calling it would deadlock against a
-        // non-reentrant `Mutex`. Both calls still land before `lock_library`
-        // below, which is the property that matters here.
-        let sound_enabled = self.lock_config().clip_sound;
-        // `None` here means "do not play"; `Some(None)` means the built-in
-        // chime, which is what `custom_sound_source` returns for a sound
-        // that is unset or has nowhere cached. `play` takes `None` to mean
-        // the built-in chime either way.
-        let sound = if sound_enabled { Some(self.custom_sound_source()) } else { None };
+        // Held once across both the toggle and the path lookup, rather than
+        // two separate `lock_config` calls: `set_config` holds this same
+        // lock across a merge, a Media Foundation decode, and a disk write,
+        // and is reachable concurrently from a client dispatch thread and
+        // the detached sound-dialog thread. Two reads here could straddle a
+        // `config.set` between them and pair `clip_sound` from one config
+        // generation with a path resolved from the next. `resolve_sound`
+        // takes no lock of its own -- it only reads the guard already held
+        // -- so this cannot deadlock the way calling `custom_sound_source`
+        // while holding the guard would.
+        let sound = {
+            let config = self.lock_config();
+            // `None` here means "do not play"; `Some(None)` means the
+            // built-in chime, which is what `resolve_sound` returns for a
+            // sound that is unset or has nowhere cached. `play` takes `None`
+            // to mean the built-in chime either way.
+            config.clip_sound.then(|| resolve_sound(&config, self.config_path.as_deref()))
+        };
 
         // Prepended, matching `library::scan`'s newest-first order. This is
         // the incremental update that keeps `library.list` off the disk
@@ -756,11 +763,7 @@ impl Daemon {
     /// across a call that also wants `armed` or `clients`.
     pub(crate) fn custom_sound_source(&self) -> Option<PathBuf> {
         let config = self.lock_config();
-        if config.clip_sound_path.trim().is_empty() {
-            None
-        } else {
-            self.config_path.as_deref().map(Config::sound_cache_path)
-        }
+        resolve_sound(&config, self.config_path.as_deref())
     }
 
     pub fn config_json(&self) -> Result<Value> {
@@ -1371,6 +1374,29 @@ impl Daemon {
 
     fn lock_library(&self) -> MutexGuard<'_, Vec<ClipMeta>> {
         self.library.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// The converted sound cache to play, if there is one, given an already-held
+/// `Config` and the daemon's `config_path`.
+///
+/// Pure and lock-free by design: [`Daemon::custom_sound_source`] takes the
+/// `config` lock itself and delegates here, while [`Daemon::record_saved_clip`]
+/// reads `clip_sound` and resolves the path under one guard it already holds.
+/// Neither caller may lock `config` a second time from in here without
+/// deadlocking a non-reentrant `Mutex`, so this function must never do so.
+///
+/// `None` covers two different situations a caller does not need to tell
+/// apart: `clip_sound_path` is empty, meaning the user is on the built-in
+/// chime, and `clip_sound_path` names a file but there is nowhere a converted
+/// copy could have been cached (`config_path` is `None` — `%APPDATA%` unset).
+/// Either way [`crate::sound::play`] is told the same thing, `None`, and
+/// plays the built-in chime.
+fn resolve_sound(config: &Config, config_path: Option<&Path>) -> Option<PathBuf> {
+    if config.clip_sound_path.trim().is_empty() {
+        None
+    } else {
+        config_path.map(Config::sound_cache_path)
     }
 }
 
