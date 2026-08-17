@@ -91,10 +91,28 @@ WHERE THINGS LIVE
   Settings  %APPDATA%\trix\config.toml
 
 
+UPDATES
+-------
+
+Trix asks github.com once, when you open the app, whether a newer version
+exists. It sends nothing about you -- no account, no identifier, no
+information about your clips or your PC.
+
+When there is one, a bar appears at the top of the window. Nothing is
+downloaded or installed until you click Update. Trix then replaces itself
+and restarts, keeping your settings and your clips.
+
+To turn the check off:  Settings -> Updates -> Check for updates.
+
+Trix cannot update itself if you put it somewhere Windows protects, such as
+Program Files. It will say so and point you at the download page.
+
+
 KNOWN LIMITS IN THIS RELEASE
 ----------------------------
 
-  * No installer yet. Unzip it where you want it; an MSI is planned.
+  * No installer yet. Unzip it where you want it; an MSI is planned. Trix
+    still updates itself in place, so you only download it by hand once.
 
   * If Alt+F10 does nothing, something else already owns it -- the NVIDIA
     overlay claims it on many machines. Settings -> Hotkey lets you pick

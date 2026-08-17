@@ -283,6 +283,14 @@ try {
 $zip = Get-Item -LiteralPath $zipPath
 $sha = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash
 
+# The updater refuses a zip it cannot check, so this file is not optional --
+# a release with the zip alone reads to every installed Trix as "no update
+# available", silently. Written beside the zip, in the `<hash>  <name>` format
+# sha256sum uses, because the updater parses it and people paste it.
+$sumsPath = Join-Path $OutDir 'SHA256SUMS.txt'
+$sumsLine = "$($sha.ToLower())  $($zip.Name)"
+[System.IO.File]::WriteAllText($sumsPath, "$sumsLine`n", (New-Object System.Text.UTF8Encoding($false)))
+
 # Every gate above is a Require, so reaching this line means all of them
 # passed -- a failure threw and printed its red line on the way out. The count
 # is here so a green run says how much was actually checked, rather than only
@@ -314,3 +322,9 @@ if ($SkipTests) {
     Write-Host "SHIP ZIP BUILT  ($passed checks)" -ForegroundColor Green
 }
 Write-Host 'Nothing was committed, tagged or pushed. Creating the GitHub release is what makes the tag.'
+Write-Host ''
+Write-Host 'Attach BOTH files to the release:' -ForegroundColor Cyan
+Write-Host "  $($zip.FullName)"
+Write-Host "  $sumsPath"
+Write-Host 'A release with only the zip is invisible to the in-app updater, which will not' -ForegroundColor Yellow
+Write-Host 'offer an update it cannot verify.' -ForegroundColor Yellow
