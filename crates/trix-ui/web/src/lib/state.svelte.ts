@@ -337,6 +337,12 @@ export class UpdateStore {
    * ordinary shape of "Trix started while offline" -- would paint a red
    * error bar on every single launch, which is the bug this flag exists to
    * avoid.
+   *
+   * Doubles as `install()`'s own re-entrancy guard (see there). Never
+   * clearing it is exactly right for that job too: a one-shot install button
+   * needs no reset, because nothing in this UI ever re-offers it -- a
+   * failure renders the error branch instead of the button, and a success
+   * ends with the app restarting.
    */
   installTriggered = false;
 
@@ -434,6 +440,20 @@ export class UpdateStore {
 
   async install() {
     if (!this.release) return;
+    // Re-entrancy guard, not a fresh flag: the button stays on screen from
+    // click until the first channel event flips `busy` true, a window that
+    // spans the synchronous Rust preflight plus the wait for the first HTTP
+    // bytes -- easily over a second on a slow connection. A second click in
+    // that window would send a second `update_install`, which Rust's
+    // `InstallGuard` rejects synchronously with a bare string it deliberately
+    // does *not* route through `reported()` (a `Failed` event there would
+    // paint a false failure over the first install's healthy download). This
+    // generic `catch` cannot tell that rejection apart from a real one,
+    // though, so without this guard the second call would still show the red
+    // failure bar over an install proceeding normally. `installTriggered`
+    // never resets, so this also makes `install()` one-shot for the rest of
+    // the store's life -- see the field's doc comment for why that is fine.
+    if (this.installTriggered) return;
     this.installTriggered = true;
     try {
       await invoke('update_install', { release: $state.snapshot(this.release) });

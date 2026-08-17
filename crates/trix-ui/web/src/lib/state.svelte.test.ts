@@ -471,11 +471,17 @@ describe('onDaemonUp: first-run routing', () => {
 });
 
 describe('update state', () => {
-  it('shows nothing when the check finds nothing', async () => {
+  it('shows nothing when the check finds nothing', () => {
     // The common case by far. A quiet result must leave the banner absent --
     // an "you are up to date" bar every launch is noise the user never asked
-    // for.
+    // for. Applying 'available' first, so there is a release to clear, is
+    // what makes this test fail if 'up-to-date' stopped clearing a prior
+    // release -- a store that never held one is null regardless.
     const state = new UpdateStore();
+    state.apply({
+      state: 'available',
+      release: { version: '0.5.0', notes_url: 'https://x', zip_url: '', sums_url: '', size: 10 },
+    });
     state.apply({ state: 'up-to-date' });
     expect(state.banner).toBe(null);
   });
@@ -515,5 +521,96 @@ describe('update state', () => {
     const state = new UpdateStore();
     state.apply({ state: 'failed', message: 'could not reach GitHub' });
     expect(state.banner).toBe(null);
+  });
+
+  // Finding 1: the Update button has no click guard of its own and stays
+  // rendered until the first channel event flips `busy` -- a real gap on a
+  // slow connection. A second install() landing in that gap must not fire a
+  // second `update_install` (Rust's InstallGuard would reject it, and the
+  // generic catch here would paint that rejection as a real failure over an
+  // install that is proceeding normally).
+  it('ignores a second install() call while the first is still in flight, so a double click cannot paint a false failure', async () => {
+    const state = new UpdateStore();
+    state.apply({
+      state: 'available',
+      release: { version: '0.5.0', notes_url: 'https://x', zip_url: '', sums_url: '', size: 10 },
+    });
+    let resolveInstall = () => {};
+    invokeMock.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveInstall = resolve;
+        }),
+    );
+
+    const firstInstall = state.install();
+    await state.install(); // the second click, before the first has resolved
+
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(state.error).toBe(null);
+
+    resolveInstall();
+    await firstInstall;
+  });
+});
+
+describe('UpdateStore.checkOnceAtLaunch', () => {
+  // onDaemonUp() runs again on every daemon reconnect (see its own comment),
+  // so checkOnceAtLaunch is what stops that from becoming a second automatic
+  // GitHub check -- the setting this guards is named "once per launch", not
+  // "once per connect".
+  it('checks only once across two calls, matching a daemon reconnect', () => {
+    const state = new UpdateStore();
+    invokeMock.mockResolvedValue(undefined);
+
+    state.checkOnceAtLaunch(true); // the initial connect
+    state.checkOnceAtLaunch(true); // a later reconnect
+
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+  });
+
+  // If shouldCheck:false stopped consuming the once-per-launch budget, a
+  // reconnect after a `check_for_updates: false` launch would run the check
+  // the setting was supposed to suppress entirely.
+  it('consumes the once-per-launch budget even when shouldCheck is false, so a later reconnect still does not check', () => {
+    const state = new UpdateStore();
+    invokeMock.mockResolvedValue(undefined);
+
+    state.checkOnceAtLaunch(false);
+    expect(invokeMock).not.toHaveBeenCalled();
+
+    state.checkOnceAtLaunch(true); // e.g. a reconnect; must still be skipped
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('UpdateStore.swapping', () => {
+  // installing/restarting are the two phases this update itself causes the
+  // daemon to disappear for -- App.svelte relies on this to keep DaemonDown
+  // (with its Start button Rust would refuse) off screen during the swap.
+  it('is true while installing and while restarting', () => {
+    const state = new UpdateStore();
+
+    state.apply({ state: 'installing' });
+    expect(state.swapping).toBe(true);
+
+    state.apply({ state: 'restarting' });
+    expect(state.swapping).toBe(true);
+  });
+
+  // downloading/verifying leave the daemon untouched and still running, so a
+  // disconnect during either is a genuine "not running" -- `swapping` must
+  // stay narrower than `busy` (true for both) or DaemonDown would wrongly
+  // stay hidden during an ordinary disconnect mid-download.
+  it('is false while downloading and while verifying, even though busy is true for both', () => {
+    const state = new UpdateStore();
+
+    state.apply({ state: 'downloading', received: 1, total: 10 });
+    expect(state.swapping).toBe(false);
+    expect(state.busy).toBe(true);
+
+    state.apply({ state: 'verifying' });
+    expect(state.swapping).toBe(false);
+    expect(state.busy).toBe(true);
   });
 });
