@@ -13,5 +13,6 @@ pub mod library;
 pub mod probe;
 pub mod record;
 pub mod replay;
+pub mod sound;
 pub mod stats;
 pub mod thumb;

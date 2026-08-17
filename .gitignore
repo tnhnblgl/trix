@@ -13,6 +13,10 @@
 !/crates/trix-ui/icon-source.png
 !/crates/trix-ui/icons/**/*.png
 
+# the built-in clip-saved chime is shipped, not probed -- un-ignore it from
+# the *.wav rule above.
+!/crates/trix-daemon/assets/clip.wav
+
 /crates/trix-ui/web/node_modules
 /crates/trix-ui/web/dist
 /crates/trix-ui/gen
