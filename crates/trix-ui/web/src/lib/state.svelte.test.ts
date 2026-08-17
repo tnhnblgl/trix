@@ -552,6 +552,36 @@ describe('update state', () => {
     resolveInstall();
     await firstInstall;
   });
+
+  // Finding I-1: `installTriggered` used to double as both the sticky
+  // failed-event gate and install()'s click guard. That made a retry after
+  // a genuinely retryable failure (checksum mismatch, dropped connection, a
+  // momentarily full disk) impossible: the banner goes back to its offer
+  // branch on the next `available` event (e.g. Settings' "Check now"), the
+  // Update button reappears, but clicking it hit the still-set flag and
+  // returned silently -- no invoke, no event, no progress, no error. This
+  // drives exactly that sequence and asserts the second click actually
+  // reaches Rust.
+  it('actually invokes on a second install() after a failed install is followed by a fresh available event', async () => {
+    const state = new UpdateStore();
+    const release = { version: '0.5.0', notes_url: 'https://x', zip_url: '', sums_url: '', size: 10 };
+    state.apply({ state: 'available', release });
+    invokeMock.mockRejectedValueOnce(new Error('checksum did not match'));
+
+    await state.install();
+    expect(state.banner?.error).toContain('checksum did not match');
+
+    // A later successful check (Settings' "Check now", or another automatic
+    // check) re-offers the same release and clears the error, same as a
+    // fresh launch would.
+    state.apply({ state: 'available', release });
+    expect(state.banner?.error).toBe(null);
+
+    invokeMock.mockResolvedValueOnce(undefined);
+    await state.install();
+
+    expect(invokeMock).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('UpdateStore.checkOnceAtLaunch', () => {

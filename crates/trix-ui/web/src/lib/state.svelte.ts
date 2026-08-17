@@ -329,7 +329,7 @@ export class UpdateStore {
   error = $state<string | null>(null);
 
   /**
-   * Set the moment `install()` is called, and never cleared afterwards.
+   * Set the first time `install()` is called, and never cleared afterwards.
    *
    * Gates `apply`'s handling of a `failed` event: a failure only earns the
    * banner once the user has actually asked Trix to install something.
@@ -338,13 +338,27 @@ export class UpdateStore {
    * error bar on every single launch, which is the bug this flag exists to
    * avoid.
    *
-   * Doubles as `install()`'s own re-entrancy guard (see there). Never
-   * clearing it is exactly right for that job too: a one-shot install button
-   * needs no reset, because nothing in this UI ever re-offers it -- a
-   * failure renders the error branch instead of the button, and a success
-   * ends with the app restarting.
+   * Deliberately sticky, and deliberately *not* also the re-entrancy guard
+   * for `install()` -- that is `installInFlight` below. This one must stay
+   * true forever once the user has engaged with an update even once, so
+   * that a `failed` event from a *later* automatic check still reaches the
+   * banner instead of being dropped as if it were the first, unsolicited,
+   * launch-time failure. Using it as the click guard too was the bug: a
+   * failed install followed by a fresh `available` event (e.g. Settings'
+   * "Check now") put the banner back in its offer branch, but the button
+   * then did nothing at all, because this flag was still set from the first
+   * attempt and never gets cleared.
    */
   installTriggered = false;
+
+  /**
+   * `install()`'s own re-entrancy guard: true from the moment it is called
+   * until that attempt resolves or rejects, then cleared either way. See
+   * `install()` for what this prevents. Unlike `installTriggered`, this one
+   * must reset -- a failed or completed attempt has to let a later `install()`
+   * (a genuine retry, or a second update entirely) actually invoke again.
+   */
+  installInFlight = false;
 
   /**
    * Whether the once-per-launch automatic check has already run, or been
@@ -440,25 +454,34 @@ export class UpdateStore {
 
   async install() {
     if (!this.release) return;
-    // Re-entrancy guard, not a fresh flag: the button stays on screen from
-    // click until the first channel event flips `busy` true, a window that
-    // spans the synchronous Rust preflight plus the wait for the first HTTP
-    // bytes -- easily over a second on a slow connection. A second click in
-    // that window would send a second `update_install`, which Rust's
+    // Re-entrancy guard: the button stays on screen from click until the
+    // first channel event flips `busy` true, a window that spans the
+    // synchronous Rust preflight plus the wait for the first HTTP bytes --
+    // easily over a second on a slow connection. A second click in that
+    // window would send a second `update_install`, which Rust's
     // `InstallGuard` rejects synchronously with a bare string it deliberately
     // does *not* route through `reported()` (a `Failed` event there would
     // paint a false failure over the first install's healthy download). This
     // generic `catch` cannot tell that rejection apart from a real one,
     // though, so without this guard the second call would still show the red
-    // failure bar over an install proceeding normally. `installTriggered`
-    // never resets, so this also makes `install()` one-shot for the rest of
-    // the store's life -- see the field's doc comment for why that is fine.
-    if (this.installTriggered) return;
+    // failure bar over an install proceeding normally.
+    //
+    // `installInFlight` resets in `finally`, unlike `installTriggered` --
+    // a retry after a genuine failure (checksum mismatch, dropped
+    // connection, a disk that was full a moment ago) must actually invoke
+    // again. Rust makes that safe: `install()` in `update/mod.rs` clears the
+    // staging directory and re-downloads from scratch, so a retry never
+    // reuses a consumed payload, and `InstallGuard` still serialises
+    // concurrent installs regardless.
+    if (this.installInFlight) return;
+    this.installInFlight = true;
     this.installTriggered = true;
     try {
       await invoke('update_install', { release: $state.snapshot(this.release) });
     } catch (e) {
       this.apply({ state: 'failed', message: String(e) });
+    } finally {
+      this.installInFlight = false;
     }
   }
 }

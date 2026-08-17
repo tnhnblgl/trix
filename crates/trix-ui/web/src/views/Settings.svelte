@@ -116,7 +116,15 @@
       const found = await invoke<{ version: string } | null>('update_check');
       checked = found ? `Trix ${found.version} is available.` : 'Trix is up to date.';
     } catch (e) {
-      checked = `Could not reach GitHub: ${e}`;
+      // Rust already writes a complete, correctly-attributed sentence here
+      // (`reported()`'s job) -- a network failure, a 403 from being
+      // rate-limited, or a malformed feed each get their own wording, and
+      // none of them start with "could not reach GitHub" except the one that
+      // actually is that. Render it unprefixed, the same way App.svelte
+      // renders `banner.error`; prefixing it here used to double up the
+      // network case ("Could not reach GitHub: could not reach GitHub: ...")
+      // and mislabel the other two as network failures they were not.
+      checked = String(e);
     } finally {
       checking = false;
     }
