@@ -356,7 +356,11 @@ pub struct Daemon {
     /// Where `config.set` persists. `None` means there is nowhere to save —
     /// `%APPDATA%` unset — which is an error on that command and irrelevant to
     /// every other one, so it is not a startup failure.
-    config_path: Option<PathBuf>,
+    ///
+    /// `pub(crate)`: `dispatch.rs`'s `sound.test` reads it directly to find the
+    /// converted sound cache beside the config file, the same way
+    /// `record_saved_clip` below does.
+    pub(crate) config_path: Option<PathBuf>,
     /// `Arc`, not a bare `Clients`, so `window::spawn` can hand a clone to the
     /// pump thread — see `window.rs`'s `CLIENTS` thread-local and its doc for
     /// why: `hotkey_pressed` has to reach `Clients::broadcast` from `wnd_proc`
@@ -1340,7 +1344,9 @@ impl Daemon {
         self.armed.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn lock_config(&self) -> MutexGuard<'_, Config> {
+    /// `pub(crate)`: `dispatch.rs`'s `sound.test` locks this directly to read
+    /// `clip_sound_path`, the same way `record_saved_clip` above does.
+    pub(crate) fn lock_config(&self) -> MutexGuard<'_, Config> {
         self.config.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 

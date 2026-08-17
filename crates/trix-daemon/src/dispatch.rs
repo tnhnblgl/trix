@@ -11,11 +11,12 @@ use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::SyncSender;
 
 use serde_json::{Map, Value};
+use trix_core::config::Config;
 use trix_proto::{ClipMeta, Command, Event, Request, Response};
 
 use crate::clients::ClientId;
 use crate::pipe::ClientHandler;
-use crate::state::Daemon;
+use crate::state::{ConfigUpdate, Daemon};
 
 /// What `clip` answers when the ring holds no footage yet. Byte-identical to
 /// what `trix replay` prints for the same condition (`trix-core`'s
@@ -96,6 +97,29 @@ impl ClientHandler for Daemon {
                 Response::ok(request.id, Value::Object(fields))
             }
             Ok(Command::Shutdown) => shutdown(request.id),
+            // Answers now, not when the dialog closes. A modal dialog lasts as
+            // long as a person takes to browse, and a socket command that
+            // blocked for that long would sit on this connection's reader while
+            // the settings page waited on a reply that is not the answer
+            // anyway -- the answer arrives as `config_changed`.
+            Ok(Command::SoundPick) => {
+                crate::window::request_sound_pick();
+                Response::ok(request.id, Value::Object(Map::new()))
+            }
+            Ok(Command::SoundTest) => {
+                let config = self.lock_config();
+                let custom = if config.clip_sound_path.trim().is_empty() {
+                    None
+                } else {
+                    self.config_path.as_deref().map(Config::sound_cache_path)
+                };
+                drop(config);
+                // Plays whatever is configured, whether or not `clip_sound` is
+                // on: this answers "what does this file sound like", and the
+                // toggle is a separate question the settings page already shows.
+                crate::sound::play(custom.as_deref());
+                Response::ok(request.id, Value::Object(Map::new()))
+            }
             // No catch-all arm. Every `Command` variant is answered here now,
             // so the match is exhaustive and the compiler — not a reviewer —
             // is what stops a command added to `trix-proto` later from
@@ -105,33 +129,44 @@ impl ClientHandler for Daemon {
     }
 }
 
+/// Applies a `config.set` and tells every client what landed.
+///
+/// The broadcast belongs with the apply, not with the socket command: the tray
+/// and the sound dialog change config too, and a client that learns about some
+/// changes and not others is worse than one that learns about none.
+pub(crate) fn apply_config_and_broadcast(
+    daemon: &Daemon,
+    values: &Map<String, Value>,
+) -> Result<ConfigUpdate, String> {
+    let update = daemon.set_config(values).map_err(|e| format!("{e:#}"))?;
+
+    // Broadcast before the response, not after — matching `arm`'s
+    // `armed` and window.rs's `hotkey_rebound`, which both fire the
+    // moment the state-changing call answers `Ok`. `set_config` only
+    // ever returns `Ok` once every gate (unknown key, out-of-range
+    // value, an unwritable `clip_dir`, a failed autostart write, a
+    // failed file write) has already passed and the change has
+    // actually landed, so this cannot fire for one that did not.
+    //
+    // Every accepted key, not just `clip_dir`: the tray's "Change
+    // clips folder..." is the only reachable way to change `clip_dir`
+    // outside this app, and it never told an already-open app
+    // anything, so its thumbnails and playback silently broke until
+    // the daemon restarted. Broadcasting unconditionally, rather than
+    // only when `clip_dir` was one of the keys, means every client
+    // (including the one that sent this `config.set`) learns the same
+    // way regardless of who changed what.
+    let mut changed = update.accepted.clone();
+    changed.insert("clip_dir_resolved".to_string(), Value::from(update.clip_dir_resolved.as_str()));
+    daemon.clients.broadcast(&Event::new("config_changed", Value::Object(changed)));
+
+    Ok(update)
+}
+
 /// `{"accepted":{…},"requires_rearm":[…]}` (spec §4.3).
 fn config_set(daemon: &Daemon, id: u64, values: &Map<String, Value>) -> Response {
-    match daemon.set_config(values) {
+    match apply_config_and_broadcast(daemon, values) {
         Ok(update) => {
-            // Broadcast before the response, not after — matching `arm`'s
-            // `armed` and window.rs's `hotkey_rebound`, which both fire the
-            // moment the state-changing call answers `Ok`. `set_config` only
-            // ever returns `Ok` once every gate (unknown key, out-of-range
-            // value, an unwritable `clip_dir`, a failed autostart write, a
-            // failed file write) has already passed and the change has
-            // actually landed, so this cannot fire for one that did not.
-            //
-            // Every accepted key, not just `clip_dir`: the tray's "Change
-            // clips folder..." is the only reachable way to change `clip_dir`
-            // outside this app, and it never told an already-open app
-            // anything, so its thumbnails and playback silently broke until
-            // the daemon restarted. Broadcasting unconditionally, rather than
-            // only when `clip_dir` was one of the keys, means every client
-            // (including the one that sent this `config.set`) learns the same
-            // way regardless of who changed what.
-            let mut changed = update.accepted.clone();
-            changed.insert(
-                "clip_dir_resolved".to_string(),
-                Value::from(update.clip_dir_resolved.as_str()),
-            );
-            daemon.clients.broadcast(&Event::new("config_changed", Value::Object(changed)));
-
             let mut fields = Map::new();
             fields.insert("accepted".to_string(), Value::Object(update.accepted));
             fields.insert(
@@ -143,7 +178,7 @@ fn config_set(daemon: &Daemon, id: u64, values: &Map<String, Value>) -> Response
         // No `error` event. Spec §4.4 broadcasts one for `arm` and `clip`,
         // whose failure changes what every other client can expect to happen
         // next; a refused settings write concerns only the client that sent it.
-        Err(e) => Response::err(id, format!("{e:#}")),
+        Err(e) => Response::err(id, e),
     }
 }
 
@@ -1171,6 +1206,26 @@ mod tests {
             daemon.dispatch(1, &request(14, "status")).ok,
             "three bad requests must leave the daemon answering the fourth"
         );
+    }
+
+    /// `sound.pick` must answer immediately rather than when a dialog closes.
+    /// `request_sound_pick` is a no-op under `cfg!(test)` -- see its comment --
+    /// so this asserts the reply without any dialog ever existing, which is also
+    /// what stops `cargo test` opening a file dialog on the developer's desktop.
+    #[test]
+    fn sound_pick_answers_immediately() {
+        let response = idle("sound-pick").dispatch(1, &request(1, "sound.pick"));
+        assert!(response.ok, "sound.pick must succeed: {:?}", response.error);
+        assert_eq!(response.id, 1);
+    }
+
+    /// Plays the built-in chime, because `idle` leaves `clip_sound_path` empty.
+    /// Audible when the suite runs, and that is the point: a `sound.test` that
+    /// answered `ok` without a sound would pass a silent assertion too.
+    #[test]
+    fn sound_test_answers_ok() {
+        let response = idle("sound-test").dispatch(1, &request(2, "sound.test"));
+        assert!(response.ok, "sound.test must succeed: {:?}", response.error);
     }
 
     #[test]

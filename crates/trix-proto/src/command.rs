@@ -19,14 +19,36 @@ pub enum Command {
     Clip,
     ConfigGet,
     ConfigSet(serde_json::Map<String, Value>),
-    LibraryList { offset: usize, limit: usize },
-    LibraryDelete { clip_id: String },
-    LibraryRename { clip_id: String, title: String },
-    LibraryFavorite { clip_id: String, favorite: bool },
-    LibraryReveal { clip_id: String },
+    LibraryList {
+        offset: usize,
+        limit: usize,
+    },
+    LibraryDelete {
+        clip_id: String,
+    },
+    LibraryRename {
+        clip_id: String,
+        title: String,
+    },
+    LibraryFavorite {
+        clip_id: String,
+        favorite: bool,
+    },
+    LibraryReveal {
+        clip_id: String,
+    },
     MonitorsList,
     EncodersList,
-    StatsSubscribe { enabled: bool },
+    StatsSubscribe {
+        enabled: bool,
+    },
+    /// Opens the "choose a sound" dialog. Answers immediately: the dialog
+    /// outlives the request by as long as the user takes to browse, and the
+    /// result arrives as a `config_changed` event, not as this reply.
+    SoundPick,
+    /// Plays the configured clip sound once, so the user can hear what they
+    /// just chose without saving a clip.
+    SoundTest,
     /// Ends the daemon process. Answered before the process exits, so the
     /// caller can tell a clean shutdown from a crashed socket.
     Shutdown,
@@ -72,6 +94,8 @@ impl Command {
             "monitors.list" => Self::MonitorsList,
             "encoders.list" => Self::EncodersList,
             "stats.subscribe" => Self::StatsSubscribe { enabled: bool_arg(req, "enabled")? },
+            "sound.pick" => Self::SoundPick,
+            "sound.test" => Self::SoundTest,
             "shutdown" => Self::Shutdown,
             other => return Err(format!("unknown command {other:?}")),
         })
@@ -177,6 +201,12 @@ mod tests {
         let err = cmd.unwrap_err();
         assert!(err.contains("library.rename"), "error should name the command: {err}");
         assert!(err.contains("clip_id"), "error should name the missing argument: {err}");
+    }
+
+    #[test]
+    fn the_sound_commands_parse() {
+        assert_eq!(parse(r#"{"id":1,"cmd":"sound.pick"}"#).1, Ok(Command::SoundPick));
+        assert_eq!(parse(r#"{"id":2,"cmd":"sound.test"}"#).1, Ok(Command::SoundTest));
     }
 
     #[test]

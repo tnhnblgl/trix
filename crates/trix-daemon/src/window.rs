@@ -76,6 +76,10 @@ pub enum Action {
     /// because a modal dialog lasts as long as the user takes to browse, and
     /// the pump thread must stay free to keep the tray icon alive.
     ChangeClipsFolder,
+    /// The settings page asked for the "choose a clip sound" dialog. Handled
+    /// on a thread of its own rather than on the worker, so the clip hotkey
+    /// keeps working while the dialog is open.
+    PickClipSound,
     Quit,
     /// The pump finished a rebind. Carries the outcome so the settings page
     /// can say "that combination is taken" instead of going quiet.
@@ -113,6 +117,8 @@ pub(crate) const WM_TRIX_QUIT: u32 = WM_APP + 0x10;
 pub(crate) const WM_TRIX_ARMED: u32 = WM_APP + 0x11;
 /// Asks the pump to re-register the clip hotkey from [`PENDING_HOTKEY`].
 pub(crate) const WM_TRIX_REHOTKEY: u32 = WM_APP + 0x12;
+/// Asks the pump for the "choose a clip sound" dialog.
+pub(crate) const WM_TRIX_PICK_SOUND: u32 = WM_APP + 0x13;
 /// The hotkey id. Process-unique is enough — the window owns the only one.
 const HOTKEY_ID: i32 = 1;
 
@@ -271,6 +277,31 @@ pub fn rebind_hotkey(spec: &str) {
     }
 }
 
+/// Asks the pump for the "choose a clip sound" dialog. Returns immediately.
+///
+/// A no-op when there is no pump — unit tests, and `trix.exe`. The `cfg!(test)`
+/// guard is the same one `rebind_hotkey` carries and for the same reason:
+/// `WINDOW_HWND` is process-global, and a test in this crate could otherwise
+/// read a live pump another test is running and open a real file dialog on the
+/// developer's desktop.
+pub fn request_sound_pick() {
+    if cfg!(test) {
+        return;
+    }
+    let hwnd = WINDOW_HWND.load(Ordering::Relaxed);
+    if hwnd == 0 {
+        return;
+    }
+    unsafe {
+        let _ = PostMessageW(
+            Some(HWND(hwnd as *mut core::ffi::c_void)),
+            WM_TRIX_PICK_SOUND,
+            WPARAM(0),
+            LPARAM(0),
+        );
+    }
+}
+
 /// Never blocks and never calls into `Daemon` — see the module comment.
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
@@ -357,6 +388,17 @@ unsafe extern "system" fn wnd_proc(
                     }
                 });
             }
+            LRESULT(0)
+        }
+        WM_TRIX_PICK_SOUND => {
+            // The pump only forwards. Running a modal dialog here would stop
+            // the tray icon answering for as long as the user browses, which
+            // is the failure `folder.rs` documents at length.
+            ACTIONS.with(|a| {
+                if let Some(tx) = a.borrow().as_ref() {
+                    offer(tx, Action::PickClipSound);
+                }
+            });
             LRESULT(0)
         }
         tray::WM_TRIX_TRAY => {
@@ -592,6 +634,7 @@ pub fn handle_action(daemon: &Arc<Daemon>, action: Action) {
         Action::OpenApp => open_app(daemon),
         Action::OpenClipsFolder => open_clips_folder(daemon),
         Action::ChangeClipsFolder => change_clips_folder(daemon),
+        Action::PickClipSound => choose_clip_sound(daemon),
         Action::Quit => {
             // The same path Ctrl+C takes, so a tray Quit finalizes an
             // in-flight mux exactly like a console close does rather than
@@ -701,6 +744,67 @@ fn change_clips_folder(daemon: &Arc<Daemon>) {
                 current.display()
             ));
         }
+    }
+}
+
+/// Runs the sound dialog and applies the result.
+///
+/// **On a detached thread, unlike `change_clips_folder`.** The worker thread
+/// also handles `Action::Clip`, so a modal dialog held open on it means the
+/// clip hotkey does nothing until the user finishes browsing. The folder picker
+/// has always had that flaw; there is no reason to copy it. `Arc<Daemon>` is
+/// already in hand here, so the thread costs nothing but a clone.
+///
+/// The guard makes a second click while a dialog is open a no-op rather than a
+/// second dialog.
+fn choose_clip_sound(daemon: &Arc<Daemon>) {
+    static PICKING: AtomicBool = AtomicBool::new(false);
+    if PICKING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let daemon = Arc::clone(daemon);
+    let spawned = std::thread::Builder::new().name("trix-sound-dialog".into()).spawn(move || {
+        let chosen = crate::folder::pick_sound();
+        PICKING.store(false, Ordering::SeqCst);
+
+        let chosen = match chosen {
+            Ok(Some(path)) => path,
+            // Cancelled, and deliberately silent: answering a dialog the user
+            // dismissed on purpose with a message box is what makes people stop
+            // opening menus.
+            Ok(None) => return,
+            Err(e) => {
+                let detail = format!("{e:#}");
+                tracing::warn!(error = %detail, "the sound picker failed");
+                crate::folder::report_error(&format!(
+                    "Could not open the sound picker.\n\n{detail}"
+                ));
+                return;
+            }
+        };
+
+        let mut values = serde_json::Map::new();
+        values.insert(
+            "clip_sound_path".to_string(),
+            serde_json::Value::from(chosen.to_string_lossy().as_ref()),
+        );
+        // Through the dispatch helper, not `set_config` directly: the settings
+        // page is open in another process and learns about this only from the
+        // `config_changed` broadcast that helper sends.
+        match crate::dispatch::apply_config_and_broadcast(&daemon, &values) {
+            // `_` because the helper returns the `ConfigUpdate`; nothing here
+            // needs it, and `Ok(())` would not typecheck.
+            Ok(_) => tracing::info!(sound = %chosen.display(), "clip sound changed"),
+            Err(e) => {
+                crate::folder::report_error(&format!("That sound can't be used:\n\n{e}"));
+            }
+        }
+    });
+
+    if spawned.is_err() {
+        PICKING.store(false, Ordering::SeqCst);
+        tracing::warn!("could not start the sound-dialog thread");
     }
 }
 

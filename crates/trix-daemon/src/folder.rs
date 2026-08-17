@@ -1,5 +1,5 @@
-//! The "Change clips folder…" dialog, and the one message box that reports it
-//! failing.
+//! The daemon's file dialogs — "Change clips folder…" and "choose a clip
+//! sound" — and the one message box that reports them failing.
 //!
 //! Its own module rather than more of `window.rs` because it is the daemon's
 //! only piece of real user interface: everything else there is a message pump,
@@ -14,12 +14,13 @@ use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
     CoTaskMemFree, CoUninitialize,
 };
+use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::{
-    FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog,
-    IShellItem, SHCreateItemFromParsingName, SIGDN_FILESYSPATH,
+    FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog,
+    IFileOpenDialog, IShellItem, SHCreateItemFromParsingName, SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MESSAGEBOX_STYLE, MessageBoxW};
-use windows::core::HSTRING;
+use windows::core::{HSTRING, PCWSTR};
 
 /// COM initialised for the duration of a call, and undone exactly when it was
 /// this guard that did it.
@@ -130,14 +131,75 @@ fn show(current: &Path) -> Result<Option<PathBuf>> {
         return Err(anyhow::Error::from(e).context("the folder picker failed"));
     }
 
+    chosen_path(&dialog)
+}
+
+/// Pulls the chosen filesystem path out of a dialog the user accepted.
+///
+/// Shared by both dialogs because the shell's ownership rule is the part worth
+/// writing once: `GetDisplayName` hands back memory the shell allocated, and it
+/// is ours to free whatever else happens — so the string is copied out before
+/// anything can return early.
+fn chosen_path(dialog: &IFileOpenDialog) -> Result<Option<PathBuf>> {
     let item = unsafe { dialog.GetResult() }.context("IFileOpenDialog::GetResult")?;
     let wide = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH) }
-        .context("the chosen folder has no filesystem path")?;
-    // The shell allocated this; it is ours to free whatever we do with it, so
-    // the string is copied out before anything can return early.
+        .context("the chosen item has no filesystem path")?;
     let chosen = unsafe { wide.to_string() };
     unsafe { CoTaskMemFree(Some(wide.0 as *const _)) };
-    Ok(Some(PathBuf::from(chosen.context("the chosen folder's path is not valid UTF-16")?)))
+    Ok(Some(PathBuf::from(chosen.context("the chosen path is not valid UTF-16")?)))
+}
+
+/// Shows the "choose a clip sound" dialog.
+///
+/// `Ok(None)` is a cancel — a normal outcome the caller must not report.
+///
+/// On its own thread with its own apartment for exactly the reasons [`pick`]
+/// documents at length: the shell's dialogs are apartment-threaded, and a
+/// caller that has already run Media Foundation may be in an MTA, which is how
+/// pickers end up invisible or behind the game.
+pub fn pick_sound() -> Result<Option<PathBuf>> {
+    std::thread::Builder::new()
+        .name("trix-sound-picker".into())
+        .spawn(show_sound)
+        .context("could not start the sound-picker thread")?
+        .join()
+        .map_err(|_| anyhow::anyhow!("the sound-picker thread panicked"))?
+}
+
+fn show_sound() -> Result<Option<PathBuf>> {
+    let _apartment = Apartment::enter()?;
+
+    let dialog: IFileOpenDialog =
+        unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) }
+            .context("could not create the sound picker")?;
+
+    let options = unsafe { dialog.GetOptions() }.context("IFileDialog::GetOptions")?;
+    unsafe { dialog.SetOptions(options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST) }
+        .context("IFileDialog::SetOptions")?;
+    let _ = unsafe { dialog.SetTitle(&HSTRING::from("Choose the sound Trix plays for a clip")) };
+
+    // The filter is a convenience, not the rule -- the decoder is what actually
+    // decides. "All files" is second so somebody with an .opus or an .aiff can
+    // still try it, and find out from the error rather than from a dialog that
+    // refuses to show them their own file.
+    let audio = HSTRING::from("Audio files");
+    let audio_spec = HSTRING::from("*.mp3;*.wav;*.m4a;*.wma;*.flac");
+    let all = HSTRING::from("All files");
+    let all_spec = HSTRING::from("*.*");
+    let filters = [
+        COMDLG_FILTERSPEC { pszName: PCWSTR(audio.as_ptr()), pszSpec: PCWSTR(audio_spec.as_ptr()) },
+        COMDLG_FILTERSPEC { pszName: PCWSTR(all.as_ptr()), pszSpec: PCWSTR(all_spec.as_ptr()) },
+    ];
+    let _ = unsafe { dialog.SetFileTypes(&filters) };
+
+    if let Err(e) = unsafe { dialog.Show(None) } {
+        if e.code() == ERROR_CANCELLED.to_hresult() {
+            return Ok(None);
+        }
+        return Err(anyhow::Error::from(e).context("the sound picker failed"));
+    }
+
+    chosen_path(&dialog)
 }
 
 /// Tells the user why the folder they picked was refused.
