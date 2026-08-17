@@ -23,6 +23,7 @@ pub mod clients;
 pub mod dispatch;
 pub mod folder;
 pub mod pipe;
+pub mod sound;
 pub mod state;
 pub mod stats;
 pub mod tray;

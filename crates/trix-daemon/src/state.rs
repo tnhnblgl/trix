@@ -618,6 +618,22 @@ impl Daemon {
     /// only a `ClipMeta`, so the guarantee that a recorded clip is an
     /// announced clip is now something a test can hold.
     fn record_saved_clip(&self, meta: &ClipMeta) {
+        // Read before the library lock is taken, not after. `config` is only
+        // ever held alone or under `armed` (see the lock ordering above), and
+        // taking it after `library` here would introduce the first place in
+        // the daemon where those two are held the other way round.
+        let sound = {
+            let config = self.lock_config();
+            if !config.clip_sound {
+                None
+            } else if config.clip_sound_path.trim().is_empty() {
+                // The built-in chime. `play` takes `None` to mean that.
+                Some(None)
+            } else {
+                Some(self.config_path.as_deref().map(Config::sound_cache_path))
+            }
+        };
+
         // Prepended, matching `library::scan`'s newest-first order. This is
         // the incremental update that keeps `library.list` off the disk
         // after startup (spec §5.2).
@@ -634,6 +650,13 @@ impl Daemon {
             Err(e) => {
                 tracing::error!(error = %e, "could not serialize a saved clip for clip_saved");
             }
+        }
+
+        // Last, after the clip is on disk and every client has been told. The
+        // sound is feedback about a completed clip, so it goes behind
+        // everything that makes the clip real.
+        if let Some(custom) = sound {
+            crate::sound::play(custom.as_deref());
         }
     }
 
@@ -1752,6 +1775,27 @@ mod tests {
             Some("20260803_120000"),
             "the event carries the ClipMeta the grid prepends"
         );
+    }
+
+    /// The sound must not be able to break the announcement. This drives the same
+    /// function the hotkey reaches, with the sound turned on, and asserts the
+    /// event still arrives -- the ordering the comment in `record_saved_clip`
+    /// promises is otherwise only a comment.
+    ///
+    /// `idle` supplies the scratch `clip_dir`, and `config_path` is `None`, so
+    /// nothing here can reach the developer's real config or clip folder.
+    #[test]
+    fn a_clip_is_still_announced_when_the_sound_is_on() {
+        use std::sync::mpsc::sync_channel;
+
+        let daemon = idle("clip-sound-on", Config { clip_sound: true, ..Config::default() });
+        let (tx, rx) = sync_channel(crate::clients::OUTBOUND_QUEUE_DEPTH);
+        daemon.clients.register(tx);
+
+        daemon.record_saved_clip(&meta("20260817_120000"));
+
+        let line = rx.try_recv().expect("a saved clip must still broadcast clip_saved");
+        assert!(line.contains("clip_saved"), "the sound must not displace the event: {line}");
     }
 
     /// One `config.set` call carrying a single key.
