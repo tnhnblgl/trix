@@ -108,6 +108,25 @@ Trix cannot update itself if you put it somewhere Windows protects, such as
 Program Files. It will say so and point you at the download page.
 
 
+CLIP SOUND
+----------
+
+Trix plays a short sound when it saves a clip, so you know the hotkey worked
+without leaving your game. It plays whether or not the Trix window is open.
+
+To use your own:  Settings -> Trix -> Sound file -> Choose...
+
+mp3, wav, m4a and anything else Windows can play will work. Only the first
+10 seconds are used. Trix converts your file once and keeps its own copy, so
+moving or deleting the original later will not stop the sound.
+
+Reset puts Trix's own sound back. To turn the sound off entirely, use the
+Clip sound switch just above it.
+
+There is no volume slider. Use Windows' volume mixer to set how loud
+trix-daemon.exe is.
+
+
 KNOWN LIMITS IN THIS RELEASE
 ----------------------------
 

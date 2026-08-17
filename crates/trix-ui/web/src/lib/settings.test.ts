@@ -86,3 +86,26 @@ describe('settings fields', () => {
     for (const section of usedSections) expect(SECTIONS).toContain(section);
   });
 });
+
+describe('the clip sound fields', () => {
+  it('puts both rows in a section the page already renders', () => {
+    // A field in a section `SECTIONS` does not list renders nowhere at all --
+    // the settings page iterates `SECTIONS`, not `FIELDS`.
+    for (const key of ['clip_sound', 'clip_sound_path']) {
+      const field = FIELDS.find((f) => f.key === key);
+      expect(field, `${key} must be a settings field`).toBeDefined();
+      expect(SECTIONS).toContain(field!.section);
+    }
+  });
+
+  it('renders the sound file row with the sound control', () => {
+    expect(FIELDS.find((f) => f.key === 'clip_sound_path')!.kind).toBe('sound');
+    expect(FIELDS.find((f) => f.key === 'clip_sound')!.kind).toBe('bool');
+  });
+
+  it('says which formats work, because PlaySound is not the whole story', () => {
+    const help = FIELDS.find((f) => f.key === 'clip_sound_path')!.help;
+    expect(help).toMatch(/mp3/i);
+    expect(help).toMatch(/10 seconds/i);
+  });
+});

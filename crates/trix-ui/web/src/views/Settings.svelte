@@ -31,6 +31,12 @@
     if (event.event === 'hotkey_rebound' && event.data['registered'] === false) {
       app.toast('error', `Windows would not give Trix ${event.data['spec']}. Another app already owns it.`);
     }
+    if (event.event === 'config_changed') {
+      // The sound dialog and the tray change config behind this page's back;
+      // without this the path box would keep showing the old file until the
+      // page was reopened.
+      config = { ...config, ...event.data };
+    }
   });
   onDestroy(() => {
     void unlisten.then((fn) => fn());
@@ -71,6 +77,24 @@
       // put the field back to the truth rather than leaving the typed value on
       // screen looking saved.
       await load();
+    }
+  }
+
+  async function pickSound() {
+    try {
+      // Answers as soon as the dialog is open, not when it closes. The chosen
+      // file arrives as a `config_changed` event, handled below.
+      await call('sound.pick');
+    } catch (e) {
+      app.toast('error', String(e));
+    }
+  }
+
+  async function testSound() {
+    try {
+      await call('sound.test');
+    } catch (e) {
+      app.toast('error', String(e));
     }
   }
 
@@ -154,6 +178,8 @@
         onset={set}
         oncapture={captureHotkey}
         onsavehotkey={saveHotkey}
+        onpicksound={pickSound}
+        ontestsound={testSound}
         ontogglelisten={() => {
           listening = !listening;
           heard = false;

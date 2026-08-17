@@ -26,6 +26,8 @@
     oncapture,
     onsavehotkey,
     ontogglelisten,
+    onpicksound,
+    ontestsound,
   }: {
     field: Field;
     config: Record<string, unknown>;
@@ -37,6 +39,8 @@
     oncapture: (e: KeyboardEvent) => void;
     onsavehotkey: () => void;
     ontogglelisten: () => void;
+    onpicksound: () => void;
+    ontestsound: () => void;
   } = $props();
 
   /**
@@ -96,6 +100,13 @@
     {:else if field.kind === 'folder'}
       <input id={field.key} readonly value={String(config['clip_dir_resolved'] ?? '')} />
       <span class="hint">Change it from the Trix tray icon.</span>
+    {:else if field.kind === 'sound'}
+      <input id={field.key} readonly disabled={!config['clip_sound']}
+        value={String(config[field.key] ?? '') || "Trix's built-in sound"} />
+      <button disabled={!config['clip_sound']} onclick={onpicksound}>Choose...</button>
+      <button disabled={!config['clip_sound']} onclick={ontestsound}>Test</button>
+      <button disabled={!config['clip_sound'] || !config[field.key]}
+        onclick={() => onset(field.key, '')}>Reset</button>
     {:else if field.kind === 'hotkey'}
       <input id={field.key} readonly value={capture ?? String(config[field.key] ?? '')}
         onkeydown={oncapture} placeholder="click, then press a combination" />

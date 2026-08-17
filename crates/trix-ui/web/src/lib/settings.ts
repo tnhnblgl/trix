@@ -1,4 +1,4 @@
-export type FieldKind = 'number' | 'text' | 'select' | 'bool' | 'folder' | 'hotkey' | 'slider';
+export type FieldKind = 'number' | 'text' | 'select' | 'bool' | 'folder' | 'hotkey' | 'slider' | 'sound';
 
 export type Field = {
   key: string;
@@ -57,6 +57,8 @@ export const FIELDS: Field[] = [
   { key: 'max_library_gb', label: 'Library limit', kind: 'number', section: 'Clips', ...span('max_library_gb'), help: 'GB. When exceeded the oldest non-favorite clips are deleted. 0 turns the limit off.' },
 
   { key: 'clip_hotkey', label: 'Clip hotkey', kind: 'hotkey', section: 'Trix', help: 'Press the combination to test it. Overlays can silently take a hotkey inside games.' },
+  { key: 'clip_sound', label: 'Clip sound', kind: 'bool', section: 'Trix', help: 'Plays a sound when a clip is saved, even when the Trix window is closed.' },
+  { key: 'clip_sound_path', label: 'Sound file', kind: 'sound', section: 'Trix', help: 'Your own sound, or Trix\'s built-in one. mp3, wav, m4a and anything else Windows can play. Only the first 10 seconds are used.' },
   { key: 'autostart', label: 'Start with Windows', kind: 'bool', section: 'Trix', help: 'Off by default. Writes the registry Run entry, which is the source of truth.' },
   { key: 'stats_seconds', label: 'Stats interval', kind: 'number', section: 'Trix', ...span('stats_seconds'), help: 'Seconds between performance reports. 0 turns them off.' },
 
