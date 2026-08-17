@@ -931,35 +931,64 @@ impl Daemon {
 
         updated.save_to(path).context("config.set could not save the config")?;
 
-        // After the config is on disk, not before. A failed write here is
-        // repaired at the next startup only *because* the arm below deletes
-        // whatever cache is left -- it is not true on its own.
-        // `repair_sound_cache`'s only guard is "a cache file exists," with no
-        // record of which sound produced it, so leaving a stale cache in
-        // place (the rename in `write_sound_cache` is atomic, so a failure
-        // here can only leave the *previous* sound's cache standing, never a
-        // half-written one) would have every future startup see a cache
-        // present, assume it matches the config it sits beside, and never
-        // rebuild it. The daemon would keep playing the old sound forever
-        // while `config.get` reports the new one, with no automatic recovery.
-        // Deleting it here is what keeps "cache exists" meaning "cache
-        // matches the configured sound."
+        // After the config is on disk, not before. A failed write here
+        // (the rename in `write_sound_cache` is atomic, so it can only
+        // leave the *previous* sound's cache standing, never a
+        // half-written one) would once have been trusted forever:
+        // `repair_sound_cache`'s old guard was only "does a cache file
+        // exist," with no record of which sound produced it. The sidecar
+        // written beside a fresh cache -- and removed beside a deleted one,
+        // below -- is what fixed that: `needs_sound_cache_rebuild` now
+        // rebuilds whenever the cache is missing, its sidecar is missing, or
+        // the sidecar names something other than the configured sound, so a
+        // stale pair left here is still caught at the very next startup even
+        // if nothing below ran at all. Deleting the stale cache and its
+        // sidecar here is not what keeps that invariant true -- the sidecar
+        // is -- it only means the daemon stops playing the old sound now,
+        // rather than waiting for a restart to find out.
         match converted {
             Some(Some(wav)) => {
-                if let Err(e) = write_sound_cache(path, &wav) {
+                if let Err(e) = write_sound_cache(path, &wav, updated.clip_sound_path.trim()) {
                     tracing::warn!(error = %format!("{e:#}"), "could not save the converted sound");
-                    // Best-effort, for the reason above: a cache that still
-                    // names the old sound is worse than no cache at all.
-                    // Playback already falls back to the built-in chime when
-                    // the cache is absent, so this is an honest intermediate
-                    // state rather than a wrong one.
-                    let _ = std::fs::remove_file(Config::sound_cache_path(path));
+                    // Checked and logged, not silent: this has a *correlated*
+                    // trigger, not just an independent one. `PlaySoundW`
+                    // holding `clip-sound.wav` open for a Test click or a
+                    // clip saving while a new sound is being picked is
+                    // exactly what makes the rename above fail with a
+                    // sharing violation -- and this delete, targeting the
+                    // same open file, then fails for the same reason. Left
+                    // unchecked, that leaves config naming the new sound,
+                    // the cache still holding the old one, and nothing in
+                    // the log to explain why -- until the next startup's
+                    // `repair_sound_cache` catches it via the sidecar below.
+                    if let Err(e) = std::fs::remove_file(Config::sound_cache_path(path)) {
+                        tracing::warn!(
+                            error = %format!("{e:#}"),
+                            "could not remove the stale sound cache; the previous sound will \
+                             keep playing until the daemon restarts"
+                        );
+                    }
+                    // Paired with the cache above, unconditionally: its job
+                    // was to vouch for a cache this attempt just failed to
+                    // produce, so it has nothing left to vouch for. Harmless
+                    // either way the delete above went -- if it also failed,
+                    // the previous cache and this sidecar still name the
+                    // same (old) sound and agree with each other, but
+                    // `clip_sound_path` in the config just saved above
+                    // already names the *new* one, so the mismatch that
+                    // sends the next startup's `repair_sound_cache` down the
+                    // rebuild path is already there regardless of whether
+                    // this file survives.
+                    let _ = std::fs::remove_file(Config::sound_src_path(path));
                 }
             }
             Some(None) => {
                 // Best-effort: there is usually no cache to remove, because the
-                // user was on the built-in sound already.
+                // user was on the built-in sound already. Paired with the
+                // sidecar so the two never disagree about a sound that was
+                // just reset away.
                 let _ = std::fs::remove_file(Config::sound_cache_path(path));
+                let _ = std::fs::remove_file(Config::sound_src_path(path));
             }
             None => {}
         }
@@ -1001,11 +1030,14 @@ impl Daemon {
         Ok(ConfigUpdate { accepted, requires_rearm, clip_dir_resolved })
     }
 
-    /// Rebuilds the converted sound if it is missing.
+    /// Rebuilds the converted sound if it does not match the configured one.
     ///
-    /// Two things reach this state and both are ordinary: a `config.toml`
-    /// edited by hand, which names a sound no conversion ever ran for, and a
-    /// cache someone deleted while tidying `%APPDATA%`.
+    /// Three things reach this state and none of them self-heal on their own:
+    /// a `config.toml` edited by hand to name a different sound than the one
+    /// the cache was built from, a cache (or its sidecar) someone deleted
+    /// while tidying `%APPDATA%`, and a process that died between saving the
+    /// config and writing the cache. [`needs_sound_cache_rebuild`] is the
+    /// guard that catches all three -- see its own doc comment.
     ///
     /// Called at startup rather than from the constructor so no test builds a
     /// `Daemon` that starts Media Foundation.
@@ -1014,13 +1046,19 @@ impl Daemon {
             return;
         };
         let chosen = self.lock_config().clip_sound_path.trim().to_string();
-        if chosen.is_empty() || Config::sound_cache_path(config_path).exists() {
+        let cache_exists = Config::sound_cache_path(config_path).exists();
+        // A missing sidecar reads the same as one that disagrees -- both are
+        // "cannot vouch for this cache" -- so a read failure (not there, not
+        // valid UTF-8, whatever) collapses to `None` rather than being
+        // threaded through as its own case.
+        let sidecar = std::fs::read_to_string(Config::sound_src_path(config_path)).ok();
+        if !needs_sound_cache_rebuild(&chosen, cache_exists, sidecar.as_deref()) {
             return;
         }
 
         match trix_core::sound::decode::to_wav(std::path::Path::new(&chosen)) {
             Ok(wav) => {
-                if let Err(e) = write_sound_cache(config_path, &wav) {
+                if let Err(e) = write_sound_cache(config_path, &wav, &chosen) {
                     tracing::warn!(error = %format!("{e:#}"), "could not rebuild the clip sound");
                 }
             }
@@ -1400,13 +1438,55 @@ fn resolve_sound(config: &Config, config_path: Option<&Path>) -> Option<PathBuf>
     }
 }
 
-/// Writes the converted sound beside the config file, through a temporary name.
+/// The decision [`Daemon::repair_sound_cache`] acts on: does the cache on
+/// disk need rebuilding before it can be trusted to match `chosen`?
+///
+/// Pulled out as a pure function, with no filesystem access of its own, so it
+/// can be tested without Media Foundation -- everything about *deciding*
+/// whether to rebuild is ordinary string and boolean logic; only the rebuild
+/// itself needs MF. `sidecar` is `None` for "missing, unreadable, or never
+/// written" -- callers are not expected to distinguish those, because none of
+/// them earn a different answer here.
+///
+/// A cache file existing on its own says nothing about which sound produced
+/// it. Three ordinary situations reach this guard with a cache present that
+/// does not match `chosen`, and none of them self-heal without it: a
+/// `config.toml` edited by hand to name a different file than the one last
+/// converted, a process that died between saving the config and writing the
+/// cache, and a cache write that failed after the sidecar from the *previous*
+/// sound had already been cleaned up (or vice versa). The sidecar is what
+/// turns "a cache exists" into "a cache exists *for this sound*": a rebuild
+/// is needed exactly when there is a configured sound and the cache cannot be
+/// shown to match it, i.e. is missing, or its sidecar is missing, or its
+/// sidecar names something other than `chosen`.
+fn needs_sound_cache_rebuild(chosen: &str, cache_exists: bool, sidecar: Option<&str>) -> bool {
+    if chosen.is_empty() {
+        // Nothing configured, so there is nothing to rebuild -- `resolve_sound`
+        // never looks at the cache when `clip_sound_path` is empty, and
+        // `config.set`'s reset path is what deletes it.
+        return false;
+    }
+    if !cache_exists {
+        return true;
+    }
+    sidecar != Some(chosen)
+}
+
+/// Writes the converted sound beside the config file, through a temporary
+/// name, then records `source` in the sidecar beside it.
 ///
 /// Temp-then-rename rather than a direct write: a half-written cache is a valid
 /// path with an invalid file at it, and `PlaySound` answers that with silence.
 /// A rename on the same volume is atomic, so the cache is either the old sound
 /// or the new one and never a prefix of either.
-fn write_sound_cache(config_path: &std::path::Path, wav: &[u8]) -> Result<()> {
+///
+/// The sidecar is written only after that rename lands, so it is never in
+/// place ahead of the cache it describes. If this sidecar write itself fails,
+/// the cache stands with no sidecar at all rather than a wrong one -- and a
+/// missing sidecar is one of [`needs_sound_cache_rebuild`]'s own rebuild
+/// conditions, so the next startup heals it instead of trusting a cache
+/// nothing vouches for.
+fn write_sound_cache(config_path: &std::path::Path, wav: &[u8], source: &str) -> Result<()> {
     let final_path = Config::sound_cache_path(config_path);
     let temp_path = final_path.with_extension("wav.tmp");
     if let Some(parent) = final_path.parent() {
@@ -1422,6 +1502,9 @@ fn write_sound_cache(config_path: &std::path::Path, wav: &[u8]) -> Result<()> {
         let _ = std::fs::remove_file(&temp_path);
         return Err(e).with_context(|| format!("could not replace {}", final_path.display()));
     }
+    let sidecar_path = Config::sound_src_path(config_path);
+    std::fs::write(&sidecar_path, source)
+        .with_context(|| format!("could not write {}", sidecar_path.display()))?;
     Ok(())
 }
 
@@ -2119,19 +2202,27 @@ mod tests {
 
     /// Clearing the key is "Reset to default", and the cache has to go with it --
     /// otherwise the next play finds a stale file beside a config that says
-    /// "built-in" and plays the sound the user just removed.
+    /// "built-in" and plays the sound the user just removed. The sidecar has
+    /// to go with it too (Fix 1): left behind, it would still name a sound
+    /// nothing points at any more, which is not itself a bug today -- an
+    /// empty `clip_sound_path` never looks at the cache or the sidecar at
+    /// all -- but it is exactly the kind of leftover this pairing exists to
+    /// not require anyone to reason about case by case.
     #[test]
     fn clearing_the_path_deletes_the_cache() {
         let (daemon, config_path, dir) = with_scratch_config("sound-reset");
         let cache = Config::sound_cache_path(&config_path);
+        let sidecar = Config::sound_src_path(&config_path);
         std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
         std::fs::write(&cache, b"RIFF____WAVEstale").unwrap();
+        std::fs::write(&sidecar, r"C:\previous\sound.mp3").unwrap();
 
         let mut values = Map::new();
         values.insert("clip_sound_path".into(), Value::from(""));
         daemon.set_config(&values).expect("clearing the sound must be accepted");
 
         assert!(!cache.exists(), "Reset must remove the converted copy");
+        assert!(!sidecar.exists(), "Reset must remove the sidecar along with the cache");
 
         cleanup(&dir);
     }
@@ -2152,10 +2243,15 @@ mod tests {
 
     /// Finding 1's fix, proven against a real `write_sound_cache` failure
     /// rather than only reasoned about: even though the write fails, a stale
-    /// cache from a *previous* sound must not survive it, because
-    /// `repair_sound_cache`'s only guard is "does a cache file exist" -- one
-    /// left behind here would be trusted as current forever, and the daemon
-    /// would keep playing sound A while `config.get` reports sound B.
+    /// cache from a *previous* sound must not survive it. Before the sidecar
+    /// existed, `repair_sound_cache`'s only guard was "does a cache file
+    /// exist" -- one left behind here would have been trusted as current
+    /// forever, and the daemon would keep playing sound A while `config.get`
+    /// reports sound B. The sidecar this test also checks for is Fix 1's
+    /// belt-and-suspenders on top of that: even if this compensating delete
+    /// of the cache itself were ever skipped, a sidecar still naming the old
+    /// sound would go stale the moment `clip_sound_path` changed, and
+    /// `needs_sound_cache_rebuild` would catch the mismatch on its own.
     ///
     /// The failure is injected by pre-creating `clip-sound.wav.tmp` as a
     /// directory, so `write_sound_cache`'s own write to that path fails
@@ -2178,8 +2274,10 @@ mod tests {
         std::fs::write(&sound, trix_core::sound::wav_from_pcm(&pcm, 2, 44_100, 16)).unwrap();
 
         let cache = Config::sound_cache_path(&config_path);
+        let sidecar = Config::sound_src_path(&config_path);
         std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
         std::fs::write(&cache, b"RIFF____WAVEstale-audio-from-a-previous-sound").unwrap();
+        std::fs::write(&sidecar, r"C:\previous\sound.mp3").unwrap();
         // Forces the write inside `write_sound_cache` to fail without
         // touching `cache` at all, so the fix's best-effort delete of
         // `cache` is not fighting the same failure that broke the write.
@@ -2195,6 +2293,107 @@ mod tests {
             "a failed cache write must not strand the previous sound's cache -- the next \
              startup has to see it missing and rebuild, not trust a file that names the \
              wrong sound"
+        );
+        assert!(
+            !sidecar.exists(),
+            "the sidecar must go with the cache it describes, so a survivor here could never \
+             be misread as still matching a cache that is gone"
+        );
+
+        cleanup(&dir);
+    }
+
+    /// `write_sound_cache` itself, not through `set_config` -- no decode, so
+    /// no Media Foundation needed to prove the pairing Fix 1 depends on.
+    #[test]
+    fn write_sound_cache_writes_the_sidecar_beside_it() {
+        let (_daemon, config_path, dir) = with_scratch_config("sound-write-sidecar");
+        let wav = trix_core::sound::wav_from_pcm(&[0u8; 8], 2, 44_100, 16);
+
+        write_sound_cache(&config_path, &wav, r"C:\sounds\airhorn.mp3").unwrap();
+
+        assert_eq!(std::fs::read(Config::sound_cache_path(&config_path)).unwrap(), wav);
+        assert_eq!(
+            std::fs::read_to_string(Config::sound_src_path(&config_path)).unwrap(),
+            r"C:\sounds\airhorn.mp3",
+            "the sidecar must name exactly the source `write_sound_cache` was given"
+        );
+
+        cleanup(&dir);
+    }
+
+    /// [`needs_sound_cache_rebuild`] with nothing configured: `resolve_sound`
+    /// never looks at the cache when `clip_sound_path` is empty, so there is
+    /// nothing for a rebuild to fix, however stale the files sitting there
+    /// might be.
+    #[test]
+    fn needs_sound_cache_rebuild_is_false_with_nothing_configured() {
+        assert!(!needs_sound_cache_rebuild("", false, None));
+        assert!(!needs_sound_cache_rebuild("", true, Some("anything")));
+    }
+
+    #[test]
+    fn needs_sound_cache_rebuild_is_true_when_the_cache_file_is_missing() {
+        assert!(needs_sound_cache_rebuild(r"C:\sounds\airhorn.mp3", false, None));
+    }
+
+    /// A cache with no sidecar at all cannot be trusted, even though it
+    /// exists -- exactly the gap the old "does a cache file exist" guard
+    /// left open.
+    #[test]
+    fn needs_sound_cache_rebuild_is_true_when_the_sidecar_is_missing() {
+        assert!(needs_sound_cache_rebuild(r"C:\sounds\airhorn.mp3", true, None));
+    }
+
+    #[test]
+    fn needs_sound_cache_rebuild_is_false_when_the_sidecar_matches() {
+        assert!(!needs_sound_cache_rebuild(
+            r"C:\sounds\airhorn.mp3",
+            true,
+            Some(r"C:\sounds\airhorn.mp3")
+        ));
+    }
+
+    /// Fix 1's headline case, and the whole reason the sidecar exists: pick
+    /// `airhorn.mp3`, quit, hand-edit `clip_sound_path` in `config.toml` to
+    /// `boom.mp3`, restart. The old guard (`chosen.is_empty() ||
+    /// cache.exists()`) saw a cache and stopped there, so every clip kept
+    /// playing `airhorn` forever while `config.get` reported `boom`.
+    ///
+    /// This builds exactly that on-disk state -- a cache and a sidecar both
+    /// naming `airhorn.mp3` -- and reads the sidecar back the same way
+    /// `repair_sound_cache` does, rather than handing
+    /// `needs_sound_cache_rebuild` a string the test made up, so a future
+    /// change to how the sidecar is read cannot drift silently away from
+    /// what this test proves. It stops at the decision rather than a real
+    /// decode, which needs Media Foundation -- see this module's other
+    /// `#[ignore]`d sound tests for that half.
+    #[test]
+    fn a_hand_edited_config_naming_a_different_sound_is_detected_as_needing_rebuild() {
+        let (_daemon, config_path, dir) = with_scratch_config("sound-hand-edited");
+        let cache = Config::sound_cache_path(&config_path);
+        let sidecar = Config::sound_src_path(&config_path);
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(&cache, b"RIFF____WAVEairhorn").unwrap();
+        std::fs::write(&sidecar, r"C:\sounds\airhorn.mp3").unwrap();
+
+        let on_disk_sidecar = std::fs::read_to_string(&sidecar).ok();
+        assert!(
+            needs_sound_cache_rebuild(
+                r"C:\sounds\boom.mp3",
+                cache.exists(),
+                on_disk_sidecar.as_deref()
+            ),
+            "a config hand-edited to name a different sound than the cache was built from must \
+             be rebuilt, not trusted just because a cache file happens to exist"
+        );
+        assert!(
+            !needs_sound_cache_rebuild(
+                r"C:\sounds\airhorn.mp3",
+                cache.exists(),
+                on_disk_sidecar.as_deref()
+            ),
+            "an unedited config must not trigger a needless rebuild"
         );
 
         cleanup(&dir);

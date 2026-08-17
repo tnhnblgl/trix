@@ -81,9 +81,12 @@ impl Drop for Session {
 
 /// Decodes `path` and returns it as WAV bytes, capped at [`super::MAX_SECONDS`].
 ///
-/// The error is shown to the user in the settings page, so it names the file
-/// and carries Media Foundation's own reason: "that file is not a sound Windows
-/// can read" is actionable, "0xC00D36C4" is not, and this returns both.
+/// The error is shown to the user in a message box raised by the daemon, from
+/// the file-picker dialog -- the only path that ever decodes. (The settings
+/// page only ever sends an empty `clip_sound_path`, which resets the sound
+/// rather than decoding one.) So it names the file and carries Media
+/// Foundation's own reason: "that file is not a sound Windows can read" is
+/// actionable, "0xC00D36C4" is not, and this returns both.
 pub fn to_wav(path: &Path) -> Result<Vec<u8>> {
     // Before MF is even started: a path that is simply not there is the common
     // mistake, and it deserves a plain answer rather than a codec's.
@@ -145,17 +148,18 @@ pub fn to_wav(path: &Path) -> Result<Vec<u8>> {
         };
         consecutive_empty_reads = 0;
 
-        let buffer: IMFMediaBuffer =
-            unsafe { sample.ConvertToContiguousBuffer() }.context("ConvertToContiguousBuffer")?;
+        let buffer: IMFMediaBuffer = unsafe { sample.ConvertToContiguousBuffer() }
+            .with_context(|| format!("ConvertToContiguousBuffer failed for {}", path.display()))?;
         let mut data: *mut u8 = std::ptr::null_mut();
         let mut length = 0u32;
         unsafe { buffer.Lock(&mut data, None, Some(&mut length)) }
-            .context("IMFMediaBuffer::Lock")?;
+            .with_context(|| format!("IMFMediaBuffer::Lock failed for {}", path.display()))?;
         // The copy happens before `Unlock`, and `Unlock` happens before the
         // next iteration can lock anything else. `data` is only valid between
         // the two.
         pcm.extend_from_slice(unsafe { std::slice::from_raw_parts(data, length as usize) });
-        unsafe { buffer.Unlock() }.context("IMFMediaBuffer::Unlock")?;
+        unsafe { buffer.Unlock() }
+            .with_context(|| format!("IMFMediaBuffer::Unlock failed for {}", path.display()))?;
 
         // Stop reading rather than decode a whole album and throw it away.
         if pcm.len() >= MAX_PCM_BYTES {

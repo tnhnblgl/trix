@@ -725,12 +725,14 @@ fn change_clips_folder(daemon: &Arc<Daemon>) {
     let mut values = serde_json::Map::new();
     values
         .insert("clip_dir".to_string(), serde_json::Value::from(chosen.to_string_lossy().as_ref()));
-    match daemon.set_config(&values) {
+    // Through the dispatch helper, not `set_config` directly: an already-open
+    // settings page only learns a folder changed from the tray via the
+    // `config_changed` broadcast that helper sends -- see its doc comment.
+    match crate::dispatch::apply_config_and_broadcast(daemon, &values) {
         // No re-arm: `clip_dir` is read per clip, so a running capture keeps
         // its ring and the very next clip lands in the new folder.
         Ok(_) => tracing::info!(dir = %chosen.display(), "clips folder changed from the tray"),
-        Err(e) => {
-            let detail = format!("{e:#}");
+        Err(detail) => {
             tracing::warn!(
                 error = %detail,
                 dir = %chosen.display(),

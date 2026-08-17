@@ -30,7 +30,13 @@ const BUILT_IN: &[u8] = include_bytes!("../assets/clip.wav");
 /// the file cannot be played -- without it, a broken sound is indistinguishable
 /// from a working one to anybody debugging this.
 pub fn play(custom: Option<&Path>) {
-    let ok = match custom.filter(|path| path.exists()) {
+    // Resolved once and matched on again below for the failure log: which
+    // branch actually played is what determines whose name belongs in the
+    // warning, and `custom` alone does not say that -- a `custom` that does
+    // not exist still falls through to the built-in chime, and blaming
+    // `custom` for that chime's failure would point at the wrong file.
+    let resolved = custom.filter(|path| path.exists());
+    let ok = match resolved {
         Some(path) => unsafe {
             PlaySoundW(&HSTRING::from(path), None, SND_FILENAME | SND_ASYNC | SND_NODEFAULT)
         },
@@ -43,7 +49,12 @@ pub fn play(custom: Option<&Path>) {
         },
     };
     if !ok.as_bool() {
-        tracing::warn!(sound = ?custom, "the clip sound could not be played");
+        match resolved {
+            Some(path) => {
+                tracing::warn!(sound = %path.display(), "the custom clip sound could not be played")
+            }
+            None => tracing::warn!("the built-in clip sound could not be played"),
+        }
     }
 }
 

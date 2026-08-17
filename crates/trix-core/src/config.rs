@@ -195,6 +195,19 @@ impl Config {
         config_path.with_file_name("clip-sound.wav")
     }
 
+    /// Where the cache's sidecar lives: which source file the cache at
+    /// [`Self::sound_cache_path`] was actually built from.
+    ///
+    /// A cache file existing says nothing about *which* sound produced it --
+    /// this is what lets `repair_sound_cache` tell those apart instead of
+    /// trusting mere presence. Derived from `config_path` the same way the
+    /// cache's own path is, and for the same reason: a scratch `config_path`
+    /// in a test carries the sidecar with it too, with nothing extra to
+    /// isolate.
+    pub fn sound_src_path(config_path: &Path) -> PathBuf {
+        config_path.with_file_name("clip-sound.src")
+    }
+
     pub fn load() -> Self {
         let Some(path) = Self::path() else {
             return Self::default();
@@ -397,5 +410,13 @@ mod tests {
     fn the_sound_cache_sits_beside_the_config_file() {
         let cache = Config::sound_cache_path(std::path::Path::new(r"C:\x\trix\config.toml"));
         assert_eq!(cache, std::path::PathBuf::from(r"C:\x\trix\clip-sound.wav"));
+    }
+
+    /// Same derivation as the cache itself, so a scratch `config_path` in a
+    /// test isolates both together.
+    #[test]
+    fn the_sound_sidecar_sits_beside_the_config_file() {
+        let sidecar = Config::sound_src_path(std::path::Path::new(r"C:\x\trix\config.toml"));
+        assert_eq!(sidecar, std::path::PathBuf::from(r"C:\x\trix\clip-sound.src"));
     }
 }

@@ -9,8 +9,11 @@
 pub mod decode;
 
 /// The format every converted sound is written in. CD rate, stereo, 16-bit:
-/// what `MFAudioFormat_PCM` is happiest resampling into and what every
-/// Windows audio device accepts without a format negotiation.
+/// chosen as an ordinary target for `MFAudioFormat_PCM` to resample into and
+/// for a Windows audio device to accept without a format negotiation. That is
+/// the intent, not an observed fact -- see `decode::to_wav`'s doc comment for
+/// the same caveat on the read side: the resampling path this format asks for
+/// has never actually run under a test.
 pub const SAMPLE_RATE: u32 = 44_100;
 pub const CHANNELS: u16 = 2;
 pub const BITS_PER_SAMPLE: u16 = 16;
