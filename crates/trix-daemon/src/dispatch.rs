@@ -11,7 +11,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::SyncSender;
 
 use serde_json::{Map, Value};
-use trix_core::config::Config;
 use trix_proto::{ClipMeta, Command, Event, Request, Response};
 
 use crate::clients::ClientId;
@@ -107,17 +106,10 @@ impl ClientHandler for Daemon {
                 Response::ok(request.id, Value::Object(Map::new()))
             }
             Ok(Command::SoundTest) => {
-                let config = self.lock_config();
-                let custom = if config.clip_sound_path.trim().is_empty() {
-                    None
-                } else {
-                    self.config_path.as_deref().map(Config::sound_cache_path)
-                };
-                drop(config);
                 // Plays whatever is configured, whether or not `clip_sound` is
                 // on: this answers "what does this file sound like", and the
                 // toggle is a separate question the settings page already shows.
-                crate::sound::play(custom.as_deref());
+                crate::sound::play(self.custom_sound_source().as_deref());
                 Response::ok(request.id, Value::Object(Map::new()))
             }
             // No catch-all arm. Every `Command` variant is answered here now,
@@ -1208,10 +1200,14 @@ mod tests {
         );
     }
 
-    /// `sound.pick` must answer immediately rather than when a dialog closes.
-    /// `request_sound_pick` is a no-op under `cfg!(test)` -- see its comment --
-    /// so this asserts the reply without any dialog ever existing, which is also
-    /// what stops `cargo test` opening a file dialog on the developer's desktop.
+    /// Proves only that `sound.pick` parses and answers `ok` — nothing about
+    /// timing. `request_sound_pick` is a complete no-op under `cfg!(test)`
+    /// (see its own comment), so this test would still pass even if the
+    /// production path blocked until the dialog closed; there is no clock in
+    /// this assertion to catch that. It also happens to be what stops
+    /// `cargo test` opening a real file dialog on the developer's desktop.
+    /// The "answers before the dialog closes" property this command exists
+    /// for is verified by hand — see this task's test plan.
     #[test]
     fn sound_pick_answers_immediately() {
         let response = idle("sound-pick").dispatch(1, &request(1, "sound.pick"));
@@ -1219,13 +1215,55 @@ mod tests {
         assert_eq!(response.id, 1);
     }
 
-    /// Plays the built-in chime, because `idle` leaves `clip_sound_path` empty.
-    /// Audible when the suite runs, and that is the point: a `sound.test` that
-    /// answered `ok` without a sound would pass a silent assertion too.
+    /// The built-in-chime branch only: `idle` leaves `clip_sound_path` empty
+    /// and `config_path` as `None`, so this reaches nothing but that branch —
+    /// see `sound_test_resolves_a_cache_path_for_a_custom_sound` below for the
+    /// branch it does not cover. Audible when the suite runs, and that is the
+    /// point: a `sound.test` that answered `ok` without a sound would pass a
+    /// silent assertion too.
     #[test]
     fn sound_test_answers_ok() {
         let response = idle("sound-test").dispatch(1, &request(2, "sound.test"));
         assert!(response.ok, "sound.test must succeed: {:?}", response.error);
+    }
+
+    /// The custom-sound branch `sound_test_answers_ok` cannot reach: a
+    /// non-empty `clip_sound_path` with a config path present resolves to a
+    /// cache path rather than `None`.
+    ///
+    /// Goes straight at `custom_sound_source` rather than through the
+    /// `sound.test` dispatch arm: the wire response is `ok` on both branches
+    /// (playback falls back to the built-in chime when the cache file is
+    /// missing, exactly like the `None` branch), so the response alone
+    /// cannot distinguish them. Asserting the resolved path is what actually
+    /// pins the branch down.
+    ///
+    /// Built by hand rather than through `config.set`, so nothing here
+    /// decodes a file or starts Media Foundation: `clip_sound_path` is
+    /// already non-empty when the daemon is constructed, so `config.set` is
+    /// never called. The cache file at the resolved path does not exist —
+    /// that is expected and is not what this test is about.
+    #[test]
+    fn sound_test_resolves_a_cache_path_for_a_custom_sound() {
+        let dir =
+            std::env::temp_dir().join(format!("trix-dispatch-sound-custom-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("config.toml");
+        let config = Config {
+            clip_dir: dir.to_string_lossy().into_owned(),
+            clip_sound_path: r"C:\chosen.mp3".into(),
+            ..Config::default()
+        };
+        let daemon = Daemon::new_at(config, Some(config_path.clone()));
+
+        assert_eq!(
+            daemon.custom_sound_source(),
+            Some(Config::sound_cache_path(&config_path)),
+            "a non-empty clip_sound_path with a config path resolves to the cache path"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

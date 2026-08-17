@@ -356,11 +356,7 @@ pub struct Daemon {
     /// Where `config.set` persists. `None` means there is nowhere to save —
     /// `%APPDATA%` unset — which is an error on that command and irrelevant to
     /// every other one, so it is not a startup failure.
-    ///
-    /// `pub(crate)`: `dispatch.rs`'s `sound.test` reads it directly to find the
-    /// converted sound cache beside the config file, the same way
-    /// `record_saved_clip` below does.
-    pub(crate) config_path: Option<PathBuf>,
+    config_path: Option<PathBuf>,
     /// `Arc`, not a bare `Clients`, so `window::spawn` can hand a clone to the
     /// pump thread — see `window.rs`'s `CLIENTS` thread-local and its doc for
     /// why: `hotkey_pressed` has to reach `Clients::broadcast` from `wnd_proc`
@@ -626,17 +622,18 @@ impl Daemon {
         // ever held alone or under `armed` (see the lock ordering above), and
         // taking it after `library` here would introduce the first place in
         // the daemon where those two are held the other way round.
-        let sound = {
-            let config = self.lock_config();
-            if !config.clip_sound {
-                None
-            } else if config.clip_sound_path.trim().is_empty() {
-                // The built-in chime. `play` takes `None` to mean that.
-                Some(None)
-            } else {
-                Some(self.config_path.as_deref().map(Config::sound_cache_path))
-            }
-        };
+        //
+        // Two separate `lock_config` calls rather than one held across both
+        // checks: `custom_sound_source` takes the same lock internally, and
+        // holding this guard while calling it would deadlock against a
+        // non-reentrant `Mutex`. Both calls still land before `lock_library`
+        // below, which is the property that matters here.
+        let sound_enabled = self.lock_config().clip_sound;
+        // `None` here means "do not play"; `Some(None)` means the built-in
+        // chime, which is what `custom_sound_source` returns for a sound
+        // that is unset or has nowhere cached. `play` takes `None` to mean
+        // the built-in chime either way.
+        let sound = if sound_enabled { Some(self.custom_sound_source()) } else { None };
 
         // Prepended, matching `library::scan`'s newest-first order. This is
         // the incremental update that keeps `library.list` off the disk
@@ -740,6 +737,30 @@ impl Daemon {
     /// case where it does reach a live pump.
     pub fn clip_hotkey(&self) -> String {
         self.lock_config().clip_hotkey.clone()
+    }
+
+    /// The converted sound cache to play, if there is one.
+    ///
+    /// `None` covers two different situations a caller does not need to tell
+    /// apart: `clip_sound_path` is empty, meaning the user is on the built-in
+    /// chime, and `clip_sound_path` names a file but there is nowhere a
+    /// converted copy could have been cached (`config_path` is `None` —
+    /// `%APPDATA%` unset). Either way [`crate::sound::play`] is told the same
+    /// thing, `None`, and plays the built-in chime.
+    ///
+    /// Locks `config` internally and hands back an owned path rather than the
+    /// guard, following [`Self::clip_dir`] and [`Self::clip_hotkey`] above:
+    /// `config` is only ever taken alone or under `armed` (see the lock
+    /// ordering note near the top of this file), and a method that handed the
+    /// guard itself out to callers crate-wide would let a future one hold it
+    /// across a call that also wants `armed` or `clients`.
+    pub(crate) fn custom_sound_source(&self) -> Option<PathBuf> {
+        let config = self.lock_config();
+        if config.clip_sound_path.trim().is_empty() {
+            None
+        } else {
+            self.config_path.as_deref().map(Config::sound_cache_path)
+        }
     }
 
     pub fn config_json(&self) -> Result<Value> {
@@ -1344,9 +1365,7 @@ impl Daemon {
         self.armed.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// `pub(crate)`: `dispatch.rs`'s `sound.test` locks this directly to read
-    /// `clip_sound_path`, the same way `record_saved_clip` above does.
-    pub(crate) fn lock_config(&self) -> MutexGuard<'_, Config> {
+    fn lock_config(&self) -> MutexGuard<'_, Config> {
         self.config.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
