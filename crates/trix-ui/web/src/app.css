@@ -18,3 +18,43 @@ body {
   font: 14px/1.45 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   user-select: none;
 }
+
+/* Form controls are styled here rather than in a component, because Svelte
+   scopes a component's styles to that component's own markup. These rules
+   used to live in Field.svelte, which meant a control rendered anywhere else
+   fell back to the native Windows look -- and that is exactly what happened
+   to the Version row in Settings.svelte, which is written inline because it
+   is not backed by a config key. Element selectors, so a component that wants
+   a different look still wins: a Svelte scoped rule carries an extra class
+   and outranks these without needing !important. */
+input,
+select {
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  min-width: 120px;
+}
+
+input[readonly] {
+  color: var(--dim);
+}
+
+input[type='range'] {
+  min-width: 200px;
+  padding: 0;
+  border: none;
+  background: none;
+}
+
+button {
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}

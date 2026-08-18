@@ -130,8 +130,4 @@
   .help { grid-column: 2; margin: 0; font-size: 12px; color: var(--dim); }
   .hint { font-size: 12px; color: var(--dim); }
   .hint.ok { color: var(--accent); }
-  input, select { padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; min-width: 120px; }
-  input[readonly] { color: var(--dim); }
-  input[type='range'] { min-width: 200px; padding: 0; border: none; background: none; }
-  button { padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font: inherit; cursor: pointer; }
 </style>

@@ -214,5 +214,5 @@
   .control { display: flex; align-items: center; gap: 8px; }
   .help { grid-column: 2; margin: 0; font-size: 12px; color: var(--dim); }
   .notice { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border: 1px solid var(--accent); border-radius: 8px; margin-bottom: 16px; }
-  .notice button { margin-left: auto; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font: inherit; cursor: pointer; }
+  .notice button { margin-left: auto; }
 </style>
