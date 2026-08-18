@@ -10,7 +10,7 @@ members = ["crates/trix-core", "crates/trix-cli", "crates/trix-daemon", "crates/
 # silently skip a test suite or a binary.
 
 [workspace.package]
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 
 [workspace.dependencies]

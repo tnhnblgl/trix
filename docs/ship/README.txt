@@ -1,4 +1,4 @@
-Trix 0.5.0
+Trix 0.5.1
 ==========
 
 A clip recorder for Windows, for people whose PC cannot spare the frames.
@@ -6,6 +6,21 @@ Trix keeps the last few seconds of your screen in memory and writes them to
 a file when you press a key. Capture and encoding run on the GPU, so the
 cost to your game is close to nothing, and the app itself stays out of the
 way while you play.
+
+
+FIXED IN 0.5.1
+--------------
+
+0.4.0 and 0.5.0 closed themselves a few seconds after you pressed Start, and
+straight away on the next launch, with no error message. The cause was the
+update check: it asked github.com over an encrypted connection using a
+component that was never included in the build, and that ended the app on the
+spot. It is included now.
+
+If you are on 0.4.0 or 0.5.0, Trix cannot update itself out of this, because
+the update check is the thing that closed it. Download 0.5.1 by hand from the
+releases page and unzip it over your old folder. Your settings and your clips
+are somewhere else and are not touched.
 
 
 NEW IN 0.4.0 -- PLEASE READ
