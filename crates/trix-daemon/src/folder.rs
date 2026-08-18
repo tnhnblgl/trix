@@ -10,10 +10,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use windows::Win32::Foundation::ERROR_CANCELLED;
-use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
-    CoTaskMemFree, CoUninitialize,
-};
+use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree};
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::{
     FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog,
@@ -22,44 +19,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MESSAGEBOX_STYLE, MessageBoxW};
 use windows::core::{HSTRING, PCWSTR};
 
-/// COM initialised for the duration of a call, and undone exactly when it was
-/// this guard that did it.
-///
-/// `CoInitializeEx` has three outcomes needing three behaviours, which is why
-/// this is a guard rather than a bare pair of calls: `S_OK` means we
-/// initialised the apartment and owe a `CoUninitialize`; `S_FALSE` means it was
-/// already initialised on this thread and we *still* owe one, because the
-/// count is per call; and `RPC_E_CHANGED_MODE` means the thread is already an
-/// MTA member, where uninitialising would tear down an apartment we do not own.
-///
-/// [`pick`] gives itself a fresh thread so only the first of those can happen.
-/// The other two are handled anyway — the cost is four lines, and the failure
-/// they prevent is a folder picker that never appears.
-struct Apartment {
-    owned: bool,
-}
-
-impl Apartment {
-    fn enter() -> Result<Self> {
-        // Apartment-threaded, as the shell dialogs require.
-        let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-        if hr.is_ok() {
-            return Ok(Self { owned: true });
-        }
-        if hr == windows::Win32::Foundation::RPC_E_CHANGED_MODE {
-            return Ok(Self { owned: false });
-        }
-        Err(anyhow::anyhow!("CoInitializeEx failed: {hr:?}"))
-    }
-}
-
-impl Drop for Apartment {
-    fn drop(&mut self) {
-        if self.owned {
-            unsafe { CoUninitialize() };
-        }
-    }
-}
+use crate::com::Apartment;
 
 /// Shows the folder picker, starting at `current`.
 ///

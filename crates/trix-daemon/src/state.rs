@@ -1282,13 +1282,8 @@ impl Daemon {
         self.edit_meta(id, |meta| meta.favorite = favorite)
     }
 
-    /// Opens Explorer with the clip selected.
-    ///
-    /// Built argument by argument, never as a formatted command line: the id is
-    /// whitelisted by [`Self::paths_for`] but the clip *directory* comes
-    /// from user config and can hold spaces, quotes, or an `&`, and handing
-    /// that to a shell would be an injection with the user's own token.
-    /// `std::process::Command` passes the path as one argument.
+    /// Shows the clip in Explorer, reusing a window that is already open on
+    /// the clip folder instead of adding another one beside it.
     ///
     /// A missing `.mp4` is an error here and, unlike [`Daemon::delete`], does
     /// *not* evict the stale cache row. The asymmetry is deliberate: `delete`
@@ -1300,23 +1295,16 @@ impl Daemon {
     /// stale row still has a route out: the `delete` the user reaches for next,
     /// or the `library.refresh` a later plan owns.
     ///
-    /// Explorer's exit code is not checked, and the child is not waited on:
-    /// `explorer.exe /select,` routinely returns non-zero after opening the
-    /// window correctly (it hands the request to the already-running shell
-    /// process and exits). Whether it *spawned* is the only thing that
-    /// distinguishes "the user is looking at their clip" from "nothing
-    /// happened", so that is what is reported.
+    /// The Explorer work is [`crate::reveal::in_explorer`]. What stays here is
+    /// the part that must not move: the id goes through [`Self::paths_for`], so
+    /// no path handed to the shell can have come from an unvalidated id.
     pub fn reveal(&self, id: &str) -> Result<()> {
         let paths = self.paths_for(id)?;
         if !paths.mp4().exists() {
             bail!("no clip {id} in the library");
         }
-        std::process::Command::new("explorer.exe")
-            .arg("/select,")
-            .arg(paths.mp4())
-            .spawn()
-            .with_context(|| format!("could not open Explorer for clip {id}"))?;
-        Ok(())
+        crate::reveal::in_explorer(paths.mp4())
+            .with_context(|| format!("could not show clip {id} in Explorer"))
     }
 
     /// The choke point every id-taking command goes through, and — because

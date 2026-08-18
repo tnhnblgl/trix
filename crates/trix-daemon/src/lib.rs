@@ -20,9 +20,11 @@
 
 pub mod autostart;
 pub mod clients;
+pub mod com;
 pub mod dispatch;
 pub mod folder;
 pub mod pipe;
+pub mod reveal;
 pub mod sound;
 pub mod state;
 pub mod stats;
