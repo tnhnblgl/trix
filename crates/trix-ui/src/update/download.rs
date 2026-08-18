@@ -8,6 +8,7 @@
 
 use std::io::Write as _;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use super::check::user_agent;
 
@@ -62,24 +63,50 @@ pub fn allowed(url: &str) -> Result<(), String> {
 /// misbehaving server bounce the request in circles rather than fail fast.
 const MAX_REDIRECTS: u8 = 5;
 
+/// The one agent every request goes through, built once.
+///
+/// It exists to name the TLS backend. `ureq`'s `TlsProvider` is an enum whose
+/// `Default` is `Rustls`, and that default is what you get from
+/// `ureq::get(..)` and from any agent that does not say otherwise -- the
+/// Cargo feature has no say in it. This crate compiles `ureq` with
+/// `native-tls` and not `rustls`, so the default asks for a backend that was
+/// never linked, and `ureq` answers that by panicking on the first `https`
+/// request. With `panic = "abort"` in the release profile, the panic is the
+/// end of the process: the window vanishes with no error and no dialog, and
+/// since the update check runs when the app opens, it takes the app with it.
+/// That shipped in 0.4.0 and 0.5.0.
+///
+/// `max_redirects(0)` lives here for the same reason -- one place, applied to
+/// every request -- and is explained at [`get`].
+fn agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::Agent::config_builder()
+            .tls_config(
+                ureq::tls::TlsConfig::builder().provider(ureq::tls::TlsProvider::NativeTls).build(),
+            )
+            .max_redirects(0)
+            .build()
+            .into()
+    })
+}
+
 /// Fetches `url`, following redirects one hop at a time rather than leaving
 /// it to `ureq`'s own redirect handling.
 ///
 /// `ureq` does not know about [`ALLOWED_HOSTS`]: left to its defaults it
 /// follows up to ten redirects to whatever host and scheme the server names,
 /// which is exactly what the allowlist exists to close, since a redirect is a
-/// URL this code did not write. So redirects are turned off at the
-/// transport level (`max_redirects(0)`) and each `Location` is checked with
-/// [`allowed`] before it is followed.
+/// URL this code did not write. So redirects are turned off at the transport
+/// level -- `max_redirects(0)`, set once on [`agent`] -- and each `Location`
+/// is checked with [`allowed`] before it is followed.
 fn get(url: &str) -> Result<ureq::http::Response<ureq::Body>, String> {
     let mut current = url.to_string();
     for _ in 0..MAX_REDIRECTS {
         allowed(&current)?;
-        let response = ureq::get(&current)
+        let response = agent()
+            .get(&current)
             .header("User-Agent", &user_agent())
-            .config()
-            .max_redirects(0)
-            .build()
             .call()
             .map_err(|e| format!("could not reach GitHub: {e}"))?;
 
@@ -344,5 +371,46 @@ mod tests {
     fn a_url_that_is_not_a_url_is_refused() {
         assert!(allowed("not a url").is_err());
         assert!(allowed("file:///C:/Windows/System32/cmd.exe").is_err());
+    }
+
+    /// The bug that shipped in 0.4.0 and 0.5.0. `ureq`'s `TlsProvider`
+    /// defaults to `Rustls` regardless of which TLS feature the crate was
+    /// built with, so an agent that never names a provider asks for a backend
+    /// that is not linked, and `ureq` panics on the first `https` request --
+    /// which under `panic = "abort"` ends the process with no window and no
+    /// message. Only a real network call reaches that code, and there is no
+    /// network in a test run, so the assertion is on the configuration the
+    /// call would use.
+    #[test]
+    fn the_agent_asks_for_the_tls_backend_that_is_linked() {
+        assert_eq!(agent().config().tls_config().provider(), ureq::tls::TlsProvider::NativeTls);
+    }
+
+    /// `get` turns redirects off at the transport and follows each `Location`
+    /// itself, so [`allowed`] sees every hop. That setting lives on the shared
+    /// agent now rather than on each request, where it is easy to lose in a
+    /// later edit without any test noticing.
+    #[test]
+    fn the_agent_does_not_follow_redirects_by_itself() {
+        assert_eq!(agent().config().max_redirects(), 0);
+    }
+
+    /// The gate the two tests above only approximate. They read the agent's
+    /// settings; this one makes the TLS handshake actually happen, which is
+    /// the only thing that would have caught the shipped panic. Ignored
+    /// because it needs the internet and GitHub's rate limit is per-IP:
+    ///
+    /// ```text
+    /// cargo test -p trix-ui --bin trix-ui -- --ignored the_real_release_feed
+    /// ```
+    ///
+    /// Run it before shipping any release. A panic here fails as a panic,
+    /// not as a returned `Err` -- that is the difference being tested.
+    #[test]
+    #[ignore = "reaches the real api.github.com"]
+    fn the_real_release_feed_can_actually_be_fetched() {
+        let body = fetch_text(crate::update::check::RELEASE_API)
+            .expect("GitHub should answer the release feed");
+        assert!(body.contains("\"tag_name\""), "not a release payload: {body:.200}");
     }
 }
