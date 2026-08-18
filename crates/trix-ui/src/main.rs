@@ -53,6 +53,7 @@ fn main() {
             update::update_check,
             update::update_install,
             update::update_current_version,
+            update::update_open_releases_page,
         ])
         .run(tauri::generate_context!())
         .expect("the Tauri runtime failed to start");

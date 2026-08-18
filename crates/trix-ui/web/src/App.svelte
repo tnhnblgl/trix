@@ -8,6 +8,9 @@
   import Toasts from './components/Toasts.svelte';
   import { app, updates, wireDaemon, wireUpdates } from './lib/state.svelte';
 
+  // The same page the Rust side checks every opened URL against.
+  const RELEASES_URL = 'https://github.com/tnhnblgl/trix/releases';
+
   wireDaemon();
   wireUpdates();
 </script>
@@ -16,12 +19,25 @@
   <div class="update" class:error={updates.banner.error}>
     {#if updates.banner.error}
       <span>{updates.banner.error}</span>
-      <a href="https://github.com/tnhnblgl/trix/releases" target="_blank" rel="noreferrer">Download it by hand</a>
+      <!-- `href` stays so the target is visible on hover and can be copied, but
+           the click is handled in Rust: a Tauri webview opens no new window, so
+           the default action here is nothing at all. -->
+      <a
+        href={RELEASES_URL}
+        onclick={(e) => {
+          e.preventDefault();
+          updates.openReleasesPage(RELEASES_URL);
+        }}>Download it by hand</a>
     {:else if updates.busy}
       <span>{updates.phase === 'downloading' ? `Downloading… ${updates.percent}%` : 'Installing…'}</span>
     {:else}
       <span>Trix {updates.banner.version} is available</span>
-      <a href={updates.release?.notes_url} target="_blank" rel="noreferrer">What's new</a>
+      <a
+        href={updates.release?.notes_url}
+        onclick={(e) => {
+          e.preventDefault();
+          if (updates.release) updates.openReleasesPage(updates.release.notes_url);
+        }}>What's new</a>
       <button onclick={() => updates.install()}>Update</button>
     {/if}
   </div>

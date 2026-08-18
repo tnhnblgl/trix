@@ -49,7 +49,12 @@ zip = { version = "8", default-features = false, features = ["deflate-flate2-zli
 # `PeekNamedPipe` (Win32_System_Pipes) and `HANDLE` (Win32_Foundation), for the
 # non-blocking pipe reader in `src/pipe_reader.rs` -- see the long comment there.
 # `Win32_System_Threading` is `Supervisor::stop`'s `OpenProcess`/`TerminateProcess`
-# fallback for a daemon that acknowledged `shutdown` and then wedged. These three
+# fallback for a daemon that acknowledged `shutdown` and then wedged.
+# `Win32_UI_Shell` and `Win32_UI_WindowsAndMessaging` are `ShellExecuteW` and the
+# `SW_SHOWNORMAL` its signature names, for `update::update_open_releases_page` --
+# the two links in the update banner, which a Tauri webview cannot open by
+# itself. Cheaper than the alternative, which was a plugin crate plus its npm
+# package for one call. These five
 # features are the whole of what the shipped binary uses, and they are spelled
 # out here rather than inherited with `windows.workspace = true`. Inheriting is
 # not narrower, it is wider: it pulls the workspace's entire list, including
@@ -59,7 +64,8 @@ zip = { version = "8", default-features = false, features = ["deflate-flate2-zli
 # control socket. The version is pinned to the workspace's `0.62` by hand so the
 # two move together; there is no `windows` feature the UI wants that the engine
 # does not already have.
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Pipes", "Win32_System_Threading"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Pipes",
+    "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 # DELIBERATELY ABSENT: trix-core. See spec 3.2 and scripts/ui-isolation.ps1.
 # The UI's every capability arrives over the control socket, which is the only

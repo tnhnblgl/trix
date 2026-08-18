@@ -239,6 +239,56 @@ pub fn update_current_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Opens a Trix releases page in the user's own browser.
+///
+/// This exists because `<a target="_blank">` does nothing at all in a Tauri
+/// window. The webview refuses to open a second window, and with no opener
+/// permission in `capabilities/default.json` there is nowhere else for the
+/// click to go — so both links in the update banner were dead. That was
+/// survivable while the updater worked. It stopped being survivable in 0.5.2,
+/// when GitHub's redirect change broke the download: the banner told people to
+/// download by hand and then ignored them when they tried.
+///
+/// The shell, not the webview, so it lands in whatever browser the user
+/// actually uses. `url` comes from the frontend and, for "What's new", from
+/// the release feed before that — so it is checked against
+/// [`check::RELEASES_URL`] rather than trusted, and a URL that does not start
+/// with it is refused without being passed to anything.
+/// The guard, as its own function so a test can ask it the question without
+/// a browser opening behind every case that passes.
+///
+/// The prefix carries the `/` after the host, and that is what makes it a host
+/// check as well as a path check: `https://github.com@evil.example/…` has no
+/// `/` there, so it cannot match however the rest of the URL is arranged.
+fn is_releases_page(url: &str) -> bool {
+    url.starts_with(check::RELEASES_URL)
+}
+
+#[tauri::command]
+pub fn update_open_releases_page(url: String) -> Result<(), String> {
+    if !is_releases_page(&url) {
+        return Err(format!("{url} is not a Trix releases page, so nothing was opened"));
+    }
+    // `ShellExecuteW` reports failure as a value <= 32, which is the whole of
+    // its error contract -- it is a HINSTANCE for historical reasons and never
+    // a handle worth keeping.
+    let url = windows::core::HSTRING::from(&url);
+    let result = unsafe {
+        windows::Win32::UI::Shell::ShellExecuteW(
+            None,
+            windows::core::w!("open"),
+            &url,
+            None,
+            None,
+            windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        )
+    };
+    if result.0 as isize <= 32 {
+        return Err("Windows could not open your browser".to_string());
+    }
+    Ok(())
+}
+
 /// `Ok(None)` is the common answer and is not shown to the user unless they
 /// asked. A failed check returns `Err` and emits [`UpdateState::Failed`]; the
 /// frontend surfaces either only for a manual "Check now" and discards both for
@@ -618,6 +668,46 @@ mod tests {
             sums_url: format!("{RELEASES}/download/v0.5.0/SHA256SUMS.txt"),
             size: 3_400_000,
         }
+    }
+
+    /// Both links the banner offers must survive the guard, or the fix for
+    /// the dead links is a fix for nothing.
+    #[test]
+    fn the_pages_the_banner_links_to_are_opened() {
+        let release = a_release();
+        assert!(is_releases_page(&release.notes_url));
+        assert!(is_releases_page(check::RELEASES_URL));
+    }
+
+    /// `notes_url` arrives from the release feed and is handed back by the
+    /// webview, so it reaches `ShellExecuteW` as a string from the network.
+    /// The prefix carries the `/` after the host, which is what stops a
+    /// userinfo trick (`https://github.com@evil.example/…`) from matching.
+    #[test]
+    fn a_page_that_is_not_ours_is_not_opened() {
+        for url in [
+            "https://evil.example/",
+            "https://github.com/attacker/trix/releases",
+            "http://github.com/tnhnblgl/trix/releases",
+            "https://github.com@evil.example/tnhnblgl/trix/releases",
+            "file:///C:/Windows/System32/cmd.exe",
+            "",
+        ] {
+            assert!(!is_releases_page(url), "{url} must not be opened");
+        }
+    }
+
+    /// That the command opens an actual browser, which no assertion above
+    /// reaches. Ignored because it opens one:
+    ///
+    /// ```text
+    /// cargo test -p trix-ui --bin trix-ui -- --ignored really_opens_a_browser
+    /// ```
+    #[test]
+    #[ignore = "opens a real browser window"]
+    fn the_releases_page_really_opens_a_browser() {
+        update_open_releases_page(check::RELEASES_URL.to_string())
+            .expect("Windows should open the releases page");
     }
 
     /// The frontend switches on `state`, so these strings are a contract with

@@ -484,6 +484,28 @@ export class UpdateStore {
       this.installInFlight = false;
     }
   }
+
+  /**
+   * Opens a releases page in the user's browser.
+   *
+   * A plain `<a target="_blank">` does nothing in a Tauri window -- the
+   * webview will not open a second window and the app grants no opener
+   * permission -- so both links in the update banner were silently dead. The
+   * one that says "Download it by hand" is the escape hatch for an update
+   * that failed, which made it the worst possible link to have broken.
+   *
+   * Errors go to `console.error` and nowhere else. This is already the
+   * failure path: painting a second red bar over the first, saying the link
+   * did not open, tells the user nothing they can act on that the URL beside
+   * them does not.
+   */
+  async openReleasesPage(url: string) {
+    try {
+      await invoke('update_open_releases_page', { url });
+    } catch (e) {
+      console.error('could not open the releases page:', e);
+    }
+  }
 }
 
 export const updates = new UpdateStore();

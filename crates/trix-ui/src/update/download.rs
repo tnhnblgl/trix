@@ -1,8 +1,8 @@
 //! Getting bytes from GitHub, and from nowhere else.
 //!
 //! Trix made no outbound connection at all before this module. Everything here
-//! is deliberately narrow: three hosts, TLS only, a size ceiling, and no
-//! request body ever. There is nothing to send -- no identifier, no telemetry,
+//! is deliberately narrow: GitHub's hosts only, TLS only, a size ceiling, and
+//! no request body ever. There is nothing to send -- no identifier, no telemetry,
 //! no clip metadata -- and keeping that true is easier when the only function
 //! that can reach the network is this one.
 
@@ -12,10 +12,37 @@ use std::sync::OnceLock;
 
 use super::check::user_agent;
 
-/// Exactly these, matched on the whole host. `github.com` serves
-/// `browser_download_url` and redirects to `objects.githubusercontent.com`;
-/// `api.github.com` answers the release feed.
-const ALLOWED_HOSTS: [&str; 3] = ["api.github.com", "github.com", "objects.githubusercontent.com"];
+/// Exactly these, matched on the whole host. `api.github.com` answers the
+/// release feed; `github.com` serves `browser_download_url` and redirects to
+/// wherever GitHub is keeping release bytes this year.
+const ALLOWED_HOSTS: [&str; 2] = ["api.github.com", "github.com"];
+
+/// Where that redirect lands, matched as a suffix rather than as a name.
+///
+/// This used to be the single host `objects.githubusercontent.com`, and in
+/// 0.5.2 GitHub started answering `browser_download_url` with a redirect to
+/// `release-assets.githubusercontent.com` instead. Every Trix that shipped an
+/// updater refused it -- "updates are not fetched from
+/// `release-assets.githubusercontent.com`" -- so the feature that exists to
+/// spare people a manual download made one necessary for everybody at once.
+/// Pinning the label has now cost that twice, and a rename is GitHub's to make
+/// without telling anyone.
+///
+/// Widening this costs nothing that was being relied on, and it is worth being
+/// precise about why, because a shorter allowlist *looks* safer. This list
+/// never was the trust anchor: [`super::check::RELEASE_DOWNLOAD_PREFIX`] is,
+/// and it pins both the zip and the checksums file to this account's own
+/// releases before a request is made at all. What this list does is stop a
+/// redirect from walking the download off GitHub's infrastructure, and
+/// `githubusercontent.com` is GitHub's infrastructure whatever they put in
+/// front of it. Note that the previous list already allowed `github.com`
+/// whole, which is every account and every repository on it -- so this is not
+/// where the strength was.
+///
+/// The leading dot is the whole of the safety here: `.githubusercontent.com`
+/// cannot be satisfied by `evilgithubusercontent.com`, which a bare
+/// `ends_with("githubusercontent.com")` would wave through.
+const ALLOWED_SUFFIX: &str = ".githubusercontent.com";
 
 /// The release zip is about 3.4 MB. This is not a tight bound -- it exists so a
 /// response that never ends cannot fill the user's disk while a progress bar
@@ -35,7 +62,8 @@ const _: () = assert!(MAX_BYTES > 32 * 1024 * 1024 && MAX_BYTES <= 128 * 1024 * 
 /// invisible, small enough that progress moves smoothly on a slow line.
 const CHUNK: usize = 64 * 1024;
 
-/// Refuses anything that is not HTTPS to one of [`ALLOWED_HOSTS`].
+/// Refuses anything that is not HTTPS to one of [`ALLOWED_HOSTS`] or to a
+/// host under [`ALLOWED_SUFFIX`].
 ///
 /// Applied to redirect targets too, not only to the URL the release feed
 /// named: a redirect is a URL somebody else chose, and the whole point of an
@@ -50,7 +78,7 @@ pub fn allowed(url: &str) -> Result<(), String> {
     let host = host.rsplit('@').next().unwrap_or_default();
     let host = host.split(':').next().unwrap_or_default().to_ascii_lowercase();
 
-    if ALLOWED_HOSTS.contains(&host.as_str()) {
+    if ALLOWED_HOSTS.contains(&host.as_str()) || host.ends_with(ALLOWED_SUFFIX) {
         Ok(())
     } else {
         Err(format!("updates are not fetched from {host:?}"))
@@ -58,7 +86,7 @@ pub fn allowed(url: &str) -> Result<(), String> {
 }
 
 /// Redirect hops handled by hand. The real flow needs exactly one
-/// (`github.com` to `objects.githubusercontent.com`); this leaves headroom
+/// (`github.com` to a `githubusercontent.com` host); this leaves headroom
 /// without approaching `ureq`'s own default of ten, which would let a
 /// misbehaving server bounce the request in circles rather than fail fast.
 const MAX_REDIRECTS: u8 = 5;
@@ -336,9 +364,9 @@ mod tests {
     }
 
     #[test]
-    fn the_three_hosts_the_release_flow_uses_are_allowed() {
+    fn the_hosts_the_release_flow_uses_are_allowed() {
         // api.github.com answers the feed; browser_download_url points at
-        // github.com and redirects to objects.githubusercontent.com.
+        // github.com and redirects to a content host.
         assert!(allowed("https://api.github.com/repos/tnhnblgl/trix/releases/latest").is_ok());
         assert!(allowed("https://github.com/tnhnblgl/trix/releases/download/v0.5.0/a.zip").is_ok());
         assert!(
@@ -346,8 +374,22 @@ mod tests {
         );
     }
 
-    /// A suffix match would accept every one of these. The check is on the
-    /// host component, whole and exact.
+    /// The 0.5.2 break, as a test. GitHub moved release assets to this host,
+    /// and every Trix with an updater refused the redirect and told the user
+    /// to download by hand -- which is the one thing the updater exists to
+    /// avoid. If this ever fails again, so has the updater, for everyone.
+    #[test]
+    fn the_host_github_actually_redirects_release_downloads_to_is_allowed() {
+        assert!(
+            allowed(
+                "https://release-assets.githubusercontent.com/github-production-release-asset/1/2"
+            )
+            .is_ok()
+        );
+    }
+
+    /// The dot in [`ALLOWED_SUFFIX`] is what separates these from the real
+    /// thing, and every one of them would pass a bare `ends_with`.
     #[test]
     fn lookalike_hosts_are_refused() {
         for url in [
@@ -355,6 +397,9 @@ mod tests {
             "https://evil.example/github.com/x.zip",
             "https://notgithub.com/x.zip",
             "https://api.github.com.evil.example/x",
+            "https://evilgithubusercontent.com/x.zip",
+            "https://githubusercontent.com.evil.example/x.zip",
+            "https://release-assets.githubusercontent.com.evil.example/x.zip",
         ] {
             assert!(allowed(url).is_err(), "{url} must not be reachable");
         }
@@ -412,5 +457,42 @@ mod tests {
         let body = fetch_text(crate::update::check::RELEASE_API)
             .expect("GitHub should answer the release feed");
         assert!(body.contains("\"tag_name\""), "not a release payload: {body:.200}");
+    }
+
+    /// The 0.5.2 gate, and the one that would have caught it. Everything else
+    /// about that break passed: the feed was fetched, the release was parsed,
+    /// the banner appeared, the button worked. It failed on the hop from
+    /// `github.com` to the content host, which is a thing only a real request
+    /// does.
+    ///
+    /// ```text
+    /// cargo test -p trix-ui --bin trix-ui -- --ignored the_real_release_download
+    /// ```
+    ///
+    /// Run it before shipping any release, next to the feed test above. It
+    /// deliberately follows the chain to a `200` and reads the first bytes
+    /// rather than the whole zip -- the redirect is what is being tested, and
+    /// the payload has its own checksum gate further along.
+    #[test]
+    #[ignore = "reaches the real github.com and downloads from a release"]
+    fn the_real_release_download_survives_githubs_redirect() {
+        let feed = fetch_text(crate::update::check::RELEASE_API).expect("release feed");
+        let tag = feed
+            .split("\"tag_name\":\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("a tag_name in the feed");
+        let url = format!(
+            "{}{tag}/trix-{tag}-win-x64.zip",
+            crate::update::check::RELEASE_DOWNLOAD_PREFIX
+        );
+
+        let mut response = get(&url).expect("the release zip should be reachable");
+        assert!(response.status().is_success(), "{url} answered {}", response.status());
+
+        let mut head = [0u8; 4];
+        std::io::Read::read_exact(&mut response.body_mut().as_reader(), &mut head)
+            .expect("the redirect should end at real bytes");
+        assert_eq!(&head[..2], b"PK", "not a zip: {head:?}");
     }
 }

@@ -26,12 +26,23 @@ macro_rules! repo {
 /// and prereleases from it, so a prerelease cannot reach users by accident.
 pub const RELEASE_API: &str = concat!("https://api.github.com/repos/", repo!(), "/releases/latest");
 
+/// The releases page, and the prefix every page Trix will open in a browser
+/// has to start with.
+///
+/// Two links in the UI point here — "Download it by hand" on a failed update,
+/// and "What's new" beside an offered one — and the second is a `notes_url`
+/// that arrived from the release feed, so it is a string from the network
+/// being handed to `ShellExecuteW`. Matching on this prefix keeps that to
+/// pages of this account's own releases: a `notes_url` naming somewhere else
+/// opens nothing rather than opening whatever it named.
+pub const RELEASES_URL: &str = concat!("https://github.com/", repo!(), "/releases");
+
 /// Where a file has to live before Trix will download it, check it and run it.
 ///
 /// [`super::download::allowed`] is the other half of this and cannot replace
 /// it: it constrains the *host*, and it has to, because it is also applied to
 /// redirect targets — URLs nobody here wrote — and the real download hops from
-/// `github.com` to `objects.githubusercontent.com`. That leaves `github.com`
+/// `github.com` to a `githubusercontent.com` host. That leaves `github.com`
 /// allowlisted whole, which is every account and every repository on it.
 ///
 /// `update_install` takes its [`Release`] as a command argument, so the struct
