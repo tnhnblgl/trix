@@ -1,4 +1,4 @@
-Trix 0.5.2
+Trix 0.5.3
 ==========
 
 A clip recorder for Windows, for people whose PC cannot spare the frames.
@@ -6,6 +6,24 @@ Trix keeps the last few seconds of your screen in memory and writes them to
 a file when you press a key. Capture and encoding run on the GPU, so the
 cost to your game is close to nothing, and the app itself stays out of the
 way while you play.
+
+
+FIXED IN 0.5.3
+--------------
+
+The updater could not download anything. GitHub moved where release files
+are served from, Trix did not recognise the new address, and updating
+stopped with "updates are not fetched from
+release-assets.githubusercontent.com". The "Download it by hand" link
+offered underneath it did nothing when clicked, so there was no way forward
+at all. Both are fixed, and links in the app now open in your browser.
+
+PLEASE NOTE: this is a version you have to install by hand, once. Every
+release up to and including 0.5.2 carries the broken updater inside it, so
+none of them can fetch this one -- that is the bug. Download 0.5.3 from the
+releases page and unzip it over your old folder. Your settings and your
+clips live elsewhere and are not touched. From 0.5.3 onward the in-app
+updater works normally again.
 
 
 FIXED IN 0.5.2
@@ -28,7 +46,7 @@ component that was never included in the build, and that ended the app on the
 spot. It is included now.
 
 If you are on 0.4.0 or 0.5.0, Trix cannot update itself out of this, because
-the update check is the thing that closed it. Download 0.5.2 by hand from the
+the update check is the thing that closed it. Download 0.5.3 by hand from the
 releases page and unzip it over your old folder. Your settings and your clips
 are somewhere else and are not touched.
 
