@@ -13,6 +13,9 @@
 !/crates/trix-ui/icon-source.png
 !/crates/trix-ui/icons/**/*.png
 
+# the brand artwork the app icon is cut from -- shipped, not probed.
+!/assets/*.png
+
 # the built-in clip-saved chime is shipped, not probed -- un-ignore it from
 # the *.wav rule above.
 !/crates/trix-daemon/assets/clip.wav
