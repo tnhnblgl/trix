@@ -72,9 +72,9 @@ pub enum Action {
     /// desktop app, or fall back to the clips folder if it is not installed.
     OpenApp,
     OpenClipsFolder,
-    /// Tray menu: pick a new clips folder. Handled on the worker thread
-    /// because a modal dialog lasts as long as the user takes to browse, and
-    /// the pump thread must stay free to keep the tray icon alive.
+    /// Pick a new clips folder — the tray menu, or the settings page over
+    /// `folder.pick`. Both arrive here, and like [`Self::PickClipSound`] the
+    /// handler moves the dialog onto a thread of its own.
     ChangeClipsFolder,
     /// The settings page asked for the "choose a clip sound" dialog. Handled
     /// on a thread of its own rather than on the worker, so the clip hotkey
@@ -119,6 +119,9 @@ pub(crate) const WM_TRIX_ARMED: u32 = WM_APP + 0x11;
 pub(crate) const WM_TRIX_REHOTKEY: u32 = WM_APP + 0x12;
 /// Asks the pump for the "choose a clip sound" dialog.
 pub(crate) const WM_TRIX_PICK_SOUND: u32 = WM_APP + 0x13;
+/// Asks the pump for the "change clips folder" dialog — the same one the tray
+/// menu opens, asked for by the settings page instead.
+pub(crate) const WM_TRIX_PICK_FOLDER: u32 = WM_APP + 0x14;
 /// The hotkey id. Process-unique is enough — the window owns the only one.
 const HOTKEY_ID: i32 = 1;
 
@@ -284,6 +287,30 @@ pub fn rebind_hotkey(spec: &str) {
 /// `WINDOW_HWND` is process-global, and a test in this crate could otherwise
 /// read a live pump another test is running and open a real file dialog on the
 /// developer's desktop.
+/// Asks the pump for the "change clips folder" dialog. Returns immediately.
+///
+/// The settings page's route to the dialog the tray menu already had. Same
+/// no-op-under-test guard as [`request_sound_pick`] below, and for the same
+/// reason: `WINDOW_HWND` is process-global, so a test could otherwise open a
+/// real folder browser on the developer's desktop.
+pub fn request_folder_pick() {
+    if cfg!(test) {
+        return;
+    }
+    let hwnd = WINDOW_HWND.load(Ordering::Relaxed);
+    if hwnd == 0 {
+        return;
+    }
+    unsafe {
+        let _ = PostMessageW(
+            Some(HWND(hwnd as *mut core::ffi::c_void)),
+            WM_TRIX_PICK_FOLDER,
+            WPARAM(0),
+            LPARAM(0),
+        );
+    }
+}
+
 pub fn request_sound_pick() {
     if cfg!(test) {
         return;
@@ -388,6 +415,17 @@ unsafe extern "system" fn wnd_proc(
                     }
                 });
             }
+            LRESULT(0)
+        }
+        WM_TRIX_PICK_FOLDER => {
+            // Forwarding only, exactly like the sound arm below: the dialog
+            // must not run on the pump, or the tray icon stops answering for
+            // as long as the user browses.
+            ACTIONS.with(|a| {
+                if let Some(tx) = a.borrow().as_ref() {
+                    offer(tx, Action::ChangeClipsFolder);
+                }
+            });
             LRESULT(0)
         }
         WM_TRIX_PICK_SOUND => {
@@ -696,56 +734,97 @@ fn open_app(daemon: &Arc<Daemon>) {
     }
 }
 
-/// The tray's "Change clips folder…", end to end. Worker thread, where the
-/// modal dialog is free to block for as long as the user browses.
+/// "Change clips folder…", end to end — the tray menu's item and the settings
+/// page's `folder.pick`, which are the same dialog and the same handler.
+///
+/// **On a detached thread, like [`choose_clip_sound`] below.** The worker
+/// thread also handles [`Action::Clip`], so a modal dialog held open on it
+/// means the clip hotkey does nothing until the user finishes browsing. That
+/// was survivable while this lived only in a tray menu; it is not once the
+/// settings page has a button for it, and the fix was always the sound
+/// dialog's.
+///
+/// The guard makes a second click while a dialog is open a no-op rather than a
+/// second dialog — and there are now two places to click.
 ///
 /// The chosen path goes through [`Daemon::set_config`] rather than being
-/// applied here, and that is the point of the whole feature: the tray inherits
-/// the control protocol's validation, its all-or-nothing write to
+/// applied here, and that is the point of the whole feature: both callers
+/// inherit the control protocol's validation, its all-or-nothing write to
 /// `config.toml`, and its live in-memory apply. A second path that wrote the
 /// setting itself would be a second set of rules to keep true, and the one that
 /// drifted would be this one — it has no tests, because it is a dialog.
 fn change_clips_folder(daemon: &Arc<Daemon>) {
-    let current = daemon.clip_dir();
+    static PICKING: AtomicBool = AtomicBool::new(false);
+    if PICKING.swap(true, Ordering::SeqCst) {
+        return;
+    }
 
-    let chosen = match crate::folder::pick(&current) {
-        Ok(Some(path)) => path,
-        // Cancelled. Not a failure, and deliberately silent: answering a
-        // dialog the user dismissed on purpose with a message box is the
-        // behaviour that makes people stop opening menus.
-        Ok(None) => return,
-        Err(e) => {
-            let detail = format!("{e:#}");
-            tracing::warn!(error = %detail, "the folder picker failed");
-            crate::folder::report_error(&format!("Could not open the folder picker.\n\n{detail}"));
-            return;
-        }
-    };
+    let daemon = Arc::clone(daemon);
+    let spawned = std::thread::Builder::new().name("trix-folder-dialog".into()).spawn(move || {
+        // Read inside the thread rather than before the spawn: this same value
+        // is what the refusal message quotes, and it must be the folder clips
+        // are *still* going to, not one captured before the user browsed.
+        let current = daemon.clip_dir();
 
-    let mut values = serde_json::Map::new();
-    values
-        .insert("clip_dir".to_string(), serde_json::Value::from(chosen.to_string_lossy().as_ref()));
-    // Through the dispatch helper, not `set_config` directly: an already-open
-    // settings page only learns a folder changed from the tray via the
-    // `config_changed` broadcast that helper sends -- see its doc comment.
-    match crate::dispatch::apply_config_and_broadcast(daemon, &values) {
-        // No re-arm: `clip_dir` is read per clip, so a running capture keeps
-        // its ring and the very next clip lands in the new folder.
-        Ok(_) => tracing::info!(dir = %chosen.display(), "clips folder changed from the tray"),
-        Err(detail) => {
-            tracing::warn!(
-                error = %detail,
-                dir = %chosen.display(),
-                "the chosen clips folder was refused"
-            );
-            // Says where clips are still going, not just what failed. A user
-            // told only "that didn't work" does not know whether they are now
-            // recording to nowhere.
-            crate::folder::report_error(&format!(
-                "That folder can't be used:\n\n{detail}\n\nClips are still being saved to:\n{}",
-                current.display()
-            ));
+        let chosen = crate::folder::pick(&current);
+        PICKING.store(false, Ordering::SeqCst);
+
+        let chosen = match chosen {
+            Ok(Some(path)) => path,
+            // Cancelled. Not a failure, and deliberately silent: answering a
+            // dialog the user dismissed on purpose with a message box is the
+            // behaviour that makes people stop opening menus.
+            Ok(None) => return,
+            Err(e) => {
+                let detail = format!("{e:#}");
+                tracing::warn!(error = %detail, "the folder picker failed");
+                crate::folder::report_error(&format!(
+                    "Could not open the folder picker.
+
+{detail}"
+                ));
+                return;
+            }
+        };
+
+        let mut values = serde_json::Map::new();
+        values.insert(
+            "clip_dir".to_string(),
+            serde_json::Value::from(chosen.to_string_lossy().as_ref()),
+        );
+        // Through the dispatch helper, not `set_config` directly: an
+        // already-open settings page only learns a folder changed elsewhere
+        // via the `config_changed` broadcast that helper sends -- see its doc
+        // comment.
+        match crate::dispatch::apply_config_and_broadcast(&daemon, &values) {
+            // No re-arm: `clip_dir` is read per clip, so a running capture
+            // keeps its ring and the very next clip lands in the new folder.
+            Ok(_) => tracing::info!(dir = %chosen.display(), "clips folder changed"),
+            Err(detail) => {
+                tracing::warn!(
+                    error = %detail,
+                    dir = %chosen.display(),
+                    "the chosen clips folder was refused"
+                );
+                // Says where clips are still going, not just what failed. A
+                // user told only "that didn't work" does not know whether they
+                // are now recording to nowhere.
+                crate::folder::report_error(&format!(
+                    "That folder can't be used:
+
+{detail}
+
+Clips are still being saved to:
+{}",
+                    current.display()
+                ));
+            }
         }
+    });
+
+    if spawned.is_err() {
+        PICKING.store(false, Ordering::SeqCst);
+        tracing::warn!("could not start the folder-dialog thread");
     }
 }
 

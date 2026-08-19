@@ -42,6 +42,13 @@ pub enum Command {
     StatsSubscribe {
         enabled: bool,
     },
+    /// Opens the "change clips folder" dialog. Answers immediately for the
+    /// same reason [`Self::SoundPick`] does, and the result arrives the same
+    /// way: as a `config_changed` event carrying the new `clip_dir`.
+    ///
+    /// The tray has had this dialog all along; this is the settings page
+    /// asking for the same one, so both end at the same handler.
+    FolderPick,
     /// Opens the "choose a sound" dialog. Answers immediately: the dialog
     /// outlives the request by as long as the user takes to browse, and the
     /// result arrives as a `config_changed` event, not as this reply.
@@ -94,6 +101,7 @@ impl Command {
             "monitors.list" => Self::MonitorsList,
             "encoders.list" => Self::EncodersList,
             "stats.subscribe" => Self::StatsSubscribe { enabled: bool_arg(req, "enabled")? },
+            "folder.pick" => Self::FolderPick,
             "sound.pick" => Self::SoundPick,
             "sound.test" => Self::SoundTest,
             "shutdown" => Self::Shutdown,
@@ -204,7 +212,8 @@ mod tests {
     }
 
     #[test]
-    fn the_sound_commands_parse() {
+    fn the_dialog_commands_parse() {
+        assert_eq!(parse(r#"{"id":0,"cmd":"folder.pick"}"#).1, Ok(Command::FolderPick));
         assert_eq!(parse(r#"{"id":1,"cmd":"sound.pick"}"#).1, Ok(Command::SoundPick));
         assert_eq!(parse(r#"{"id":2,"cmd":"sound.test"}"#).1, Ok(Command::SoundTest));
     }

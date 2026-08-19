@@ -96,11 +96,15 @@ impl ClientHandler for Daemon {
                 Response::ok(request.id, Value::Object(fields))
             }
             Ok(Command::Shutdown) => shutdown(request.id),
-            // Answers now, not when the dialog closes. A modal dialog lasts as
-            // long as a person takes to browse, and a socket command that
-            // blocked for that long would sit on this connection's reader while
-            // the settings page waited on a reply that is not the answer
+            // Both dialogs answer now, not when the dialog closes. A modal dialog
+            // lasts as long as a person takes to browse, and a socket command
+            // that blocked for that long would sit on this connection's reader
+            // while the settings page waited on a reply that is not the answer
             // anyway -- the answer arrives as `config_changed`.
+            Ok(Command::FolderPick) => {
+                crate::window::request_folder_pick();
+                Response::ok(request.id, Value::Object(Map::new()))
+            }
             Ok(Command::SoundPick) => {
                 crate::window::request_sound_pick();
                 Response::ok(request.id, Value::Object(Map::new()))
@@ -140,14 +144,16 @@ pub(crate) fn apply_config_and_broadcast(
     // failed file write) has already passed and the change has
     // actually landed, so this cannot fire for one that did not.
     //
-    // Every accepted key, not just `clip_dir`: the tray's "Change
-    // clips folder..." is the only reachable way to change `clip_dir`
-    // outside this app, and it never told an already-open app
-    // anything, so its thumbnails and playback silently broke until
-    // the daemon restarted. Broadcasting unconditionally, rather than
-    // only when `clip_dir` was one of the keys, means every client
-    // (including the one that sent this `config.set`) learns the same
-    // way regardless of who changed what.
+    // Every accepted key, not just `clip_dir`: the folder dialog is
+    // the daemon's, whether the tray menu or the settings page's
+    // `folder.pick` opened it, so the change never passes through the
+    // asking client's own `config.set` reply. Before this event a
+    // moved folder told an already-open app nothing, and its
+    // thumbnails and playback silently broke until the daemon
+    // restarted. Broadcasting unconditionally, rather than only when
+    // `clip_dir` was one of the keys, means every client (including
+    // the one that sent this `config.set`) learns the same way
+    // regardless of who changed what.
     let mut changed = update.accepted.clone();
     changed.insert("clip_dir_resolved".to_string(), Value::from(update.clip_dir_resolved.as_str()));
     daemon.clients.broadcast(&Event::new("config_changed", Value::Object(changed)));
@@ -692,10 +698,11 @@ mod tests {
     /// The event `daemon.rs`'s asset-scope grant and `state.svelte.ts`'s
     /// status refresh both depend on (whole-branch review finding 2): every
     /// accepted `config.set` broadcasts `config_changed` to every registered
-    /// client, not just the one that sent it. The tray's "Change clips
-    /// folder…" is the only reachable way to change `clip_dir` outside a
-    /// connected UI, and without this event an already-open app never learns
-    /// its asset scope has gone stale.
+    /// client, not just the one that sent it. Both routes to "Change clips
+    /// folder…" — the tray menu and the settings page's `folder.pick` — land
+    /// in the daemon rather than in a client's own `config.set`, so without
+    /// this event an already-open app never learns its asset scope has gone
+    /// stale.
     #[test]
     fn config_set_broadcasts_config_changed_with_the_accepted_keys_and_clip_dir_resolved() {
         let (daemon, _path, dir) = with_scratch_config("config-changed");
@@ -1198,6 +1205,17 @@ mod tests {
             daemon.dispatch(1, &request(14, "status")).ok,
             "three bad requests must leave the daemon answering the fourth"
         );
+    }
+
+    /// The folder half of the pair below, and the same caveat applies:
+    /// `request_folder_pick` is a no-op under `cfg!(test)`, so this proves
+    /// parsing and an `ok` reply and nothing about timing. It is also what
+    /// stops `cargo test` opening a folder browser on the developer's desktop.
+    #[test]
+    fn folder_pick_answers_immediately() {
+        let response = idle("folder-pick").dispatch(1, &request(1, "folder.pick"));
+        assert!(response.ok, "folder.pick must succeed: {:?}", response.error);
+        assert_eq!(response.id, 1);
     }
 
     /// Proves only that `sound.pick` parses and answers `ok` — nothing about

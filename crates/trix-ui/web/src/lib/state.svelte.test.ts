@@ -404,12 +404,13 @@ describe('wireDaemon: clip_saved', () => {
 });
 
 describe('wireDaemon: config_changed', () => {
-  // The tray's "Change clips folder..." is the only reachable way to change
-  // clip_dir outside this app, and it never told an open app anything before
-  // this event existed -- the grid kept building asset: URLs against the old
-  // directory. Refreshing status is what picks up the new clip_dir the same
-  // way the `armed`/`disarmed` cases already do.
-  it('refreshes status so a tray-driven clip_dir change reaches app.clipDir', async () => {
+  // The folder dialog is the daemon's -- the tray menu and this page's
+  // `folder.pick` both end there -- so a moved folder never arrives as a
+  // `config.set` reply this app could read. Before this event existed it told
+  // an open app nothing, and the grid kept building asset: URLs against the
+  // old directory. Refreshing status is what picks up the new clip_dir the
+  // same way the `armed`/`disarmed` cases already do.
+  it('refreshes status so a daemon-driven clip_dir change reaches app.clipDir', async () => {
     app.status = statusPayload();
     callMock.mockResolvedValue({ ...statusPayload(), clip_dir: 'D:\\new-clips' });
     const handle = registerDaemonEventHandler();
@@ -418,6 +419,49 @@ describe('wireDaemon: config_changed', () => {
     await vi.waitFor(() => expect(app.clipDir).toBe('D:\\new-clips'));
 
     expect(callMock).toHaveBeenCalledWith('status');
+  });
+  // Status alone is not enough once the folder holds *different* clips, which
+  // is the normal case: the daemon rebuilt its library cache for the new
+  // directory, so the list on screen is stale until this asks for it again.
+  it('reloads the clip list when the folder actually moved', async () => {
+    app.status = statusPayload();
+    app.clips = [clip('from-the-old-folder')];
+    app.total = 1;
+    callMock.mockImplementation((cmd: string) => {
+      if (cmd === 'status') {
+        return Promise.resolve({ ...statusPayload(), clip_dir: 'D:\new-clips' });
+      }
+      if (cmd === 'library.list') {
+        return Promise.resolve({ clips: [clip('in-the-new-folder')], total: 1, offset: 0 });
+      }
+      return Promise.resolve({});
+    });
+    const handle = registerDaemonEventHandler();
+
+    handle({ event: 'config_changed', data: { clip_dir_resolved: 'D:\new-clips' } });
+
+    await vi.waitFor(() => expect(app.clips.map((c) => c.id)).toEqual(['in-the-new-folder']));
+  });
+
+  // Every accepted `config.set` broadcasts this event carrying
+  // `clip_dir_resolved`, whether or not `clip_dir` was among the keys -- so a
+  // bitrate nudge lands here too. Reloading on those would refetch the page and
+  // reset `selected` to 0, moving the selection out from under whoever is
+  // sitting in settings.
+  it('leaves the clip list and the selection alone when the folder did not move', async () => {
+    app.status = statusPayload();
+    app.clips = [clip('a'), clip('b')];
+    app.total = 2;
+    app.selected = 1;
+    callMock.mockResolvedValue(statusPayload());
+    const handle = registerDaemonEventHandler();
+
+    handle({ event: 'config_changed', data: { clip_dir_resolved: statusPayload().clip_dir } });
+    await vi.waitFor(() => expect(callMock).toHaveBeenCalledWith('status'));
+
+    expect(callMock).not.toHaveBeenCalledWith('library.list', expect.anything());
+    expect(app.clips.map((c) => c.id)).toEqual(['a', 'b']);
+    expect(app.selected).toBe(1);
   });
 });
 

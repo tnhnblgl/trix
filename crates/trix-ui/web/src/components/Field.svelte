@@ -26,6 +26,7 @@
     oncapture,
     onsavehotkey,
     ontogglelisten,
+    onpickfolder,
     onpicksound,
     ontestsound,
   }: {
@@ -39,6 +40,7 @@
     oncapture: (e: KeyboardEvent) => void;
     onsavehotkey: () => void;
     ontogglelisten: () => void;
+    onpickfolder: () => void;
     onpicksound: () => void;
     ontestsound: () => void;
   } = $props();
@@ -98,8 +100,16 @@
         onchange={(e) => onset(field.key, Number(e.currentTarget.value))} />
       <span class="hint">{shown}%</span>
     {:else if field.kind === 'folder'}
+      <!-- `clip_dir_resolved`, not `clip_dir`: the config key is empty by
+           default and an empty box tells the user nothing about where their
+           clips actually are. Readonly rather than editable for the same
+           reason the sound row is -- the daemon owns the picker, and a typed
+           path that does not exist is a refusal the user has to decode. Reset
+           writes `clip_dir` itself (the empty string), because "back to the
+           default" is a value the picker cannot express. -->
       <input id={field.key} readonly value={String(config['clip_dir_resolved'] ?? '')} />
-      <span class="hint">Change it from the Trix tray icon.</span>
+      <button onclick={onpickfolder}>Choose...</button>
+      <button disabled={!config[field.key]} onclick={() => onset(field.key, '')}>Reset</button>
     {:else if field.kind === 'sound'}
       <input id={field.key} readonly disabled={!config['clip_sound']}
         value={String(config[field.key] ?? '') || "Trix's built-in sound"} />

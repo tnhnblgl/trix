@@ -80,6 +80,18 @@
     }
   }
 
+  async function pickFolder() {
+    try {
+      // Same contract as `pickSound` below: this answers as soon as the dialog
+      // is open, and the chosen folder arrives as a `config_changed` event.
+      // The daemon reports a folder it cannot use in its own message box, so
+      // there is nothing to toast here beyond the dialog failing to open.
+      await call('folder.pick');
+    } catch (e) {
+      app.toast('error', String(e));
+    }
+  }
+
   async function pickSound() {
     try {
       // Answers as soon as the dialog is open, not when it closes. The chosen
@@ -178,6 +190,7 @@
         onset={set}
         oncapture={captureHotkey}
         onsavehotkey={saveHotkey}
+        onpickfolder={pickFolder}
         onpicksound={pickSound}
         ontestsound={testSound}
         ontogglelisten={() => {

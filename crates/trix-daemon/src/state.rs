@@ -875,8 +875,16 @@ impl Daemon {
         // and this message is shown verbatim in the tray's folder-picker
         // message box, where "config.set" is jargon about a protocol the user
         // has never heard of.
+        //
+        // The comparison against the *old* config, taken while its guard is
+        // still held, is what tells a real move from a `clip_dir` set to what
+        // it already was. Both sides go through `clip_dir_path`, so clearing
+        // the key back to "" counts as a move only when the default resolves
+        // somewhere else. The rescan at the end of this function reads it.
+        let mut clip_dir_moved = false;
         if values.contains_key("clip_dir") {
             library::ensure_writable(&updated.clip_dir_path())?;
+            clip_dir_moved = updated.clip_dir_path() != config.clip_dir_path();
         }
 
         // Decoded here, before anything is written, for the same all-or-nothing
@@ -1027,6 +1035,33 @@ impl Daemon {
         // of `values`, so a client always learns where clips land now.
         let clip_dir_resolved = config.clip_dir_path().to_string_lossy().into_owned();
 
+        // The library cache was scanned against the *old* directory, and every
+        // mutation since has kept it current for that one. A move invalidates
+        // all of it at once: without this, `library.list` keeps answering with
+        // clips that are no longer under the configured folder, a UI keeps
+        // building `asset:` URLs that now resolve nowhere, and
+        // `enforce_library_limit` prunes against ids whose files it can no
+        // longer find.
+        //
+        // The guard is dropped first because `rescan_library` locks `config`
+        // itself and this is a non-reentrant `Mutex`. Nothing below reads
+        // `config` again -- `clip_dir_resolved` was taken from it on the line
+        // above precisely so this drop is safe.
+        //
+        // A failed scan is a warning, not an error. The setting is written and
+        // applied by now; answering `config.set` with a failure would tell the
+        // user their folder change did not take when it did.
+        if clip_dir_moved {
+            drop(config);
+            if let Err(e) = self.rescan_library() {
+                tracing::warn!(
+                    error = %format!("{e:#}"),
+                    dir = %clip_dir_resolved,
+                    "the new clips folder could not be scanned; the library list is stale"
+                );
+            }
+        }
+
         Ok(ConfigUpdate { accepted, requires_rearm, clip_dir_resolved })
     }
 
@@ -1171,13 +1206,15 @@ impl Daemon {
 
     /// Re-reads the clip directory and replaces the cache.
     ///
-    /// Deliberately not wired to a command in this build: [`Daemon::new`] scans
-    /// at startup and every mutation below keeps the cache current, which is
-    /// the whole point of caching it. It exists as the seam for the two things
-    /// that need one — a test that wants a known library without depending on
-    /// what the startup scan happened to see, and the `library.refresh` a later
-    /// plan will want for "I deleted clips in Explorer behind your back", which
-    /// is then a one-line dispatch arm rather than a new code path.
+    /// Still wired to no command: [`Daemon::new`] scans at startup and every
+    /// mutation below keeps the cache current, which is the whole point of
+    /// caching it. Three things need the seam anyway — [`Daemon::set_config`],
+    /// where a `clip_dir` move invalidates the whole cache at once and there is
+    /// nothing incremental to do about it; a test that wants a known library
+    /// without depending on what the startup scan happened to see; and the
+    /// `library.refresh` a later plan will want for "I deleted clips in
+    /// Explorer behind your back", which is then a one-line dispatch arm rather
+    /// than a new code path.
     pub fn rescan_library(&self) -> Result<()> {
         let dir = self.lock_config().clip_dir_path();
         let clips = scan_and_log(&dir)?;
@@ -2072,6 +2109,71 @@ mod tests {
 
         let line = rx.try_recv().expect("a saved clip must still broadcast clip_saved");
         assert!(line.contains("clip_saved"), "the sound must not displace the event: {line}");
+    }
+
+    /// Writes one clip into `dir` and returns its id.
+    fn plant(dir: &Path, id: &str) -> String {
+        std::fs::create_dir_all(dir).expect("clip directory");
+        std::fs::write(trix_core::library::mp4_path(dir, id), b"video").expect("mp4");
+        trix_core::library::write_sidecar(dir, &meta(id)).expect("sidecar");
+        id.to_string()
+    }
+
+    /// The cache `library.list` answers from was scanned against the old
+    /// folder. Moving `clip_dir` invalidates every entry at once, so the move
+    /// has to rebuild it — otherwise the grid keeps listing clips that are not
+    /// in the configured folder any more, and every thumbnail points nowhere.
+    #[test]
+    fn moving_the_clips_folder_relists_what_is_in_the_new_one() {
+        let (daemon, dir) = writable("clip-dir-move");
+        let before = plant(&dir.join("clips"), "20260726_100000");
+        daemon.rescan_library().expect("the starting folder scans");
+        assert_eq!(
+            daemon.list(0, 50).clips.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
+            vec![before],
+            "the fixture starts with the clip in the configured folder"
+        );
+
+        let moved = dir.join("moved");
+        let after = plant(&moved, "20260726_120000");
+        let mut values = Map::new();
+        values.insert("clip_dir".into(), Value::from(moved.to_string_lossy().as_ref()));
+        daemon.set_config(&values).expect("a writable folder is accepted");
+
+        let page = daemon.list(0, 50);
+        assert_eq!(
+            page.clips.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
+            vec![after],
+            "the move must leave the library listing the new folder, not the old one"
+        );
+        assert_eq!(page.total, 1, "the old folder's clip must not be counted twice");
+        cleanup(&dir);
+    }
+
+    /// The other half: a `clip_dir` that resolves to where it already pointed
+    /// is not a move, and must not throw the cache away. `record_saved_clip`
+    /// keeps that cache current between scans, so a needless rescan is not
+    /// merely wasted I/O on a big library — it is the one place a clip written
+    /// but not yet flushed could disappear from the list.
+    #[test]
+    fn setting_the_clips_folder_to_where_it_already_is_keeps_the_cache() {
+        let (daemon, dir) = writable("clip-dir-same");
+        let clips = dir.join("clips");
+        std::fs::create_dir_all(&clips).expect("clip directory");
+        // Only in the cache, never on disk: a rescan would drop it, and that is
+        // exactly what this test is watching for.
+        daemon.lock_library().push(meta("20260726_100000"));
+
+        let mut values = Map::new();
+        values.insert("clip_dir".into(), Value::from(clips.to_string_lossy().as_ref()));
+        daemon.set_config(&values).expect("the folder it is already using is acceptable");
+
+        assert_eq!(
+            daemon.list(0, 50).total,
+            1,
+            "setting clip_dir to its current value must not rescan"
+        );
+        cleanup(&dir);
     }
 
     /// One `config.set` call carrying a single key.

@@ -249,20 +249,41 @@ export function wireDaemon() {
     switch (event.event) {
       case 'armed':
       case 'disarmed':
-      // The tray's "Change clips folder..." is the only reachable way to
-      // change `clip_dir` outside this app, and it never told an open app
-      // anything -- the grid kept building `asset:` URLs against the old
-      // directory, so every thumbnail broke and every clip stopped playing
-      // until the daemon restarted. `config_changed` (state.rs's
-      // `set_config`, broadcast from `dispatch.rs`) fires for every accepted
-      // `config.set` regardless of who sent it; refreshing `status` here
-      // picks up the new `clip_dir` the same way `armed`/`disarmed` do. The
-      // Rust side grants the new directory to the asset scope off this same
-      // event (see `daemon.rs`), so the two together are what makes a
-      // tray-driven folder change work in an already-open window.
-      case 'config_changed':
+      // `clip_dir` changes without this app ever seeing a `config.set`
+      // reply: the folder dialog belongs to the daemon, whether the tray menu
+      // or this page's `folder.pick` opened it. Before this event that told an
+      // open app nothing -- the grid kept building `asset:` URLs against the
+      // old directory, so every thumbnail broke and every clip stopped playing
+      // until the daemon restarted. `config_changed` (state.rs's `set_config`,
+      // broadcast from `dispatch.rs`) fires for every accepted `config.set`
+      // regardless of who sent it; refreshing `status` here picks up the new
+      // `clip_dir` the same way `armed`/`disarmed` do. The Rust side grants
+      // the new directory to the asset scope off this same event (see
+      // `daemon.rs`), so the two together are what makes a folder change work
+      // in an already-open window.
+      case 'config_changed': {
+        // Refreshing status is enough for a folder that moved *underneath* the
+        // same clips; it is not enough for a folder that moved to different
+        // ones. `library.list` answers from the daemon's cache, which the move
+        // rebuilt (state.rs's `set_config`), so the app has to ask again or it
+        // keeps rendering the old folder's clips against the new folder's
+        // asset scope -- every thumbnail broken, every clip unplayable.
+        //
+        // Conditional on the folder actually changing, not run on every
+        // `config_changed`: `clip_dir_resolved` rides along on all of them
+        // (dispatch.rs sends it whether or not `clip_dir` was among the keys),
+        // and `loadClips` resets `selected` to 0. Reloading on every bitrate
+        // nudge would move the selection out from under whoever is in
+        // settings. `status.clip_dir` is the same resolved path, which is what
+        // makes this a fair comparison -- and it is read before
+        // `refreshStatus` replaces it.
+        const moved = String(data['clip_dir_resolved'] ?? '') !== app.clipDir;
         void app.refreshStatus();
+        if (moved) {
+          void app.loadClips();
+        }
         break;
+      }
       case 'stats':
         app.ringUsed = Number(data['ring_seconds_used'] ?? 0);
         break;
