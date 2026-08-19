@@ -1,4 +1,4 @@
-Trix 0.5.3
+Trix 0.6.0
 ==========
 
 A clip recorder for Windows, for people whose PC cannot spare the frames.
@@ -6,6 +6,22 @@ Trix keeps the last few seconds of your screen in memory and writes them to
 a file when you press a key. Capture and encoding run on the GPU, so the
 cost to your game is close to nothing, and the app itself stays out of the
 way while you play.
+
+
+NEW IN 0.6.0
+------------
+
+You can change where clips are saved without leaving the app:
+Settings -> Trix -> Clips folder -> Choose... It opens the same picker the
+tray icon has always had, so moving your library no longer means hunting
+for the tray icon first. The box shows the folder your clips are really
+going to, and Reset puts it back to %USERPROFILE%\Videos\Trix.
+
+Clips you have already saved do not move. Changing the folder changes where
+the NEXT clip is written; the ones you have stay where they are, and drop
+out of the app's list until you point Trix back at them.
+
+Trix also has a proper icon now, in place of the plain circle.
 
 
 FIXED IN 0.5.3
@@ -20,7 +36,7 @@ at all. Both are fixed, and links in the app now open in your browser.
 
 PLEASE NOTE: this is a version you have to install by hand, once. Every
 release up to and including 0.5.2 carries the broken updater inside it, so
-none of them can fetch this one -- that is the bug. Download 0.5.3 from the
+none of them can fetch this one -- that is the bug. Download 0.6.0 from the
 releases page and unzip it over your old folder. Your settings and your
 clips live elsewhere and are not touched. From 0.5.3 onward the in-app
 updater works normally again.
@@ -46,7 +62,7 @@ component that was never included in the build, and that ended the app on the
 spot. It is included now.
 
 If you are on 0.4.0 or 0.5.0, Trix cannot update itself out of this, because
-the update check is the thing that closed it. Download 0.5.3 by hand from the
+the update check is the thing that closed it. Download 0.6.0 by hand from the
 releases page and unzip it over your old folder. Your settings and your clips
 are somewhere else and are not touched.
 
