@@ -1415,12 +1415,47 @@ impl Daemon {
         // against one folder and write the file into another.
         let new_paths = ClipPaths::for_id(dir.to_path_buf(), &new_id)?;
 
-        let outcome = export::export_fast(export::FastExport {
+        // `allocate_clip_id` reserved `new_id` by creating the .mp4 empty, so
+        // that a clip taken with the hotkey mid-export cannot be handed the
+        // same wall-clock id and have its footage truncated out from under it.
+        // The reservation is ours, so cleaning it up is ours too.
+        //
+        // This does *not* violate `export.rs`'s `BeforeCreating` rule, and the
+        // distinction is the crux of why it is safe. That rule says: when an
+        // attempt fails before `MFCreateSinkWriterFromURL`, whatever sits at
+        // `dest` belongs to whoever put it there, so `export.rs` must not
+        // delete it. Here the daemon *is* whoever put it there — it created
+        // that file itself, one statement ago, for this export. So the two
+        // halves stay honest: `export.rs` never touches a `dest` it did not
+        // create, and `state.rs` cleans up the file it did.
+        let outcome = match export::export_fast(export::FastExport {
             source: paths.mp4(),
             dest: new_paths.mp4(),
             start_ms,
             end_ms,
-        })?;
+        }) {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                // `NotFound` is the ordinary case, not a problem: an attempt
+                // that got as far as creating `dest` deletes it on the way out
+                // (`with_video_only_retry`), so there is usually nothing left.
+                match std::fs::remove_file(new_paths.mp4()) {
+                    Ok(()) => {}
+                    Err(remove) if remove.kind() == std::io::ErrorKind::NotFound => {}
+                    // Worth a line rather than a silent `let _`: a reservation
+                    // that will not delete is a zero-byte .mp4 in the clips
+                    // folder, and while `library::scan` skips those so it can
+                    // never become a broken grid card, it does hold the id
+                    // against a clip saved in that same second.
+                    Err(remove) => tracing::warn!(
+                        clip = %new_id,
+                        error = %remove,
+                        "could not remove the reservation left by a failed export"
+                    ),
+                }
+                return Err(e);
+            }
+        };
 
         // The source's thumbnail, copied. It is the source's first frame rather
         // than the trim's, which is wrong in the strict sense — but a grid card

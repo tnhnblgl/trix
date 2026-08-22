@@ -61,9 +61,10 @@ pub fn is_valid_id(id: &str) -> bool {
 /// question that was actually asked.
 ///
 /// Called when the clip directory *changes* and before an `arm`, never per
-/// clip: [`allocate_clip_id`] below stays a bare `create_dir_all` because the
-/// save path is already writing an MP4 and a probe would tell it nothing the
-/// write itself will not.
+/// clip: [`allocate_clip_id`] below stays a bare `create_dir_all` and needs no
+/// probe of its own. It never did — the save path was already writing an MP4,
+/// which tells it everything a probe would — and now even less so, since the
+/// reservation it takes is itself a real create that fails the same way.
 pub fn ensure_writable(dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir)
         .with_context(|| format!("could not create clip directory {}", dir.display()))?;
@@ -81,7 +82,31 @@ pub fn ensure_writable(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Picks an unused id for a clip being saved now, creating `dir` if needed.
+/// Picks an unused id for a clip being saved now, creating `dir` if needed,
+/// and **reserves it by creating the `.mp4` empty**.
+///
+/// The reservation is not a detail — it is the contract. Ids are wall-clock
+/// stamps (`YYYYMMDD_HHMMSS`), so two savers in the same second want the same
+/// name, and this used to answer by *asking* whether the file existed and
+/// creating nothing. That was safe only for as long as the single caller held
+/// a lock across the gap between allocating and writing. `Daemon::export_clip`
+/// broke that assumption: it takes no lock and spends a whole keyframe demux
+/// of the source between the two, so a clip taken with the hotkey mid-export
+/// could be handed the same id, write its footage there, and have the export's
+/// sink writer truncate it moments later — captured footage destroyed.
+///
+/// So the name is claimed with `create_new`, which is atomic against every
+/// other thread and every other process. Two costs come with it, and both are
+/// the caller's to pay:
+///
+/// - **The caller owns the file from here on.** Every path out of a save must
+///   either overwrite the reservation (both writers here go through
+///   `MFCreateSinkWriterFromURL`, which creates *and truncates*, so a zero-byte
+///   file at the path is exactly as good as no file) or delete it. See
+///   `replay::save_clip` and `Daemon::export_clip`.
+/// - **A reservation can be stranded** if the process dies between claiming and
+///   writing — the build is `panic = "abort"`. [`scan`] therefore skips
+///   zero-byte `.mp4`s, which are never playable clips anyway.
 pub fn allocate_clip_id(dir: &Path) -> Result<String> {
     std::fs::create_dir_all(dir)
         .with_context(|| format!("could not create clip directory {}", dir.display()))?;
@@ -94,7 +119,19 @@ pub fn allocate_clip_id(dir: &Path) -> Result<String> {
 }
 
 /// Two clips in the same second get `_2`, `_3`, … rather than one silently
-/// overwriting the other.
+/// overwriting the other, and the winner of that race is decided by the
+/// filesystem rather than by a check-then-act.
+///
+/// `create_new` is the whole mechanism: it creates the file or fails with
+/// `AlreadyExists`, in one syscall, so two callers cannot both come away
+/// believing they own the same id. An `exists()` probe could — see
+/// [`allocate_clip_id`] for the concrete way that lost captured footage.
+/// The returned id names a real, zero-byte file that the caller now owns.
+///
+/// Any error other than `AlreadyExists` stops the loop rather than advancing
+/// the suffix: a directory that cannot be written to would otherwise be
+/// mistaken for one that is full, and the caller would wait out four billion
+/// failing `open` calls to be told the wrong thing.
 ///
 /// Returns `Result` rather than ending in an `unreachable!()`. The loop below
 /// genuinely cannot run out — it would need `u32::MAX` clips written within one
@@ -105,16 +142,27 @@ pub fn allocate_clip_id(dir: &Path) -> Result<String> {
 /// `Result`, so honouring it costs a bounded range and one `bail!`, and removes
 /// the argument entirely.
 fn next_free_id(dir: &Path, stem: &str) -> Result<String> {
-    if !mp4_path(dir, stem).exists() {
+    if reserve(dir, stem)? {
         return Ok(stem.to_string());
     }
     for n in 2u32..=u32::MAX {
         let candidate = format!("{stem}_{n}");
-        if !mp4_path(dir, &candidate).exists() {
+        if reserve(dir, &candidate)? {
             return Ok(candidate);
         }
     }
     bail!("no free clip id for {stem} — the clip directory already holds every suffix")
+}
+
+/// `Ok(true)` when this call created `dir/id.mp4` and now owns it, `Ok(false)`
+/// when something already held that name, `Err` for anything else.
+fn reserve(dir: &Path, id: &str) -> Result<bool> {
+    let path = mp4_path(dir, id);
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(e).with_context(|| format!("could not reserve {}", path.display())),
+    }
 }
 
 /// Writes the sidecar to a temp file and renames it into place, so a crash
@@ -143,6 +191,14 @@ pub fn read_sidecar(path: &Path) -> Result<ClipMeta> {
 /// file dropped in by hand still shows up. A `.json` with no `.mp4` is an
 /// orphan and is skipped. A malformed sidecar is warned about and its clip is
 /// adopted as if the sidecar were missing — one bad file never hides a clip.
+///
+/// A **zero-byte** `.mp4` is skipped. It is never a playable clip, so there is
+/// nothing to lose, and it closes two ways a broken grid card could otherwise
+/// appear: an [`allocate_clip_id`] reservation stranded by a process that died
+/// before writing it (the build is `panic = "abort"`), and an export whose
+/// cleanup delete was refused — Defender holding a handle on the file it just
+/// scanned is the everyday cause. Either would otherwise be adopted as a clip
+/// with `duration_ms: 0` that will not play and cannot be trimmed.
 pub fn scan(dir: &Path) -> Result<Vec<ClipMeta>> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -159,6 +215,15 @@ pub fn scan(dir: &Path) -> Result<Vec<ClipMeta>> {
         }
         let Some(id) = path.file_stem().and_then(|s| s.to_str()) else { continue };
         if !is_valid_id(id) {
+            continue;
+        }
+        // A reservation or a failed export's leftovers, not a clip. Taken off
+        // the directory entry rather than with a fresh `metadata` call — on
+        // Windows the size came back with the enumeration, so this costs
+        // nothing. A metadata error is treated as "not zero": the file is
+        // there, something is wrong with reading it, and hiding a clip is the
+        // worse of the two mistakes.
+        if entry.metadata().is_ok_and(|m| m.len() == 0) {
             continue;
         }
         let sidecar = sidecar_path(dir, id);
@@ -421,8 +486,8 @@ mod tests {
     #[test]
     fn ids_do_not_collide_within_one_second() {
         let dir = std::env::temp_dir().join(format!("trix-lib-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let _ = std::fs::remove_file(dir.join("20260726_143012.mp4"));
 
         std::fs::write(dir.join("20260726_143012.mp4"), b"x").unwrap();
         let next = next_free_id(&dir, "20260726_143012").unwrap();
@@ -430,6 +495,43 @@ mod tests {
 
         std::fs::write(dir.join("20260726_143012_2.mp4"), b"x").unwrap();
         assert_eq!(next_free_id(&dir, "20260726_143012").unwrap(), "20260726_143012_3");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The reservation race, which an `exists()` probe could not close: the
+    /// two callers of `allocate_clip_id` no longer serialize (`export_clip`
+    /// takes no lock and demuxes the whole source between allocating and
+    /// writing), so two allocations that write nothing in between must still
+    /// come back with different ids. Before `create_new` this returned
+    /// `_2` twice and the second writer destroyed the first one's footage.
+    #[test]
+    fn an_allocated_id_is_reserved_even_before_anything_is_written() {
+        let dir = std::env::temp_dir().join(format!("trix-reserve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let first = next_free_id(&dir, "20260726_143012").unwrap();
+        let second = next_free_id(&dir, "20260726_143012").unwrap();
+        let third = next_free_id(&dir, "20260726_143012").unwrap();
+        assert_eq!(
+            [first.as_str(), second.as_str(), third.as_str()],
+            ["20260726_143012", "20260726_143012_2", "20260726_143012_3",]
+        );
+
+        // The reservation is a real, empty file: real so no other process can
+        // take the name, empty so the writer that follows can simply truncate
+        // it (both writers go through `MFCreateSinkWriterFromURL`, which
+        // creates *and* truncates).
+        for id in [&first, &second, &third] {
+            let path = mp4_path(&dir, id);
+            assert!(path.is_file(), "{id} must be reserved on disk");
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), 0, "{id} must be empty");
+        }
+
+        // And a reservation is not a clip: nothing that was never written
+        // reaches the grid.
+        assert!(scan(&dir).unwrap().is_empty(), "zero-byte reservations are not clips");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -447,6 +549,13 @@ mod tests {
         write_sidecar(&dir, &sample_meta("20260726_090000")).unwrap();
         // An mp4 with no sidecar: adopted so hand-dropped files still appear.
         std::fs::write(dir.join("20260726_110000.mp4"), b"video").unwrap();
+        // A zero-byte mp4: a stranded `allocate_clip_id` reservation, or an
+        // export whose cleanup delete was refused. Never playable, so never
+        // listed -- even though it has a perfectly valid sidecar beside it,
+        // which is what a `save_clip` killed between the write and the mux
+        // would look like.
+        std::fs::write(dir.join("20260726_120000.mp4"), b"").unwrap();
+        write_sidecar(&dir, &sample_meta("20260726_120000")).unwrap();
 
         let clips = scan(&dir).unwrap();
         let ids: Vec<&str> = clips.iter().map(|c| c.id.as_str()).collect();

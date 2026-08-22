@@ -622,9 +622,27 @@ fn save_clip(
     };
     let Some(snapshot) = snapshot else { return Ok(None) };
 
+    // `allocate_clip_id` reserves the name by creating the .mp4 empty, so no
+    // other saver -- or export -- can be handed the same wall-clock id. That
+    // makes the file ours: `write_clip` overwrites it (`ClipMuxer::new` goes
+    // through `MFCreateSinkWriterFromURL`, which creates *and* truncates), and
+    // if the mux fails we take the reservation back down with us rather than
+    // leaving a zero-byte .mp4 sitting on an id.
     let id = library::allocate_clip_id(clip_dir)?;
     let path = library::mp4_path(clip_dir, &id);
-    write_clip(&snapshot, &path)?;
+    if let Err(e) = write_clip(&snapshot, &path) {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            // Already gone is the outcome we wanted, not a failure.
+            Err(remove) if remove.kind() == std::io::ErrorKind::NotFound => {}
+            Err(remove) => tracing::warn!(
+                clip = %id,
+                error = %remove,
+                "could not remove the reservation left by a failed clip write"
+            ),
+        }
+        return Err(e);
+    }
 
     // A thumbnail is never allowed to cost the clip: every failure here is a
     // warning over an MP4 that is already safely on disk. `library::scan`
