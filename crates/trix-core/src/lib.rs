@@ -9,6 +9,7 @@ pub mod config;
 pub mod control;
 pub mod encode;
 pub mod engine;
+pub mod export;
 pub mod library;
 pub mod probe;
 pub mod record;
