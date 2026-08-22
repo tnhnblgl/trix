@@ -64,18 +64,21 @@ pub fn clamp_range(duration_ms: u64, start_ms: u64, end_ms: u64) -> Result<(u64,
 /// nothing but its own caller, so a tighter bound is deliberate here.
 const MAX_CONSECUTIVE_EMPTY_READS: u32 = 64;
 
-/// Advances the consecutive-empty-read counter, bailing with `source` named
-/// once [`MAX_CONSECUTIVE_EMPTY_READS`] is exceeded.
+/// Advances the consecutive-empty-read counter, bailing with `source` and
+/// `label` named once [`MAX_CONSECUTIVE_EMPTY_READS`] is exceeded. `label`
+/// names which stream was being read ("video" or "audio"), since both
+/// `keyframes_ms`'s video-only pass and `copy_stream`'s pass over either
+/// track call this same function.
 ///
 /// Pulled out of the read loop so this bound can be unit-tested without
 /// Media Foundation, the same way -- and for the same reason -- as
-/// `sound/decode.rs`'s `count_empty_read`: the loop below calls this exact
-/// function rather than repeating the check inline.
-fn count_empty_read(empty_reads: u32, source: &Path) -> Result<u32> {
+/// `sound/decode.rs`'s `count_empty_read`: every read loop in this file
+/// calls this exact function rather than repeating the check inline.
+fn count_empty_read(empty_reads: u32, source: &Path, label: &str) -> Result<u32> {
     let empty_reads = empty_reads + 1;
     if empty_reads > MAX_CONSECUTIVE_EMPTY_READS {
         anyhow::bail!(
-            "{} stopped delivering video samples after {MAX_CONSECUTIVE_EMPTY_READS} \
+            "{} stopped delivering {label} samples after {MAX_CONSECUTIVE_EMPTY_READS} \
              consecutive empty reads",
             source.display()
         );
@@ -167,7 +170,7 @@ pub fn keyframes_ms(source: &Path) -> Result<Vec<u64>> {
             break;
         }
         let Some(sample) = sample else {
-            empty_reads = count_empty_read(empty_reads, source)?;
+            empty_reads = count_empty_read(empty_reads, source, "video")?;
             continue;
         };
         empty_reads = 0;
@@ -206,6 +209,13 @@ pub struct ExportOutcome {
 /// does not need snapping: cutting after a P-frame is fine, every frame in the
 /// output still has its reference.
 pub fn export_fast(request: FastExport<'_>) -> Result<ExportOutcome> {
+    // `MFCreateSinkWriterFromURL` truncates whatever `dest` names the moment
+    // it is called. Nothing downstream of this function would notice or
+    // refuse `dest == source` -- this is the one place that must.
+    if request.dest == request.source {
+        anyhow::bail!("the export destination cannot be the source clip");
+    }
+
     let keys = keyframes_ms(request.source)?;
     let start_ms = snap_start(&keys, request.start_ms);
     let start_100ns = (start_ms as i64) * 10_000;
@@ -213,82 +223,198 @@ pub fn export_fast(request: FastExport<'_>) -> Result<ExportOutcome> {
 
     let reader = open_compressed(request.source, true)?;
 
-    // The source's own types, declared as both the stream type and the input
-    // type. That pairing is what tells the sink writer "do not transform this"
-    // -- the same guaranteed-passthrough trick `ClipMuxer::new` uses with the
-    // encoder's negotiated H.264 type.
+    // The source's own types, fed to `open_sink` to be declared as both the
+    // stream type and the input type. That pairing is what tells the sink
+    // writer "do not transform this" -- the same guaranteed-passthrough
+    // trick `ClipMuxer::new` uses with the encoder's negotiated H.264 type.
     let video_type = unsafe { reader.GetNativeMediaType(video_stream(), 0) }
         .context("this clip has no video track")?;
     let audio_type: Option<IMFMediaType> =
         unsafe { reader.GetNativeMediaType(audio_stream(), 0) }.ok();
 
-    let writer = unsafe {
-        let mut attrs: Option<IMFAttributes> = None;
-        MFCreateAttributes(&mut attrs, 1)?;
-        let attrs = attrs.unwrap();
-        attrs.SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1)?;
-        MFCreateSinkWriterFromURL(&HSTRING::from(request.dest), None, Some(&attrs))
-            .with_context(|| format!("could not create {}", request.dest.display()))?
-    };
+    match run_export(
+        &reader,
+        &video_type,
+        audio_type.as_ref(),
+        request.dest,
+        start_100ns,
+        end_100ns,
+        request.source,
+    ) {
+        Ok(outcome) => Ok(outcome),
+        Err(err) => {
+            // Every failure from here on -- a refused video type, a mid-copy
+            // read error, zero video packets, a failed Finalize -- would
+            // otherwise leave a non-playable .mp4 at `dest`: truncated by
+            // `MFCreateSinkWriterFromURL`, missing its `moov` atom. Task 4
+            // hands exports straight to `library::scan`, which adopts any
+            // bare .mp4 it finds as a real clip, so a failed export must not
+            // leave a file behind at all. `run_export` owns the writer, so
+            // by the time its `Err` reaches here the writer -- and the file
+            // handle it held -- is already dropped.
+            let _ = std::fs::remove_file(request.dest);
+            Err(err)
+        }
+    }
+}
 
-    let (video_out, audio_out) = unsafe {
-        let video_out = writer.AddStream(&video_type).context("AddStream(export video)")?;
-        writer
-            .SetInputMediaType(video_out, &video_type, None)
-            .context("SetInputMediaType(export video passthrough)")?;
-        let audio_out = match &audio_type {
-            Some(t) => match writer.AddStream(t) {
-                Ok(s) => writer.SetInputMediaType(s, t, None).ok().map(|()| s),
-                // A source whose AAC type the MP4 sink will not take back
-                // verbatim is a silent export, not a failed one. The video is
-                // the point; losing the audio track is worth reporting in the
-                // outcome, not worth refusing the whole export over.
-                Err(_) => None,
-            },
-            None => None,
-        };
-        writer.BeginWriting().context("BeginWriting(export)")?;
-        (video_out, audio_out)
-    };
+/// Everything from opening the sink writer through `Finalize`. Split out of
+/// `export_fast` so that function has exactly one place to clean up `dest`
+/// after: this owns the writer by value, so any early return -- `?` on a
+/// mid-copy failure included -- drops it, and its file handle, before the
+/// caller ever sees the error.
+fn run_export(
+    reader: &IMFSourceReader,
+    video_type: &IMFMediaType,
+    audio_type: Option<&IMFMediaType>,
+    dest: &Path,
+    start_100ns: i64,
+    end_100ns: i64,
+    source: &Path,
+) -> Result<ExportOutcome> {
+    let (writer, video_out, audio_out) = open_sink(dest, video_type, audio_type)?;
 
     let video = copy_stream(
-        &reader,
+        reader,
         &writer,
         video_stream(),
         video_out,
         start_100ns,
         end_100ns,
-        request.source,
+        source,
+        "video",
     )?;
 
-    if let Some(audio_out) = audio_out {
-        // Failures here are not fatal for the same reason as above: the video
-        // track is already written and finalizing will still produce a clip.
-        let _ = copy_stream(
-            &reader,
-            &writer,
-            audio_stream(),
-            audio_out,
-            start_100ns,
-            end_100ns,
-            request.source,
-        );
-    }
-
-    unsafe { writer.Finalize().context("Finalize(export)")? };
-
     if video.packets == 0 {
-        // An empty output is worse than no output: it lands in the library as a
-        // clip that will not play.
-        let _ = std::fs::remove_file(request.dest);
+        // An empty output is worse than no output: it lands in the library
+        // as a clip that will not play. This must be checked -- and must
+        // bail -- before Finalize: zero samples on a declared stream is
+        // Finalize's own documented failure mode, so checking after it would
+        // hand the caller a raw HRESULT instead of this message, and never
+        // reach the cleanup this bail exists to trigger.
         anyhow::bail!("that range contains no video");
     }
+
+    // Audio is best-effort once the stream is open: the video track is
+    // already written, and finalizing without an audio sample still produces
+    // a playable, video-only clip. `audio` is only ever `Some` when at least
+    // one sample was actually written, so `has_audio` below reports what
+    // landed in the file rather than merely what setup accepted.
+    let audio = audio_out.and_then(|stream| {
+        match copy_stream(
+            reader,
+            &writer,
+            audio_stream(),
+            stream,
+            start_100ns,
+            end_100ns,
+            source,
+            "audio",
+        ) {
+            Ok(copied) if copied.packets > 0 => Some(copied),
+            Ok(_) => {
+                tracing::warn!(
+                    clip = %source.display(),
+                    "audio stream was set up but the range produced no audio samples"
+                );
+                None
+            }
+            Err(err) => {
+                tracing::warn!(
+                    clip = %source.display(),
+                    error = %format!("{err:#}"),
+                    "audio copy failed, exporting video-only"
+                );
+                None
+            }
+        }
+    });
+
+    unsafe { writer.Finalize().context("Finalize(export)")? };
 
     Ok(ExportOutcome {
         duration_ms: (video.written_100ns / 10_000).max(0) as u64,
         video_packets: video.packets,
-        has_audio: audio_out.is_some(),
+        has_audio: audio.is_some(),
     })
+}
+
+/// Creates the sink writer at `dest`, adds the video stream as a guaranteed
+/// passthrough, and -- when `audio_type` is given -- attempts the same for
+/// audio. Returns the writer already past `BeginWriting`.
+///
+/// Audio setup is all-or-nothing. `IMFSinkWriter` has no `RemoveStream`, so
+/// an `AddStream` that succeeds followed by a `SetInputMediaType` that fails
+/// would otherwise leave the writer holding a stream with an output type and
+/// no input type -- and `BeginWriting` then fails outright on that, turning
+/// "no audio" into "no export" instead of the documented video-only
+/// fallback. The fix is to throw the whole writer away on any audio
+/// refusal, delete the (empty, just-created) file it was writing to, and
+/// open a second writer with no audio stream at all.
+fn open_sink(
+    dest: &Path,
+    video_type: &IMFMediaType,
+    audio_type: Option<&IMFMediaType>,
+) -> Result<(IMFSinkWriter, u32, Option<u32>)> {
+    let (writer, video_out) = new_sink_writer(dest, video_type)?;
+
+    let Some(audio_type) = audio_type else {
+        unsafe { writer.BeginWriting().context("BeginWriting(export)")? };
+        return Ok((writer, video_out, None));
+    };
+
+    let audio_out = unsafe {
+        match writer.AddStream(audio_type) {
+            Ok(stream) => writer.SetInputMediaType(stream, audio_type, None).ok().map(|()| stream),
+            // AddStream refusing outright and SetInputMediaType refusing
+            // afterward both collapse to the same `None` here -- the match
+            // below treats an outright refusal and a failed passthrough
+            // identically, since both leave the writer in a state this
+            // function must not hand back to the caller.
+            Err(_) => None,
+        }
+    };
+
+    let (writer, video_out, audio_out) = match audio_out {
+        Some(stream) => (writer, video_out, Some(stream)),
+        None => {
+            // A source whose AAC type the MP4 sink will not take back
+            // verbatim is a silent export, not a failed one -- but only once
+            // the writer that saw the refusal is gone.
+            drop(writer);
+            let _ = std::fs::remove_file(dest);
+            let (writer, video_out) = new_sink_writer(dest, video_type)?;
+            (writer, video_out, None)
+        }
+    };
+
+    unsafe { writer.BeginWriting().context("BeginWriting(export)")? };
+    Ok((writer, video_out, audio_out))
+}
+
+/// Creates the sink writer at `dest` with `MF_SINK_WRITER_DISABLE_THROTTLING`
+/// set -- exactly as `ClipMuxer::new` does and for the same reason: this
+/// module writes one whole track and then the other, and a throttled writer
+/// blocks `WriteSample` waiting for the lagging stream to catch up. Adds the
+/// video stream and declares `video_type` as both the stream type and the
+/// input type, which is what guarantees the sink writer will not transform
+/// the samples. Does not call `BeginWriting`: the caller may still need to
+/// add an audio stream first.
+fn new_sink_writer(dest: &Path, video_type: &IMFMediaType) -> Result<(IMFSinkWriter, u32)> {
+    unsafe {
+        let mut attrs: Option<IMFAttributes> = None;
+        MFCreateAttributes(&mut attrs, 1)?;
+        let attrs = attrs.unwrap();
+        attrs.SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1)?;
+        let writer = MFCreateSinkWriterFromURL(&HSTRING::from(dest), None, Some(&attrs))
+            .with_context(|| format!("could not create {}", dest.display()))?;
+
+        let video_out = writer.AddStream(video_type).context("AddStream(export video)")?;
+        writer
+            .SetInputMediaType(video_out, video_type, None)
+            .context("SetInputMediaType(export video passthrough)")?;
+        Ok((writer, video_out))
+    }
 }
 
 struct CopiedStream {
@@ -297,7 +423,8 @@ struct CopiedStream {
 }
 
 /// Reads one stream start-to-finish, writing only the samples inside the range
-/// and rebasing their timestamps so the output starts at zero.
+/// and rebasing their timestamps so the output starts at zero. `label`
+/// ("video" or "audio") is only for `count_empty_read`'s error message.
 #[allow(clippy::too_many_arguments)]
 fn copy_stream(
     reader: &IMFSourceReader,
@@ -307,6 +434,7 @@ fn copy_stream(
     start_100ns: i64,
     end_100ns: i64,
     source: &Path,
+    label: &str,
 ) -> Result<CopiedStream> {
     let mut packets = 0usize;
     let mut written_100ns = 0i64;
@@ -320,7 +448,7 @@ fn copy_stream(
             break;
         }
         let Some(sample) = sample else {
-            empty_reads = count_empty_read(empty_reads, source)?;
+            empty_reads = count_empty_read(empty_reads, source, label)?;
             continue;
         };
         empty_reads = 0;
@@ -379,20 +507,24 @@ mod tests {
     /// end the loop eventually so a source that only ever returns nothing
     /// cannot hang `keyframes_ms` forever. This calls the exact function the
     /// read loop calls, so it exercises the real guard without needing Media
-    /// Foundation -- same shape as `sound/decode.rs`'s equivalent test.
+    /// Foundation -- same shape as `sound/decode.rs`'s equivalent test. Uses
+    /// the "audio" label (rather than "video", as every other test here
+    /// does) so this test also pins that the label actually reaches the
+    /// message, not just that a message is produced.
     #[test]
     fn the_empty_read_guard_bails_after_the_limit_but_not_before() {
         let path = Path::new(r"C:\clips\fixture.mp4");
 
         let mut empty_reads = 0u32;
         for _ in 0..MAX_CONSECUTIVE_EMPTY_READS {
-            empty_reads = count_empty_read(empty_reads, path)
+            empty_reads = count_empty_read(empty_reads, path, "audio")
                 .expect("must not bail before the limit is exceeded");
         }
 
-        let err = count_empty_read(empty_reads, path).unwrap_err();
+        let err = count_empty_read(empty_reads, path, "audio").unwrap_err();
         let message = format!("{err:#}");
         assert!(message.contains("fixture.mp4"), "the error must name the file: {message}");
+        assert!(message.contains("audio"), "the error must name which stream stalled: {message}");
         assert!(
             message.contains(&MAX_CONSECUTIVE_EMPTY_READS.to_string()),
             "the error should say how many reads it gave up after: {message}"
@@ -410,8 +542,8 @@ mod tests {
 
         let mut empty_reads = 0u32;
         for _ in 0..5 {
-            empty_reads =
-                count_empty_read(empty_reads, path).expect("a few gaps in a row must not bail");
+            empty_reads = count_empty_read(empty_reads, path, "video")
+                .expect("a few gaps in a row must not bail");
         }
         assert_eq!(empty_reads, 5);
     }
@@ -430,14 +562,14 @@ mod tests {
         let path = Path::new(r"C:\clips\fixture.mp4");
 
         let mut empty_reads = 0u32;
-        empty_reads = count_empty_read(empty_reads, path).expect("gap 1");
-        empty_reads = count_empty_read(empty_reads, path).expect("gap 2");
+        empty_reads = count_empty_read(empty_reads, path, "video").expect("gap 1");
+        empty_reads = count_empty_read(empty_reads, path, "video").expect("gap 2");
         assert_eq!(empty_reads, 2);
 
         // Stands in for the read loop's `empty_reads = 0` on a real sample.
         empty_reads = 0;
 
-        empty_reads = count_empty_read(empty_reads, path).expect("gap after the reset");
+        empty_reads = count_empty_read(empty_reads, path, "video").expect("gap after the reset");
         assert_eq!(empty_reads, 1, "the two gaps before the reset must not still be counted");
     }
 
@@ -489,5 +621,44 @@ mod tests {
         assert_eq!(keys.first(), Some(&0), "the export must start on a keyframe");
 
         let _ = std::fs::remove_file(&dest);
+    }
+
+    /// A range that snaps to a keyframe at or after every sample in it (here,
+    /// `end_ms: 0` against a clip whose first frame is at `pts_100ns == 0`)
+    /// writes zero video packets. Before this review round the cleanup for
+    /// that case ran *after* `Finalize`, which fails outright on a stream
+    /// with no samples -- so the caller got a raw HRESULT instead of
+    /// `export_fast`'s own message, and `dest` (created and truncated by
+    /// `MFCreateSinkWriterFromURL` before any of that) was never removed.
+    /// This exercises the real failure path end-to-end -- no synthetic media
+    /// types, just a range guaranteed to be empty -- and checks both halves
+    /// of the fix: the caller-facing error, and that nothing broken is left
+    /// on disk for `library::scan` to adopt.
+    ///
+    ///   cargo test -p trix-core -- --ignored a_video_less_export_deletes_its_own_output_and_names_the_reason
+    #[test]
+    #[ignore = "needs a real clip; set TRIX_TEST_CLIP"]
+    fn a_video_less_export_deletes_its_own_output_and_names_the_reason() {
+        let Ok(path) = std::env::var("TRIX_TEST_CLIP") else {
+            panic!("set TRIX_TEST_CLIP to an .mp4 path");
+        };
+        let source = Path::new(&path);
+        let dest = std::env::temp_dir().join("trix-export-empty-test.mp4");
+        let _ = std::fs::remove_file(&dest);
+
+        // Matched by hand, not `.expect_err()`: `ExportOutcome` has no
+        // `Debug` impl, and adding one only for this assertion is outside
+        // what this fix calls for.
+        match export_fast(FastExport { source, dest: &dest, start_ms: 0, end_ms: 0 }) {
+            Ok(_) => panic!("a zero-length range must not produce a clip"),
+            Err(err) => assert!(
+                format!("{err:#}").contains("no video"),
+                "the caller must see why, not a raw HRESULT: {err:#}"
+            ),
+        }
+        assert!(
+            !dest.exists(),
+            "a failed export must not leave the file MFCreateSinkWriterFromURL created behind"
+        );
     }
 }
