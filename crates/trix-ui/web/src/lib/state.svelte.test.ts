@@ -216,6 +216,99 @@ describe('AppState.reveal', () => {
   });
 });
 
+describe('AppState.keyframesFor', () => {
+  it('asks the daemon for the clip keyframes and hands back the list', async () => {
+    callMock.mockResolvedValue({ clip_id: 'a', keyframes: [0, 2000, 4000] });
+
+    await expect(app.keyframesFor('a')).resolves.toEqual([0, 2000, 4000]);
+
+    expect(callMock).toHaveBeenCalledWith('library.keyframes', { clip_id: 'a' });
+  });
+
+  // A clip whose keyframes cannot be read is still perfectly playable, so this
+  // must degrade to a bar with no ticks. Toasting here would put an error in
+  // front of someone who only wanted to watch the clip.
+  it('degrades to an empty tick list, without a toast, when the clip cannot be indexed', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    callMock.mockRejectedValue(new Error('could not index the keyframes of clip a'));
+
+    await expect(app.keyframesFor('a')).resolves.toEqual([]);
+
+    expect(app.toasts).toHaveLength(0);
+    warn.mockRestore();
+  });
+});
+
+describe('AppState.exportTrim', () => {
+  it('exportTrim refuses a range whose out point is not after its in point', async () => {
+    const calls: string[] = [];
+    callMock.mockImplementation((cmd: string) => {
+      calls.push(cmd);
+      return Promise.resolve({});
+    });
+
+    await app.exportTrim('20260822_101500', 4000, 4000);
+
+    expect(calls).not.toContain('library.export');
+    expect(app.toasts.at(-1)?.kind).toBe('error');
+  });
+
+  // `MIN_TRIM_MS` in trix-core/src/export.rs. Mirrored here so a too-short
+  // range is refused with a sentence naming the floor, rather than by a
+  // round trip that comes back as the daemon's own refusal.
+  it('refuses a range shorter than the 200 ms floor the daemon enforces', async () => {
+    const calls: string[] = [];
+    callMock.mockImplementation((cmd: string) => {
+      calls.push(cmd);
+      return Promise.resolve({});
+    });
+
+    await app.exportTrim('20260822_101500', 4000, 4150);
+
+    expect(calls).not.toContain('library.export');
+    expect(app.toasts.at(-1)?.text).toContain('200');
+  });
+
+  it('sends whole milliseconds in fast mode and reports the new clip with a toast', async () => {
+    callMock.mockResolvedValue(clip('20260822_101500_trim'));
+
+    await app.exportTrim('20260822_101500', 4000.4, 9000.6);
+
+    expect(callMock).toHaveBeenCalledWith('library.export', {
+      clip_id: '20260822_101500',
+      start_ms: 4000,
+      end_ms: 9001,
+      mode: 'fast',
+    });
+    expect(app.toasts.at(-1)?.kind).toBe('info');
+  });
+
+  // The new clip reaches the grid on the daemon's own `clip_saved` broadcast,
+  // which `wireDaemon` already prepends on -- so an export must not also
+  // reload the library, which would reset `selected` out from under whoever
+  // is still looking at the source clip.
+  it('does not reload the library, since clip_saved already announces the new clip', async () => {
+    const calls: string[] = [];
+    callMock.mockImplementation((cmd: string) => {
+      calls.push(cmd);
+      return Promise.resolve(clip('20260822_101500_trim'));
+    });
+
+    await app.exportTrim('20260822_101500', 0, 5000);
+
+    expect(calls).toEqual(['library.export']);
+  });
+
+  it('toasts the daemon refusal rather than throwing at the caller', async () => {
+    callMock.mockRejectedValue(new Error('this clip has no duration to trim'));
+
+    await app.exportTrim('20260822_101500', 0, 5000);
+
+    expect(app.toasts.at(-1)?.text).toContain('this clip has no duration to trim');
+    expect(app.toasts.at(-1)?.kind).toBe('error');
+  });
+});
+
 describe('AppState.toggleArm', () => {
   // dispatch.rs's `fail` broadcasts an `error` event for a failed `arm` (spec
   // §4.4), which `wireDaemon`'s `onDaemonEvent` switch already toasts. Before

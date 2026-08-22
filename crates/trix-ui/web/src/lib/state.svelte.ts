@@ -9,6 +9,17 @@ export type Toast = { id: number; kind: 'error' | 'info'; text: string };
 
 let nextToastId = 1;
 
+/**
+ * The shortest trim the daemon will accept, mirroring `MIN_TRIM_MS` in
+ * `trix-core/src/export.rs`.
+ *
+ * Duplicated rather than asked for: the daemon exposes no command that
+ * reports it, and a range this short is worth refusing with a sentence that
+ * names the floor instead of a round trip that comes back as a raw refusal.
+ * The daemon still enforces it -- this only decides who explains it.
+ */
+const MIN_TRIM_MS = 200;
+
 class AppState {
   connected = $state(false);
   status = $state<Status | null>(null);
@@ -142,6 +153,65 @@ class AppState {
   async reveal(id: string) {
     try {
       await call('library.reveal', { clip_id: id });
+    } catch (e) {
+      this.toast('error', String(e));
+    }
+  }
+
+  /**
+   * The clip's keyframe positions, in milliseconds -- the trim bar's ticks.
+   *
+   * Fast-mode export cuts on keyframes and snaps an in-point backwards to the
+   * nearest one, so drawing them is what makes the bar honest: the handle
+   * lands where the export will actually cut, not where the pointer was let
+   * go.
+   */
+  async keyframesFor(id: string): Promise<number[]> {
+    try {
+      const data = await call<{ keyframes: number[] }>('library.keyframes', { clip_id: id });
+      return data.keyframes ?? [];
+    } catch (e) {
+      // A clip whose keyframes cannot be read is still playable, so this
+      // degrades to a bar with no ticks rather than an error the user must
+      // dismiss before they can watch anything.
+      console.warn('keyframes unavailable', e);
+      return [];
+    }
+  }
+
+  /**
+   * Exports `[startMs, endMs)` of a clip as a new clip in the library.
+   *
+   * Both range rules are checked here as well as in the daemon. That is not
+   * belt-and-braces for its own sake: the daemon's refusals arrive as bare
+   * strings meant for any client, while these two are the mistakes a person
+   * actually makes with two sliders, and they deserve a sentence that says
+   * what to do about it.
+   */
+  async exportTrim(id: string, startMs: number, endMs: number) {
+    if (endMs <= startMs) {
+      this.toast('error', 'Set the out point after the in point.');
+      return;
+    }
+    if (endMs - startMs < MIN_TRIM_MS) {
+      this.toast('error', `A trim has to be at least ${MIN_TRIM_MS} ms long.`);
+      return;
+    }
+    try {
+      // The daemon allocates the new clip's id and path, so there is no
+      // destination to send -- and it broadcasts `clip_saved` for the result,
+      // which `wireDaemon` already prepends on. Nothing here reloads the grid;
+      // doing so would reset `selected` out from under someone still looking
+      // at the clip they trimmed. `fast` is the only mode the daemon accepts
+      // (it refuses `precise` by name), so it is sent as a constant rather
+      // than offered as a choice.
+      await call<ClipMeta>('library.export', {
+        clip_id: id,
+        start_ms: Math.round(startMs),
+        end_ms: Math.round(endMs),
+        mode: 'fast',
+      });
+      this.toast('info', 'Trimmed clip saved.');
     } catch (e) {
       this.toast('error', String(e));
     }
