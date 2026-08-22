@@ -32,10 +32,30 @@
   // as `Settings.svelte`: capture the unlisten and run it in `onDestroy`.
   const unlisten = onDaemonEvent((event) => {
     if (event.event === 'hotkey_pressed') heard = true;
+    if (event.event === 'config_changed') {
+      // The picker is the daemon's dialog, so the chosen folder never comes
+      // back through this component's own call -- it arrives here, the same
+      // way `Settings.svelte` learns about it. Without this the box would
+      // keep showing the old path after the user had already picked.
+      const resolved = event.data['clip_dir_resolved'];
+      if (typeof resolved === 'string') clipDir = resolved;
+    }
   });
   onDestroy(() => {
     void unlisten.then((fn) => fn());
   });
+
+  async function pickFolder() {
+    try {
+      // Answers as soon as the dialog is open, not when it closes; the result
+      // arrives as `config_changed` above. The daemon reports a folder it
+      // cannot use in its own message box, so there is nothing to toast here
+      // beyond the dialog failing to open at all.
+      await call('folder.pick');
+    } catch (e) {
+      app.toast('error', String(e));
+    }
+  }
 
   async function finish() {
     try {
@@ -99,8 +119,15 @@
     <button class="next" onclick={() => (step = 3)}>Next</button>
   {:else}
     <h2>Where should clips go?</h2>
-    <input readonly value={clipDir} />
-    <p class="hint">You can change this any time from the Trix tray icon.</p>
+    <!-- Readonly for the same reason the Settings row is: the daemon owns the
+         picker, and a typed path that does not exist is a refusal the user has
+         to decode. There is no Reset button here because the box already shows
+         the default -- nothing has been changed away from yet. -->
+    <div class="pathrow">
+      <input readonly value={clipDir} />
+      <button onclick={pickFolder}>Choose...</button>
+    </div>
+    <p class="hint">You can change this any time in Settings, or from the Trix tray icon.</p>
     <button class="next" onclick={finish}>Finish and arm</button>
   {/if}
 </div>
@@ -117,5 +144,10 @@
   .hint { color: var(--dim); font-size: 12px; margin: 2px 0; }
   .hint.ok { color: var(--accent); }
   input { padding: 8px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--dim); font: inherit; }
+  /* Same shape as Field.svelte's `.control`, so the picker row reads the same
+     here as it does in Settings. `min-width: 0` lets the path box shrink
+     inside the flex row rather than pushing the button off the card. */
+  .pathrow { display: flex; align-items: center; gap: 8px; }
+  .pathrow input { flex: 1; min-width: 0; }
   .next { justify-self: start; margin-top: 12px; padding: 9px 20px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: #06121f; font: inherit; font-weight: 600; cursor: pointer; }
 </style>
