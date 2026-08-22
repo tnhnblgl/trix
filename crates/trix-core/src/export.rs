@@ -11,8 +11,10 @@ use std::path::Path;
 
 use anyhow::{Context as _, Result};
 use windows::Win32::Media::MediaFoundation::{
-    IMFSample, IMFSourceReader, MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_FIRST_AUDIO_STREAM,
-    MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ENDOFSTREAM,
+    IMFAttributes, IMFMediaType, IMFSample, IMFSinkWriter, IMFSourceReader,
+    MF_SINK_WRITER_DISABLE_THROTTLING, MF_SOURCE_READER_ALL_STREAMS,
+    MF_SOURCE_READER_FIRST_AUDIO_STREAM, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+    MF_SOURCE_READERF_ENDOFSTREAM, MFCreateAttributes, MFCreateSinkWriterFromURL,
     MFCreateSourceReaderFromURL, MFSampleExtension_CleanPoint,
 };
 use windows::core::HSTRING;
@@ -180,6 +182,165 @@ pub fn keyframes_ms(source: &Path) -> Result<Vec<u64>> {
     Ok(keys)
 }
 
+/// What to export, and to where.
+pub struct FastExport<'a> {
+    pub source: &'a Path,
+    pub dest: &'a Path,
+    /// Snapped back to the previous keyframe before anything is written.
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
+/// What actually landed, for the caller's `ClipMeta`.
+pub struct ExportOutcome {
+    /// Measured from the samples written, not from the request: the in-point
+    /// snapped backwards, so the output is usually a little longer than asked.
+    pub duration_ms: u64,
+    pub video_packets: usize,
+    pub has_audio: bool,
+}
+
+/// Stream-copies `start_ms..end_ms` of `source` into a new MP4 at `dest`.
+///
+/// The in-point snaps back to the previous keyframe (spec §6.3). The out-point
+/// does not need snapping: cutting after a P-frame is fine, every frame in the
+/// output still has its reference.
+pub fn export_fast(request: FastExport<'_>) -> Result<ExportOutcome> {
+    let keys = keyframes_ms(request.source)?;
+    let start_ms = snap_start(&keys, request.start_ms);
+    let start_100ns = (start_ms as i64) * 10_000;
+    let end_100ns = (request.end_ms as i64) * 10_000;
+
+    let reader = open_compressed(request.source, true)?;
+
+    // The source's own types, declared as both the stream type and the input
+    // type. That pairing is what tells the sink writer "do not transform this"
+    // -- the same guaranteed-passthrough trick `ClipMuxer::new` uses with the
+    // encoder's negotiated H.264 type.
+    let video_type = unsafe { reader.GetNativeMediaType(video_stream(), 0) }
+        .context("this clip has no video track")?;
+    let audio_type: Option<IMFMediaType> =
+        unsafe { reader.GetNativeMediaType(audio_stream(), 0) }.ok();
+
+    let writer = unsafe {
+        let mut attrs: Option<IMFAttributes> = None;
+        MFCreateAttributes(&mut attrs, 1)?;
+        let attrs = attrs.unwrap();
+        attrs.SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1)?;
+        MFCreateSinkWriterFromURL(&HSTRING::from(request.dest), None, Some(&attrs))
+            .with_context(|| format!("could not create {}", request.dest.display()))?
+    };
+
+    let (video_out, audio_out) = unsafe {
+        let video_out = writer.AddStream(&video_type).context("AddStream(export video)")?;
+        writer
+            .SetInputMediaType(video_out, &video_type, None)
+            .context("SetInputMediaType(export video passthrough)")?;
+        let audio_out = match &audio_type {
+            Some(t) => match writer.AddStream(t) {
+                Ok(s) => writer.SetInputMediaType(s, t, None).ok().map(|()| s),
+                // A source whose AAC type the MP4 sink will not take back
+                // verbatim is a silent export, not a failed one. The video is
+                // the point; losing the audio track is worth reporting in the
+                // outcome, not worth refusing the whole export over.
+                Err(_) => None,
+            },
+            None => None,
+        };
+        writer.BeginWriting().context("BeginWriting(export)")?;
+        (video_out, audio_out)
+    };
+
+    let video = copy_stream(
+        &reader,
+        &writer,
+        video_stream(),
+        video_out,
+        start_100ns,
+        end_100ns,
+        request.source,
+    )?;
+
+    if let Some(audio_out) = audio_out {
+        // Failures here are not fatal for the same reason as above: the video
+        // track is already written and finalizing will still produce a clip.
+        let _ = copy_stream(
+            &reader,
+            &writer,
+            audio_stream(),
+            audio_out,
+            start_100ns,
+            end_100ns,
+            request.source,
+        );
+    }
+
+    unsafe { writer.Finalize().context("Finalize(export)")? };
+
+    if video.packets == 0 {
+        // An empty output is worse than no output: it lands in the library as a
+        // clip that will not play.
+        let _ = std::fs::remove_file(request.dest);
+        anyhow::bail!("that range contains no video");
+    }
+
+    Ok(ExportOutcome {
+        duration_ms: (video.written_100ns / 10_000).max(0) as u64,
+        video_packets: video.packets,
+        has_audio: audio_out.is_some(),
+    })
+}
+
+struct CopiedStream {
+    packets: usize,
+    written_100ns: i64,
+}
+
+/// Reads one stream start-to-finish, writing only the samples inside the range
+/// and rebasing their timestamps so the output starts at zero.
+#[allow(clippy::too_many_arguments)]
+fn copy_stream(
+    reader: &IMFSourceReader,
+    writer: &IMFSinkWriter,
+    in_stream: u32,
+    out_stream: u32,
+    start_100ns: i64,
+    end_100ns: i64,
+    source: &Path,
+) -> Result<CopiedStream> {
+    let mut packets = 0usize;
+    let mut written_100ns = 0i64;
+    let mut empty_reads = 0u32;
+    loop {
+        let mut flags = 0u32;
+        let mut sample: Option<IMFSample> = None;
+        unsafe { reader.ReadSample(in_stream, 0, None, Some(&mut flags), None, Some(&mut sample)) }
+            .with_context(|| format!("reading {} failed", source.display()))?;
+        if flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
+            break;
+        }
+        let Some(sample) = sample else {
+            empty_reads = count_empty_read(empty_reads, source)?;
+            continue;
+        };
+        empty_reads = 0;
+        let t = timing(&sample);
+        if t.pts_100ns < start_100ns {
+            continue;
+        }
+        if t.pts_100ns >= end_100ns {
+            break;
+        }
+        unsafe {
+            sample.SetSampleTime(t.pts_100ns - start_100ns).context("rebasing the timestamp")?;
+            writer.WriteSample(out_stream, &sample).context("WriteSample(export)")?;
+        }
+        packets += 1;
+        written_100ns = (t.pts_100ns - start_100ns) + t.duration_100ns;
+    }
+    Ok(CopiedStream { packets, written_100ns })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,5 +458,36 @@ mod tests {
         assert_eq!(keys.first(), Some(&0), "a clip always has a keyframe at 0");
         assert!(keys.len() > 1, "a GOP-pinned clip has one keyframe per second: {keys:?}");
         assert!(keys.windows(2).all(|w| w[0] < w[1]), "ascending and unique: {keys:?}");
+    }
+
+    /// The other half of the by-hand gate. Exports the middle of a real clip
+    /// and asserts the output is a real, shorter, independently indexable MP4.
+    ///
+    ///   cargo test -p trix-core -- --ignored fast_export_of_a_real_clip
+    #[test]
+    #[ignore = "needs a real clip; set TRIX_TEST_CLIP"]
+    fn fast_export_of_a_real_clip() {
+        let Ok(path) = std::env::var("TRIX_TEST_CLIP") else {
+            panic!("set TRIX_TEST_CLIP to an .mp4 path");
+        };
+        let source = Path::new(&path);
+        let dest = std::env::temp_dir().join("trix-export-test.mp4");
+        let _ = std::fs::remove_file(&dest);
+
+        let outcome =
+            export_fast(FastExport { source, dest: &dest, start_ms: 1_000, end_ms: 3_000 })
+                .expect("exporting a real clip");
+
+        assert!(outcome.video_packets > 0, "an export with no video is a failure");
+        assert!(dest.is_file(), "the output must exist");
+        assert!(
+            std::fs::metadata(&dest).unwrap().len() < std::fs::metadata(source).unwrap().len(),
+            "a 2 s trim of a longer clip must be smaller than the source"
+        );
+        // The proof it is a valid MP4 and not just bytes: re-index it.
+        let keys = keyframes_ms(&dest).expect("the export must itself be readable");
+        assert_eq!(keys.first(), Some(&0), "the export must start on a keyframe");
+
+        let _ = std::fs::remove_file(&dest);
     }
 }
