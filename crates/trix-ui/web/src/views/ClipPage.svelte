@@ -82,12 +82,14 @@
   }
 
   async function exportTrim() {
-    // `exporting` is the double-fire guard, and it is not cosmetic: the daemon
-    // allocates a clip id from the wall clock (YYYYMMDD_HHMMSS) by testing
-    // whether the file exists, without reserving the name. Two exports started
-    // inside the same second land on the same id and the second overwrites the
-    // first, so the second one must not be startable -- by a double click on
-    // the button, or by leaning on Ctrl+E.
+    // `exporting` is the double-fire guard. The data-loss reason it was added
+    // is gone -- clip ids come from the wall clock (YYYYMMDD_HHMMSS) and the
+    // daemon used to pick one by asking whether the file existed, so two
+    // exports inside the same second landed on the same id and the second
+    // overwrote the first; `allocate_clip_id` now reserves the name atomically
+    // and the collision resolves to `_2`. What is left is still worth keeping:
+    // a double click on the button, or leaning on Ctrl+E, would otherwise put
+    // two identical trims in the library and make the user delete one.
     if (!clip || exporting) return;
     // Ctrl+E has no button to grey out, so the zero-duration clip is refused
     // here in plain words rather than by silently doing nothing.
