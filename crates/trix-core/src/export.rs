@@ -195,6 +195,7 @@ pub struct FastExport<'a> {
 }
 
 /// What actually landed, for the caller's `ClipMeta`.
+#[derive(Debug)]
 pub struct ExportOutcome {
     /// Measured from the samples written, not from the request: the in-point
     /// snapped backwards, so the output is usually a little longer than asked.
@@ -203,66 +204,198 @@ pub struct ExportOutcome {
     pub has_audio: bool,
 }
 
+/// True when `dest` and `source` are two spellings of one file.
+///
+/// A plain `==` only catches the identical spelling, and
+/// `MFCreateSinkWriterFromURL` truncates on call: `clips\a.mp4` against
+/// `clips\sub\..\a.mp4`, or against the same path in different case, would
+/// destroy the very clip being exported. `canonicalize` resolves all of those,
+/// but it opens the file to do it, so it fails on a `dest` that does not exist
+/// yet -- which is the ordinary case, and a path that cannot be opened at all
+/// is not the source clip. Hence the plain comparison first and the canonical
+/// one only as a second opinion.
+fn names_the_same_file(dest: &Path, source: &Path) -> bool {
+    if dest == source {
+        return true;
+    }
+    match (dest.canonicalize(), source.canonicalize()) {
+        (Ok(dest), Ok(source)) => dest == source,
+        _ => false,
+    }
+}
+
+/// How far an attempt got before it failed, which is the only thing the retry
+/// needs in order to know whether `dest` is its to delete.
+enum Failed {
+    /// Failed before `MFCreateSinkWriterFromURL` was called, so `dest` was
+    /// never created and never truncated. Anything sitting at that path
+    /// belongs to whoever put it there, and deleting it on the way out of a
+    /// failure would be destroying a stranger's file.
+    BeforeCreating(anyhow::Error),
+    /// Failed at or after the call that creates `dest`. Whatever is there now
+    /// is this attempt's own half-written output -- truncated, missing its
+    /// `moov` atom -- and Task 4 hands exports straight to `library::scan`,
+    /// which adopts any bare .mp4 it finds as a real clip. It has to go.
+    AfterCreating(anyhow::Error),
+}
+
+/// One attempt's result. Named because `Result` in this module is
+/// `anyhow::Result`, and an attempt's error deliberately is not an
+/// `anyhow::Error`: it carries where the failure landed as well as what it
+/// was.
+type Attempt = std::result::Result<ExportOutcome, Failed>;
+
 /// Stream-copies `start_ms..end_ms` of `source` into a new MP4 at `dest`.
 ///
-/// The in-point snaps back to the previous keyframe (spec §6.3). The out-point
+/// The in-point snaps back to the previous keyframe (spec 6.3). The out-point
 /// does not need snapping: cutting after a P-frame is fine, every frame in the
 /// output still has its reference.
+///
+/// Audio is attempted but never fatal: if an export carrying an audio stream
+/// fails at any stage, whatever it left at `dest` is deleted and the whole
+/// export runs again with no audio stream declared, reporting
+/// `has_audio: false`. See [`with_video_only_retry`].
 pub fn export_fast(request: FastExport<'_>) -> Result<ExportOutcome> {
     // `MFCreateSinkWriterFromURL` truncates whatever `dest` names the moment
-    // it is called. Nothing downstream of this function would notice or
-    // refuse `dest == source` -- this is the one place that must.
-    if request.dest == request.source {
+    // it is called. Nothing downstream of this function would notice or refuse
+    // an export written over the clip it is reading -- this is the one place
+    // that must.
+    if names_the_same_file(request.dest, request.source) {
         anyhow::bail!("the export destination cannot be the source clip");
     }
 
+    // Deliberately before any attempt: a source that cannot even be indexed
+    // must fail with `dest` untouched, rather than after a sink writer has
+    // already truncated it.
     let keys = keyframes_ms(request.source)?;
     let start_ms = snap_start(&keys, request.start_ms);
     let start_100ns = (start_ms as i64) * 10_000;
     let end_100ns = (request.end_ms as i64) * 10_000;
 
-    let reader = open_compressed(request.source, true)?;
+    with_video_only_retry(request.dest, request.source, |with_audio| {
+        attempt_export(request.source, request.dest, start_100ns, end_100ns, with_audio)
+    })
+}
 
-    // The source's own types, fed to `open_sink` to be declared as both the
-    // stream type and the input type. That pairing is what tells the sink
-    // writer "do not transform this" -- the same guaranteed-passthrough
-    // trick `ClipMuxer::new` uses with the encoder's negotiated H.264 type.
-    let video_type = unsafe { reader.GetNativeMediaType(video_stream(), 0) }
-        .context("this clip has no video track")?;
-    let audio_type: Option<IMFMediaType> =
-        unsafe { reader.GetNativeMediaType(audio_stream(), 0) }.ok();
+/// Runs `attempt` with audio and, if that fails after `dest` was created,
+/// deletes what it left behind and runs it once more with no audio stream at
+/// all.
+///
+/// This is the entire audio-failure policy, in one place, and it is one
+/// mechanism rather than a guard per call site because the MP4 sink defers its
+/// real validation: measured, it accepts at `AddStream` and
+/// `SetInputMediaType` types it can still refuse later, and it will even get
+/// past `BeginWriting` with a stream that has an output type and no input
+/// type. So the door is not where a refusal shows up, and which later call it
+/// shows up at is not something this module can know. Re-running the whole
+/// export covers every landing site there is, including the ones nobody has
+/// thought of yet; guarding one call site, as three earlier rounds of fixes
+/// did, leaves the rest turning "no audio" into "no export".
+///
+/// The price: a source with no audio stream at all makes the second attempt
+/// identical to the first, so a genuine failure -- an empty range, an
+/// unreadable source -- is paid for twice. That is a path that fails either
+/// way, and one extra demux pass is cheaper than classifying errors by whether
+/// audio could have caused them, which is exactly the guesswork this replaces.
+///
+/// `attempt` is a parameter rather than an inlined call so that this policy --
+/// which error the caller ends up seeing, and precisely which failures delete
+/// `dest` -- can be tested without Media Foundation.
+fn with_video_only_retry(
+    dest: &Path,
+    source: &Path,
+    mut attempt: impl FnMut(bool) -> Attempt,
+) -> Result<ExportOutcome> {
+    let first = match attempt(true) {
+        Ok(outcome) => return Ok(outcome),
+        // Nothing was created, so there is nothing to delete -- and nothing a
+        // video-only retry would do differently either: every step before the
+        // sink writer exists is on the source side, and the audio-specific
+        // ones there already swallow their own failures (`open_compressed`'s
+        // stream selection, `prepare`'s `GetNativeMediaType` for audio).
+        Err(Failed::BeforeCreating(err)) => return Err(err),
+        Err(Failed::AfterCreating(err)) => err,
+    };
 
-    match run_export(
-        &reader,
-        &video_type,
-        audio_type.as_ref(),
-        request.dest,
-        start_100ns,
-        end_100ns,
-        request.source,
-    ) {
+    // Before the retry rather than after it. `MFCreateSinkWriterFromURL`
+    // truncates `dest` when the second attempt opens it, so leaving the first
+    // attempt's carcass in place would usually be harmless -- but not if the
+    // retry then failed before reaching that call, which would leave the first
+    // attempt's broken file on disk for `library::scan` to adopt.
+    let _ = std::fs::remove_file(dest);
+    tracing::warn!(
+        clip = %source.display(),
+        error = %format!("{first:#}"),
+        "export with audio failed, retrying video-only"
+    );
+
+    match attempt(false) {
         Ok(outcome) => Ok(outcome),
-        Err(err) => {
-            // Every failure from here on -- a refused video type, a mid-copy
-            // read error, zero video packets, a failed Finalize -- would
-            // otherwise leave a non-playable .mp4 at `dest`: truncated by
-            // `MFCreateSinkWriterFromURL`, missing its `moov` atom. Task 4
-            // hands exports straight to `library::scan`, which adopts any
-            // bare .mp4 it finds as a real clip, so a failed export must not
-            // leave a file behind at all. `run_export` owns the writer, so
-            // by the time its `Err` reaches here the writer -- and the file
-            // handle it held -- is already dropped.
-            let _ = std::fs::remove_file(request.dest);
+        // Deleted above, and this attempt never got as far as recreating it.
+        Err(Failed::BeforeCreating(err)) => Err(err),
+        Err(Failed::AfterCreating(err)) => {
+            let _ = std::fs::remove_file(dest);
             Err(err)
         }
     }
 }
 
-/// Everything from opening the sink writer through `Finalize`. Split out of
-/// `export_fast` so that function has exactly one place to clean up `dest`
-/// after: this owns the writer by value, so any early return -- `?` on a
-/// mid-copy failure included -- drops it, and its file handle, before the
-/// caller ever sees the error.
+/// One whole export attempt, from opening the source through `Finalize`.
+///
+/// An attempt opens its own reader rather than sharing one: this module never
+/// seeks (the source reader's `SetCurrentPosition` sits behind a cargo feature
+/// this workspace does not enable), so a reader already read to the out-point
+/// has nothing left to give a retry.
+fn attempt_export(
+    source: &Path,
+    dest: &Path,
+    start_100ns: i64,
+    end_100ns: i64,
+    with_audio: bool,
+) -> Attempt {
+    let (reader, video_type, audio_type) =
+        prepare(source, with_audio).map_err(Failed::BeforeCreating)?;
+    run_export(&reader, &video_type, audio_type.as_ref(), dest, start_100ns, end_100ns, source)
+        .map_err(Failed::AfterCreating)
+}
+
+/// Opens `source` for compressed reading and collects the media types the
+/// export will declare.
+///
+/// Every step is on the source side. Nothing here touches `dest`, which is
+/// what lets [`attempt_export`] label a failure from this function as "nothing
+/// landed".
+fn prepare(
+    source: &Path,
+    with_audio: bool,
+) -> Result<(IMFSourceReader, IMFMediaType, Option<IMFMediaType>)> {
+    let reader = open_compressed(source, with_audio)?;
+
+    // The source's own types, handed on to `open_sink` to be declared as both
+    // the stream type and the input type. That pairing is what tells the sink
+    // writer "do not transform this" -- the same guaranteed-passthrough trick
+    // `ClipMuxer::new` uses with the encoder's negotiated H.264 type.
+    let video_type = unsafe { reader.GetNativeMediaType(video_stream(), 0) }
+        .context("this clip has no video track")?;
+    // `GetNativeMediaType` describes the streams the file has and does not
+    // care whether `open_compressed` managed to select them, so this can hand
+    // back a type for an audio stream that will not actually read. Detecting
+    // that here is not worth it: the retry covers it, along with every other
+    // way audio can go wrong later on.
+    let audio_type = match with_audio {
+        true => unsafe { reader.GetNativeMediaType(audio_stream(), 0) }.ok(),
+        false => None,
+    };
+
+    Ok((reader, video_type, audio_type))
+}
+
+/// Everything from creating the sink writer through `Finalize`. Split out of
+/// [`attempt_export`] so that every failure from the moment `dest` is created
+/// -- the create call itself included, since it truncates `dest` and can still
+/// fail after that -- is one `Err` with one meaning. This owns the writer by
+/// value, so any early return, `?` on a mid-copy failure included, drops it,
+/// and the file handle it holds, before the caller deletes the file.
 fn run_export(
     reader: &IMFSourceReader,
     video_type: &IMFMediaType,
@@ -286,121 +419,82 @@ fn run_export(
     )?;
 
     if video.packets == 0 {
-        // An empty output is worse than no output: it lands in the library
-        // as a clip that will not play. This must be checked -- and must
-        // bail -- before Finalize: zero samples on a declared stream is
-        // Finalize's own documented failure mode, so checking after it would
-        // hand the caller a raw HRESULT instead of this message, and never
-        // reach the cleanup this bail exists to trigger.
+        // An empty output is worse than no output: it lands in the library as
+        // a clip that will not play. Checked here rather than after
+        // `Finalize`, because a sink that has been handed no samples at all
+        // fails `Finalize` with MF_E_SINK_NO_SAMPLES_PROCESSED (0xC00D4A44)
+        // -- measured against this codepath, not assumed -- and the caller
+        // deserves this sentence rather than that HRESULT. Video is copied
+        // first, so zero packets here means the sink has seen nothing.
         anyhow::bail!("that range contains no video");
     }
 
-    // Audio is best-effort once the stream is open: the video track is
-    // already written, and finalizing without an audio sample still produces
-    // a playable, video-only clip. `audio` is only ever `Some` when at least
-    // one sample was actually written, so `has_audio` below reports what
-    // landed in the file rather than merely what setup accepted.
-    let audio = audio_out.and_then(|stream| {
-        match copy_stream(
-            reader,
-            &writer,
-            audio_stream(),
-            stream,
-            start_100ns,
-            end_100ns,
-            source,
-            "audio",
-        ) {
-            Ok(copied) if copied.packets > 0 => Some(copied),
-            Ok(_) => {
+    // An audio failure propagates, unlike the empty audio range below: `?`
+    // here takes the whole attempt down so `export_fast` can delete it and
+    // re-run video-only. Carrying on instead would finalize a file whose audio
+    // stops partway through, which no `has_audio` value describes honestly.
+    let has_audio = match audio_out {
+        Some(stream) => {
+            let audio = copy_stream(
+                reader,
+                &writer,
+                audio_stream(),
+                stream,
+                start_100ns,
+                end_100ns,
+                source,
+                "audio",
+            )?;
+            if audio.packets == 0 {
+                // A declared stream that receives no sample is fine by the
+                // container: measured, an export that writes video samples and
+                // no audio samples finalizes cleanly, and the result re-indexes
+                // as a playable, video-only MP4. So an empty audio range is
+                // reported through `has_audio` rather than retried.
                 tracing::warn!(
                     clip = %source.display(),
-                    "audio stream was set up but the range produced no audio samples"
+                    "audio stream was declared but the range produced no audio samples"
                 );
-                None
             }
-            Err(err) => {
-                tracing::warn!(
-                    clip = %source.display(),
-                    error = %format!("{err:#}"),
-                    "audio copy failed, exporting video-only"
-                );
-                None
-            }
+            audio.packets > 0
         }
-    });
+        None => false,
+    };
 
     unsafe { writer.Finalize().context("Finalize(export)")? };
 
     Ok(ExportOutcome {
         duration_ms: (video.written_100ns / 10_000).max(0) as u64,
         video_packets: video.packets,
-        has_audio: audio.is_some(),
+        has_audio,
     })
 }
 
-/// Creates the sink writer at `dest`, adds the video stream as a guaranteed
-/// passthrough, and -- when `audio_type` is given -- attempts the same for
-/// audio. Returns the writer already past `BeginWriting`.
+/// Creates the sink writer at `dest`, declares the video stream and -- when
+/// `audio_type` is given -- the audio stream, and returns the writer past
+/// `BeginWriting`.
 ///
-/// Audio setup is all-or-nothing. `IMFSinkWriter` has no `RemoveStream`, so
-/// an `AddStream` that succeeds followed by a `SetInputMediaType` that fails
-/// would otherwise leave the writer holding a stream with an output type and
-/// no input type -- and `BeginWriting` then fails outright on that, turning
-/// "no audio" into "no export" instead of the documented video-only
-/// fallback. The fix is to throw the whole writer away on any audio
-/// refusal, delete the (empty, just-created) file it was writing to, and
-/// open a second writer with no audio stream at all.
+/// Each stream is declared with the *same* `IMFMediaType` object as both the
+/// `AddStream` type and the `SetInputMediaType` type. That pairing is the
+/// passthrough guarantee: the sink writer has no transform to insert when the
+/// input type it is handed is already the output type it was asked for.
+///
+/// The writer gets `MF_SINK_WRITER_DISABLE_THROTTLING`, exactly as
+/// `ClipMuxer::new` does and for the same reason: this module writes one whole
+/// track and then the other, and a throttled writer blocks `WriteSample`
+/// waiting for the lagging stream to catch up.
+///
+/// Every step propagates its failure, audio included. There is nothing to be
+/// gained by guarding the audio calls here: the MP4 sink accepts types at
+/// `AddStream` and `SetInputMediaType` that it can still refuse later, so a
+/// refusal is as likely to land in `copy_stream` or at `Finalize` as in this
+/// function. [`with_video_only_retry`] is what turns any of them into a silent
+/// export rather than a failed one.
 fn open_sink(
     dest: &Path,
     video_type: &IMFMediaType,
     audio_type: Option<&IMFMediaType>,
 ) -> Result<(IMFSinkWriter, u32, Option<u32>)> {
-    let (writer, video_out) = new_sink_writer(dest, video_type)?;
-
-    let Some(audio_type) = audio_type else {
-        unsafe { writer.BeginWriting().context("BeginWriting(export)")? };
-        return Ok((writer, video_out, None));
-    };
-
-    let audio_out = unsafe {
-        match writer.AddStream(audio_type) {
-            Ok(stream) => writer.SetInputMediaType(stream, audio_type, None).ok().map(|()| stream),
-            // AddStream refusing outright and SetInputMediaType refusing
-            // afterward both collapse to the same `None` here -- the match
-            // below treats an outright refusal and a failed passthrough
-            // identically, since both leave the writer in a state this
-            // function must not hand back to the caller.
-            Err(_) => None,
-        }
-    };
-
-    let (writer, video_out, audio_out) = match audio_out {
-        Some(stream) => (writer, video_out, Some(stream)),
-        None => {
-            // A source whose AAC type the MP4 sink will not take back
-            // verbatim is a silent export, not a failed one -- but only once
-            // the writer that saw the refusal is gone.
-            drop(writer);
-            let _ = std::fs::remove_file(dest);
-            let (writer, video_out) = new_sink_writer(dest, video_type)?;
-            (writer, video_out, None)
-        }
-    };
-
-    unsafe { writer.BeginWriting().context("BeginWriting(export)")? };
-    Ok((writer, video_out, audio_out))
-}
-
-/// Creates the sink writer at `dest` with `MF_SINK_WRITER_DISABLE_THROTTLING`
-/// set -- exactly as `ClipMuxer::new` does and for the same reason: this
-/// module writes one whole track and then the other, and a throttled writer
-/// blocks `WriteSample` waiting for the lagging stream to catch up. Adds the
-/// video stream and declares `video_type` as both the stream type and the
-/// input type, which is what guarantees the sink writer will not transform
-/// the samples. Does not call `BeginWriting`: the caller may still need to
-/// add an audio stream first.
-fn new_sink_writer(dest: &Path, video_type: &IMFMediaType) -> Result<(IMFSinkWriter, u32)> {
     unsafe {
         let mut attrs: Option<IMFAttributes> = None;
         MFCreateAttributes(&mut attrs, 1)?;
@@ -413,7 +507,20 @@ fn new_sink_writer(dest: &Path, video_type: &IMFMediaType) -> Result<(IMFSinkWri
         writer
             .SetInputMediaType(video_out, video_type, None)
             .context("SetInputMediaType(export video passthrough)")?;
-        Ok((writer, video_out))
+
+        let audio_out = match audio_type {
+            Some(audio_type) => {
+                let stream = writer.AddStream(audio_type).context("AddStream(export audio)")?;
+                writer
+                    .SetInputMediaType(stream, audio_type, None)
+                    .context("SetInputMediaType(export audio passthrough)")?;
+                Some(stream)
+            }
+            None => None,
+        };
+
+        writer.BeginWriting().context("BeginWriting(export)")?;
+        Ok((writer, video_out, audio_out))
     }
 }
 
@@ -573,6 +680,212 @@ mod tests {
         assert_eq!(empty_reads, 1, "the two gaps before the reset must not still be counted");
     }
 
+    /// Recognisable content for a file the export did not write. Every
+    /// destination-side assertion below turns on being able to tell "this file
+    /// is still the one the test put there" from "this file is something the
+    /// export produced" -- and, when the path is gone, on knowing that the
+    /// only thing that could have removed it is a delete.
+    const STUB: &[u8] = b"not a clip -- seeded by the test";
+
+    /// A private directory under the system temp dir, per test. Nothing here
+    /// ever reads or writes the developer's real config or clip library.
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("trix-export-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("creating the scratch dir");
+        dir
+    }
+
+    fn an_outcome(has_audio: bool) -> ExportOutcome {
+        ExportOutcome { duration_ms: 2_000, video_packets: 120, has_audio }
+    }
+
+    /// The retry, in the shape the real export uses it: the attempt that has
+    /// audio creates `dest` and then fails, and the video-only attempt has to
+    /// find the path clear before it recreates it -- because
+    /// `MFCreateSinkWriterFromURL` truncates rather than refuses, so a
+    /// leftover would be silently written over instead of cleaned up.
+    #[test]
+    fn a_failed_first_attempt_is_deleted_and_retried_video_only() {
+        let dir = scratch_dir("retry");
+        let dest = dir.join("out.mp4");
+        let mut attempts: Vec<bool> = Vec::new();
+
+        let outcome = with_video_only_retry(&dest, Path::new("clip.mp4"), |with_audio| {
+            attempts.push(with_audio);
+            if with_audio {
+                std::fs::write(&dest, b"half-written first attempt").unwrap();
+                Err(Failed::AfterCreating(anyhow::anyhow!("WriteSample(export)")))
+            } else {
+                assert!(
+                    !dest.exists(),
+                    "the first attempt's output must be gone before the retry recreates it"
+                );
+                std::fs::write(&dest, b"video-only export").unwrap();
+                Ok(an_outcome(false))
+            }
+        })
+        .expect("the video-only retry must succeed");
+
+        assert_eq!(attempts, vec![true, false], "exactly one retry, and it drops the audio");
+        assert!(!outcome.has_audio, "a video-only export must report has_audio: false");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"video-only export");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// When even the video-only attempt fails, the caller gets *that* error --
+    /// the audio attempt's is only a warning in the log -- and nothing is left
+    /// on disk for `library::scan` to adopt.
+    #[test]
+    fn both_attempts_failing_reports_the_second_and_leaves_nothing_behind() {
+        let dir = scratch_dir("both-fail");
+        let dest = dir.join("out.mp4");
+
+        let err = with_video_only_retry(&dest, Path::new("clip.mp4"), |with_audio| {
+            std::fs::write(&dest, b"half-written").unwrap();
+            let which = if with_audio { "the audio attempt" } else { "the video-only attempt" };
+            Err(Failed::AfterCreating(anyhow::anyhow!("{which} failed")))
+        })
+        .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("the video-only attempt"),
+            "the caller must see the last error, not the first: {err:#}"
+        );
+        assert!(!dest.exists(), "a wholly failed export must leave no file at all");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failure before the sink writer exists is not an audio failure and
+    /// `dest` is not the export's to delete: whatever is at that path was put
+    /// there by somebody else, and this export never touched it.
+    #[test]
+    fn a_failure_before_the_sink_exists_neither_retries_nor_deletes() {
+        let dir = scratch_dir("before-creating");
+        let dest = dir.join("out.mp4");
+        std::fs::write(&dest, STUB).unwrap();
+        let mut attempts: Vec<bool> = Vec::new();
+
+        let err = with_video_only_retry(&dest, Path::new("clip.mp4"), |with_audio| {
+            attempts.push(with_audio);
+            Err(Failed::BeforeCreating(anyhow::anyhow!("Windows could not open clip.mp4")))
+        })
+        .unwrap_err();
+
+        assert_eq!(attempts, vec![true], "a video-only retry would fail identically");
+        assert!(format!("{err:#}").contains("could not open"));
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            STUB,
+            "a file this export never created must survive its failure untouched"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The ordinary path: audio works, so there is no second attempt and the
+    /// output stays exactly as the first one wrote it.
+    #[test]
+    fn an_export_that_works_the_first_time_is_never_retried() {
+        let dir = scratch_dir("first-time");
+        let dest = dir.join("out.mp4");
+        let mut attempts: Vec<bool> = Vec::new();
+
+        let outcome = with_video_only_retry(&dest, Path::new("clip.mp4"), |with_audio| {
+            attempts.push(with_audio);
+            std::fs::write(&dest, b"an export with audio").unwrap();
+            Ok(an_outcome(true))
+        })
+        .expect("a working export must not be disturbed");
+
+        assert_eq!(attempts, vec![true], "no retry when the first attempt succeeds");
+        assert!(outcome.has_audio);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"an export with audio");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `dest == source` compared as written misses a second spelling of the
+    /// same file, and the cost of missing it is the source clip truncated by
+    /// `MFCreateSinkWriterFromURL` -- the export destroying the thing it was
+    /// asked to copy. Needs no Media Foundation: the refusal happens before
+    /// anything is opened.
+    #[test]
+    fn an_export_onto_the_source_is_refused_however_the_path_is_spelled() {
+        let dir = scratch_dir("same-file");
+        let clip = dir.join("clip.mp4");
+        std::fs::write(&clip, STUB).unwrap();
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+
+        // The same file by a different route. `PathBuf` comparison says these
+        // are two paths; the filesystem says they are one file.
+        let spelled_differently = dir.join("sub").join("..").join("clip.mp4");
+        assert_ne!(clip, spelled_differently, "the test needs two spellings, not two paths");
+
+        let err = export_fast(FastExport {
+            source: &clip,
+            dest: &spelled_differently,
+            start_ms: 0,
+            end_ms: 1_000,
+        })
+        .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("cannot be the source"),
+            "the refusal must name the reason: {err:#}"
+        );
+        assert_eq!(
+            std::fs::read(&clip).unwrap(),
+            STUB,
+            "the source clip must come out of a refused export byte for byte"
+        );
+        // The other spelling Windows lets through: same name, different case.
+        assert!(
+            names_the_same_file(&dir.join("CLIP.MP4"), &clip),
+            "a case-different path names the same file on this filesystem"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other half of the same guard: an ordinary export writes to a path
+    /// that does not exist yet, where `canonicalize` fails on the destination.
+    /// If that made the check say "same file", every export would be refused.
+    #[test]
+    fn a_destination_that_does_not_exist_yet_is_not_the_source() {
+        let dir = scratch_dir("distinct");
+        let clip = dir.join("clip.mp4");
+        std::fs::write(&clip, STUB).unwrap();
+        let dest = dir.join("export.mp4");
+
+        assert!(!names_the_same_file(&dest, &clip), "the ordinary export must not be refused");
+        assert!(names_the_same_file(&clip, &clip), "the identical spelling is still caught");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The pre-creation window, end to end through the public function: the
+    /// source does not exist, so `keyframes_ms` fails before any sink writer
+    /// is created, and the file already sitting at `dest` must be left exactly
+    /// as it was. (No Media Foundation involved -- `open_compressed` refuses a
+    /// path that is not a file before it starts MF.)
+    #[test]
+    fn a_source_that_cannot_be_read_leaves_the_destination_untouched() {
+        let dir = scratch_dir("no-source");
+        let dest = dir.join("out.mp4");
+        std::fs::write(&dest, STUB).unwrap();
+        let missing = dir.join("nope.mp4");
+
+        let err =
+            export_fast(FastExport { source: &missing, dest: &dest, start_ms: 0, end_ms: 1_000 })
+                .unwrap_err();
+
+        assert!(format!("{err:#}").contains("nope.mp4"), "the error must name the source: {err:#}");
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            STUB,
+            "a failure before `dest` was ever created must not delete what is there"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Runs against a real clip, so it is `#[ignore]`d: `cargo test` on a
     /// machine with no clips must not fail, and this needs Media Foundation,
     /// a real H.264 file, and a path only the developer knows.
@@ -603,8 +916,8 @@ mod tests {
             panic!("set TRIX_TEST_CLIP to an .mp4 path");
         };
         let source = Path::new(&path);
-        let dest = std::env::temp_dir().join("trix-export-test.mp4");
-        let _ = std::fs::remove_file(&dest);
+        let dir = scratch_dir("real-clip");
+        let dest = dir.join("trix-export-test.mp4");
 
         let outcome =
             export_fast(FastExport { source, dest: &dest, start_ms: 1_000, end_ms: 3_000 })
@@ -620,20 +933,22 @@ mod tests {
         let keys = keyframes_ms(&dest).expect("the export must itself be readable");
         assert_eq!(keys.first(), Some(&0), "the export must start on a keyframe");
 
-        let _ = std::fs::remove_file(&dest);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A range that snaps to a keyframe at or after every sample in it (here,
     /// `end_ms: 0` against a clip whose first frame is at `pts_100ns == 0`)
-    /// writes zero video packets. Before this review round the cleanup for
-    /// that case ran *after* `Finalize`, which fails outright on a stream
-    /// with no samples -- so the caller got a raw HRESULT instead of
-    /// `export_fast`'s own message, and `dest` (created and truncated by
-    /// `MFCreateSinkWriterFromURL` before any of that) was never removed.
-    /// This exercises the real failure path end-to-end -- no synthetic media
-    /// types, just a range guaranteed to be empty -- and checks both halves
-    /// of the fix: the caller-facing error, and that nothing broken is left
-    /// on disk for `library::scan` to adopt.
+    /// writes zero video packets, and a sink handed no samples at all fails
+    /// `Finalize` with MF_E_SINK_NO_SAMPLES_PROCESSED. So this exercises the
+    /// real failure path end to end -- no synthetic media types, just a range
+    /// guaranteed to be empty -- and checks both halves of the answer: the
+    /// caller-facing message, and that nothing broken is left on disk for
+    /// `library::scan` to adopt.
+    ///
+    /// `dest` is seeded first, with content nothing else would write. Its
+    /// absence at the end can then only be explained by a delete: an assertion
+    /// against a path the test itself had cleared could not tell "the export
+    /// created a file and cleaned it up" from "the export never got that far".
     ///
     ///   cargo test -p trix-core -- --ignored a_video_less_export_deletes_its_own_output_and_names_the_reason
     #[test]
@@ -643,22 +958,21 @@ mod tests {
             panic!("set TRIX_TEST_CLIP to an .mp4 path");
         };
         let source = Path::new(&path);
-        let dest = std::env::temp_dir().join("trix-export-empty-test.mp4");
-        let _ = std::fs::remove_file(&dest);
+        let dir = scratch_dir("empty-range");
+        let dest = dir.join("trix-export-empty-test.mp4");
+        std::fs::write(&dest, STUB).unwrap();
 
-        // Matched by hand, not `.expect_err()`: `ExportOutcome` has no
-        // `Debug` impl, and adding one only for this assertion is outside
-        // what this fix calls for.
-        match export_fast(FastExport { source, dest: &dest, start_ms: 0, end_ms: 0 }) {
-            Ok(_) => panic!("a zero-length range must not produce a clip"),
-            Err(err) => assert!(
-                format!("{err:#}").contains("no video"),
-                "the caller must see why, not a raw HRESULT: {err:#}"
-            ),
-        }
+        let err = export_fast(FastExport { source, dest: &dest, start_ms: 0, end_ms: 0 })
+            .expect_err("a zero-length range must not produce a clip");
+        assert!(
+            format!("{err:#}").contains("no video"),
+            "the caller must see why, not a raw HRESULT: {err:#}"
+        );
         assert!(
             !dest.exists(),
-            "a failed export must not leave the file MFCreateSinkWriterFromURL created behind"
+            "the seeded file was truncated by MFCreateSinkWriterFromURL and then had to be \
+             deleted; finding the path gone is the proof the delete ran"
         );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
