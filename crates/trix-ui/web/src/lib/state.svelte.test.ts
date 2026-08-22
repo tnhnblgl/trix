@@ -269,7 +269,7 @@ describe('AppState.exportTrim', () => {
     expect(app.toasts.at(-1)?.text).toContain('200');
   });
 
-  it('sends whole milliseconds in fast mode and reports the new clip with a toast', async () => {
+  it('sends whole milliseconds in fast mode', async () => {
     callMock.mockResolvedValue(clip('20260822_101500_trim'));
 
     await app.exportTrim('20260822_101500', 4000.4, 9000.6);
@@ -280,7 +280,50 @@ describe('AppState.exportTrim', () => {
       end_ms: 9001,
       mode: 'fast',
     });
-    expect(app.toasts.at(-1)?.kind).toBe('info');
+  });
+
+  // One export used to announce itself three times: the daemon's capture
+  // chime, "Saved <title>" from the `clip_saved` handler, and a flat "Trimmed
+  // clip saved." from here. The chime is gone on the daemon side and this
+  // toast is gone here; `clip_saved` is the survivor because it names the
+  // clip. So a plain successful export must say nothing at all from this
+  // method -- the announcement is the event's job.
+  it('leaves the success announcement to clip_saved rather than toasting twice', async () => {
+    app.clips = [clip('20260822_101500')];
+    callMock.mockResolvedValue(clip('20260822_101500_trim'));
+
+    await app.exportTrim('20260822_101500', 4000, 9000);
+
+    expect(app.toasts).toHaveLength(0);
+  });
+
+  // The daemon's audio fallback is deliberate and documented: any AAC
+  // passthrough failure re-runs the whole export with no audio stream and
+  // reports `has_audio: false`. That is a success everywhere else in this app,
+  // so without this the user finds out by playing the clip back. Whether AAC
+  // survives passthrough is the one thing about fast mode nobody could verify
+  // up front -- on a machine where it does not, every export is silent.
+  it('says so when a clip that had sound comes back without it', async () => {
+    app.clips = [clip('20260822_101500')];
+    callMock.mockResolvedValue({ ...clip('20260822_101500_trim'), has_audio: false });
+
+    await app.exportTrim('20260822_101500', 4000, 9000);
+
+    expect(app.toasts.at(-1)?.kind).toBe('error');
+    expect(app.toasts.at(-1)?.text).toContain('without sound');
+  });
+
+  // The other half of the same rule: a source with no audio track produces an
+  // export with no audio track, and that is not a loss to report. Warning here
+  // would fire on every trim of a clip recorded with the microphone and system
+  // audio both off, and a warning that is always wrong is one nobody reads.
+  it('stays quiet when the source had no sound to lose', async () => {
+    app.clips = [{ ...clip('20260822_101500'), has_audio: false }];
+    callMock.mockResolvedValue({ ...clip('20260822_101500_trim'), has_audio: false });
+
+    await app.exportTrim('20260822_101500', 4000, 9000);
+
+    expect(app.toasts).toHaveLength(0);
   });
 
   // The new clip reaches the grid on the daemon's own `clip_saved` broadcast,

@@ -351,6 +351,26 @@ pub(crate) struct ConfigUpdate {
     pub clip_dir_resolved: String,
 }
 
+/// Whether [`Daemon::record_saved_clip`] should play the configured clip
+/// sound, which is the one behaviour a hotkey clip and a trim export do not
+/// share.
+///
+/// A named enum rather than a `bool` because it is read at the call site, not
+/// at the definition: `record_saved_clip(&meta, false)` says nothing about
+/// what is being switched off, and this is exactly the parameter someone will
+/// later add a third caller against.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PlaySound {
+    /// A clip taken off the live ring, by hotkey, tray, or the `clip` command.
+    /// The user may be mid-game with no Trix window in front of them, and the
+    /// chime is the only feedback there is.
+    Yes,
+    /// An export the user asked for in the window and is watching finish. The
+    /// UI's own toast says so; the capture chime here would mean "the replay
+    /// hotkey fired", which is not what happened.
+    No,
+}
+
 pub struct Daemon {
     pub config: Mutex<Config>,
     /// Where `config.set` persists. `None` means there is nowhere to save —
@@ -603,7 +623,10 @@ impl Daemon {
             state.engine.clip()?
         };
         if let Some(meta) = &saved {
-            self.record_saved_clip(meta);
+            // The one path the chime belongs to: something was captured off
+            // the live ring, and the user may well be mid-game with no window
+            // in front of them.
+            self.record_saved_clip(meta, PlaySound::Yes);
         }
         Ok(saved)
     }
@@ -617,7 +640,17 @@ impl Daemon {
     /// went three plans without an event for the hotkey path. This half needs
     /// only a `ClipMeta`, so the guarantee that a recorded clip is an
     /// announced clip is now something a test can hold.
-    fn record_saved_clip(&self, meta: &ClipMeta) {
+    ///
+    /// `sound` is the one thing the two callers disagree about, and it is why
+    /// this takes a parameter rather than always chiming. Everything else here
+    /// -- the cache insert, the ceiling, the `clip_saved` broadcast -- has to
+    /// happen for an export exactly as it does for a hotkey clip, which is why
+    /// `export_clip` routes through this function instead of doing those three
+    /// things by hand. The chime does not: it is the sound that has meant one
+    /// thing since the feature shipped, "the replay hotkey fired", and hearing
+    /// it because a window in front of you finished a trim you asked for is
+    /// both redundant and, mid-game, actively confusing.
+    fn record_saved_clip(&self, meta: &ClipMeta, sound: PlaySound) {
         // Read before the library lock is taken, not after. `config` is only
         // ever held alone or under `armed` (see the lock ordering above), and
         // taking it after `library` here would introduce the first place in
@@ -633,13 +666,16 @@ impl Daemon {
         // takes no lock of its own -- it only reads the guard already held
         // -- so this cannot deadlock the way calling `custom_sound_source`
         // while holding the guard would.
-        let sound = {
-            let config = self.lock_config();
-            // `None` here means "do not play"; `Some(None)` means the
-            // built-in chime, which is what `resolve_sound` returns for a
-            // sound that is unset or has nowhere cached. `play` takes `None`
-            // to mean the built-in chime either way.
-            config.clip_sound.then(|| resolve_sound(&config, self.config_path.as_deref()))
+        let sound = match sound {
+            PlaySound::No => None,
+            PlaySound::Yes => {
+                let config = self.lock_config();
+                // `None` here means "do not play"; `Some(None)` means the
+                // built-in chime, which is what `resolve_sound` returns for a
+                // sound that is unset or has nowhere cached. `play` takes
+                // `None` to mean the built-in chime either way.
+                config.clip_sound.then(|| resolve_sound(&config, self.config_path.as_deref()))
+            }
         };
 
         // Prepended, matching `library::scan`'s newest-first order. This is
@@ -1492,7 +1528,13 @@ impl Daemon {
         // by design, spec §5.2 — could not then show, and would skip the
         // library-ceiling check that the bytes this export just added are
         // exactly what it exists to notice.
-        self.record_saved_clip(&meta);
+        //
+        // Without the chime, though. It is the sound that has meant "the
+        // replay hotkey fired" since the feature shipped, and an export is a
+        // thing the user just asked for in a window they are looking at --
+        // hearing the capture sound while armed and in-game reads as a clip
+        // they did not take.
+        self.record_saved_clip(&meta, PlaySound::No);
         Ok(meta)
     }
 
@@ -2221,7 +2263,7 @@ mod tests {
         let (tx, rx) = sync_channel(crate::clients::OUTBOUND_QUEUE_DEPTH);
         daemon.clients.register(tx);
 
-        daemon.record_saved_clip(&meta("20260803_120000"));
+        daemon.record_saved_clip(&meta("20260803_120000"), PlaySound::Yes);
 
         // The library half — the part that already worked.
         assert_eq!(
@@ -2257,7 +2299,7 @@ mod tests {
         let (tx, rx) = sync_channel(crate::clients::OUTBOUND_QUEUE_DEPTH);
         daemon.clients.register(tx);
 
-        daemon.record_saved_clip(&meta("20260817_120000"));
+        daemon.record_saved_clip(&meta("20260817_120000"), PlaySound::Yes);
 
         let line = rx.try_recv().expect("a saved clip must still broadcast clip_saved");
         assert!(line.contains("clip_saved"), "the sound must not displace the event: {line}");

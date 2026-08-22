@@ -218,6 +218,10 @@ class AppState {
       this.toast('error', problem);
       return;
     }
+    // Read before the call, because the response is what replaces it: the
+    // question below is "did this clip have sound before I trimmed it", and
+    // after `clip_saved` lands `this.clips` also holds the export.
+    const sourceHadAudio = this.clips.find((c) => c.id === id)?.has_audio ?? false;
     try {
       // The daemon allocates the new clip's id and path, so there is no
       // destination to send -- and it broadcasts `clip_saved` for the result,
@@ -226,13 +230,35 @@ class AppState {
       // at the clip they trimmed. `fast` is the only mode the daemon accepts
       // (it refuses `precise` by name), so it is sent as a constant rather
       // than offered as a choice.
-      await call<ClipMeta>('library.export', {
+      const saved = await call<ClipMeta>('library.export', {
         clip_id: id,
         start_ms: Math.round(startMs),
         end_ms: Math.round(endMs),
         mode: 'fast',
       });
-      this.toast('info', 'Trimmed clip saved.');
+      // No success toast here. `clip_saved` arrives from the same daemon call
+      // and the handler in `wireDaemon` already toasts "Saved <title>" --
+      // which for an export names the clip ("... (trimmed)") rather than just
+      // saying that something happened, so it is the more useful of the two.
+      // One export used to announce itself three times: that toast, a flat
+      // "Trimmed clip saved." from here, and the capture chime, which the
+      // daemon no longer plays for an export.
+      //
+      // What is left is the one thing no other message can say. The daemon's
+      // audio policy is a documented fallback: if anything about AAC
+      // passthrough fails, the whole export is re-run with no audio stream and
+      // comes back `has_audio: false` -- a success as far as every other part
+      // of this app is concerned. Whether AAC survives passthrough is the one
+      // thing about fast mode that could not be verified up front, so on the
+      // machine where it does not, *every* export is silent, and without this
+      // the only record is a warning in the daemon's log and the only way to
+      // find out is to play the clip back.
+      if (sourceHadAudio && !saved.has_audio) {
+        this.toast(
+          'error',
+          "The trim was saved without sound: this clip's audio could not be copied.",
+        );
+      }
     } catch (e) {
       this.toast('error', String(e));
     }
