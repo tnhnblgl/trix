@@ -122,12 +122,15 @@
       if (e.key === 'Escape') confirmingDelete = false;
       return;
     }
-    // Ahead of `shouldHandleKey`, and ahead of the switch, for two reasons.
-    // It carries a modifier, which the switch's plain `e.key` cases cannot
-    // express; and it has to survive being pressed while a trim slider has
-    // focus, which is exactly where the pointer just was. `shouldHandleKey`
-    // drops every key aimed at an <input>, the sliders included, so a Ctrl+E
-    // placed below it would be swallowed by the control that set the range.
+    // Ahead of the switch because it carries a modifier, which the switch's
+    // plain `e.key` cases cannot express, and ahead of `shouldHandleKey` so
+    // that the one shortcut with no button to fall back on cannot be taken
+    // away by whatever happens to hold focus. It used to be load-bearing:
+    // `shouldHandleKey` dropped every key aimed at an <input>, the trim
+    // sliders included, so this was the only shortcut that survived a click on
+    // a handle. `keys.ts` now excludes non-typing input types, so the sliders
+    // no longer swallow anything and the rest of the switch works after a
+    // drag too — this stays above out of belt-and-braces, not necessity.
     // The only other input on this page is the rename field, and the
     // `renaming` branch above has already returned by the time we get here.
     // `!e.altKey` is not defensive tidiness: Windows reports AltGr as

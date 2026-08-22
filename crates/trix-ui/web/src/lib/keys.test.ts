@@ -23,6 +23,31 @@ describe('isTypingTarget', () => {
     // free pass on arrow keys that `TYPING_TAGS` grants.
     expect(isTypingTarget(target({ tagName: 'BUTTON' }))).toBe(false);
   });
+
+  it('does not treat an input that takes no text as text entry', () => {
+    // The trim bar's In and Out handles. WebView2 focuses an input on click,
+    // so before this every app shortcut on the clip page died the moment a
+    // handle was touched — `o` stopped marking the out point, Space stopped
+    // playing, Escape stopped going back.
+    expect(isTypingTarget(target({ tagName: 'INPUT', type: 'range' }))).toBe(false);
+    expect(isTypingTarget(target({ tagName: 'INPUT', type: 'checkbox' }))).toBe(false);
+    expect(isTypingTarget(target({ tagName: 'INPUT', type: 'radio' }))).toBe(false);
+    expect(isTypingTarget(target({ tagName: 'INPUT', type: 'button' }))).toBe(false);
+    // Case-folded, since the property is only normalized on a real element.
+    expect(isTypingTarget(target({ tagName: 'input', type: 'RANGE' }))).toBe(false);
+  });
+
+  it('still keeps every key for the input types that do take text', () => {
+    // The rename field on the clip page and the numeric settings fields. An
+    // `<input>` with no type attribute is a text field.
+    expect(isTypingTarget(target({ tagName: 'INPUT', type: 'text' }))).toBe(true);
+    expect(isTypingTarget(target({ tagName: 'INPUT', type: 'number' }))).toBe(true);
+    expect(isTypingTarget(target({ tagName: 'INPUT' }))).toBe(true);
+    // `type` belongs to `<input>` alone: `<textarea>` reports 'textarea' and
+    // `<select>` reports 'select-one', and neither must be read as a slider.
+    expect(isTypingTarget(target({ tagName: 'TEXTAREA', type: 'textarea' }))).toBe(true);
+    expect(isTypingTarget(target({ tagName: 'SELECT', type: 'select-one' }))).toBe(true);
+  });
 });
 
 describe('isActivatableTarget', () => {
@@ -31,6 +56,22 @@ describe('isActivatableTarget', () => {
     expect(isActivatableTarget(target({ tagName: 'DIV' }))).toBe(false);
     expect(isActivatableTarget(target({}))).toBe(false);
     expect(isActivatableTarget(null)).toBe(false);
+  });
+
+  it('covers the input types that behave like a button, but not the slider', () => {
+    // Once a checkbox stops counting as text entry it stops getting the free
+    // pass that kept Space with it, and Space is the one key it really owns.
+    expect(isActivatableTarget(target({ tagName: 'INPUT', type: 'checkbox' }))).toBe(true);
+    expect(isActivatableTarget(target({ tagName: 'INPUT', type: 'radio' }))).toBe(true);
+    expect(isActivatableTarget(target({ tagName: 'INPUT', type: 'button' }))).toBe(true);
+    // A range input does nothing with Space, so Space must reach the page and
+    // play the video — the clip page's most-used key, at the control the user
+    // most recently clicked.
+    expect(isActivatableTarget(target({ tagName: 'INPUT', type: 'range' }))).toBe(false);
+    // A text input is a typing target instead; it must not also claim to be
+    // activatable, or Enter in the rename field would take a second rule.
+    expect(isActivatableTarget(target({ tagName: 'INPUT', type: 'text' }))).toBe(false);
+    expect(isActivatableTarget(target({ tagName: 'INPUT' }))).toBe(false);
   });
 });
 
@@ -84,6 +125,25 @@ describe('shouldHandleKey', () => {
     expect(shouldHandleKey(field, ' ', false)).toBe(false);
     // Even inside the grid: a rename box is still a rename box.
     expect(shouldHandleKey(field, 'ArrowRight', true)).toBe(false);
+  });
+
+  it('gives the clip page back every shortcut a focused trim handle used to eat', () => {
+    // The whole point of the input-type split. A user drags In, so the slider
+    // has focus, and then reaches for the keyboard: `o` marks the out point,
+    // Space plays, Escape returns to the grid, Delete opens the confirm strip,
+    // and the arrows step to the next clip rather than nudging the value they
+    // just set by one millisecond.
+    const slider = target({ tagName: 'INPUT', type: 'range' });
+    for (const key of ['o', 'i', ' ', 'Escape', 'Delete', 'ArrowLeft', 'ArrowRight', 'e']) {
+      expect(shouldHandleKey(slider, key)).toBe(true);
+    }
+  });
+
+  it('leaves Space to a focused checkbox but not the rest of its keys', () => {
+    const box = target({ tagName: 'INPUT', type: 'checkbox' });
+    expect(shouldHandleKey(box, ' ')).toBe(false);
+    expect(shouldHandleKey(box, 'Enter')).toBe(false);
+    expect(shouldHandleKey(box, 'ArrowRight')).toBe(true);
   });
 
   it('handles everything when nothing is focused', () => {
