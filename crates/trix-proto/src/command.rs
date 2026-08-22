@@ -9,8 +9,7 @@ pub const DEFAULT_LIST_LIMIT: usize = 50;
 /// Hard ceiling on `library.list`'s page size.
 pub const MAX_LIST_LIMIT: usize = 500;
 
-/// Every command the daemon answers. `library.export` is deliberately absent —
-/// it arrives with trim support.
+/// Every command the daemon answers.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     Status,
@@ -36,6 +35,25 @@ pub enum Command {
     },
     LibraryReveal {
         clip_id: String,
+    },
+    /// Every keyframe position in a clip, in milliseconds. The trim bar draws
+    /// a tick at each one and snaps the in-point to them (spec §6.3).
+    LibraryKeyframes {
+        clip_id: String,
+    },
+    /// Exports `start_ms..end_ms` of a clip as a **new clip in the library**,
+    /// answering with its `ClipMeta`.
+    ///
+    /// No `dest`: the daemon allocates the id and the path, because an export
+    /// that landed outside the clip directory would be invisible to every
+    /// other `library.*` command. `mode` is on the wire so that `precise`
+    /// slots in without a protocol change, but the daemon currently answers
+    /// anything other than `fast` with an error.
+    LibraryExport {
+        clip_id: String,
+        start_ms: u64,
+        end_ms: u64,
+        mode: String,
     },
     MonitorsList,
     EncodersList,
@@ -98,6 +116,13 @@ impl Command {
                 favorite: bool_arg(req, "favorite")?,
             },
             "library.reveal" => Self::LibraryReveal { clip_id: str_arg(req, "clip_id")? },
+            "library.keyframes" => Self::LibraryKeyframes { clip_id: str_arg(req, "clip_id")? },
+            "library.export" => Self::LibraryExport {
+                clip_id: str_arg(req, "clip_id")?,
+                start_ms: u64_arg(req, "start_ms")?,
+                end_ms: u64_arg(req, "end_ms")?,
+                mode: req.args.get("mode").and_then(Value::as_str).unwrap_or("fast").to_string(),
+            },
             "monitors.list" => Self::MonitorsList,
             "encoders.list" => Self::EncodersList,
             "stats.subscribe" => Self::StatsSubscribe { enabled: bool_arg(req, "enabled")? },
@@ -125,6 +150,13 @@ fn bool_arg(req: &Request, key: &str) -> Result<bool, String> {
         .ok_or_else(|| format!("{} requires a boolean {key:?}", req.cmd))
 }
 
+fn u64_arg(req: &Request, key: &str) -> Result<u64, String> {
+    req.args
+        .get(key)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("{} requires a non-negative integer {key:?}", req.cmd))
+}
+
 /// An absent argument means `default`; a present one that is not a
 /// non-negative whole number is an error, matching [`str_arg`] and
 /// [`bool_arg`]. Silently defaulting a bad page number would let a UI's paging
@@ -143,6 +175,8 @@ fn usize_arg(req: &Request, key: &str, default: usize) -> Result<usize, String> 
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Map;
+
     use super::*;
     use crate::message::decode_request;
 
@@ -239,5 +273,54 @@ mod tests {
         let (id, cmd) = parse(r#"{"id":3,"cmd":"shutdown"}"#);
         assert_eq!(id, 3);
         assert_eq!(cmd.unwrap(), Command::Shutdown);
+    }
+
+    #[test]
+    fn library_keyframes_needs_a_clip_id() {
+        let req = Request {
+            id: 1,
+            cmd: "library.keyframes".into(),
+            args: serde_json::from_str(r#"{"clip_id":"20260822_101500"}"#).unwrap(),
+        };
+        assert_eq!(
+            Command::parse(&req),
+            Ok(Command::LibraryKeyframes { clip_id: "20260822_101500".into() })
+        );
+
+        let bare = Request { id: 1, cmd: "library.keyframes".into(), args: Map::new() };
+        assert!(Command::parse(&bare).is_err(), "a missing clip_id must be an error response");
+    }
+
+    #[test]
+    fn library_export_defaults_mode_to_fast() {
+        let req = Request {
+            id: 2,
+            cmd: "library.export".into(),
+            args: serde_json::from_str(
+                r#"{"clip_id":"20260822_101500","start_ms":1000,"end_ms":4000}"#,
+            )
+            .unwrap(),
+        };
+        assert_eq!(
+            Command::parse(&req),
+            Ok(Command::LibraryExport {
+                clip_id: "20260822_101500".into(),
+                start_ms: 1000,
+                end_ms: 4000,
+                mode: "fast".into(),
+            }),
+            "an omitted mode is fast -- the only mode that exists"
+        );
+    }
+
+    #[test]
+    fn library_export_requires_both_bounds() {
+        let req = Request {
+            id: 3,
+            cmd: "library.export".into(),
+            args: serde_json::from_str(r#"{"clip_id":"20260822_101500","start_ms":1000}"#).unwrap(),
+        };
+        let error = Command::parse(&req).expect_err("a missing end_ms must be refused");
+        assert!(error.contains("end_ms"), "the message must name the missing argument: {error}");
     }
 }
