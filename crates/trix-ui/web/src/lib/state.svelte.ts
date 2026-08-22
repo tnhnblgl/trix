@@ -20,6 +20,27 @@ let nextToastId = 1;
  */
 const MIN_TRIM_MS = 200;
 
+/**
+ * Why `[startMs, endMs)` cannot be exported, or null when it can.
+ *
+ * Pulled out of `exportTrim` so the clip page can ask the same question
+ * *before* the user commits: In and Out can be crossed by either slider and
+ * by either of `i`/`o`, and until this existed the only thing that said so
+ * was a toast fired after the export button had already been pressed. One
+ * function rather than two copies of the rule -- the button's disabled state
+ * and the refusal that Ctrl+E still needs have to agree, or the button greys
+ * out for a range the keyboard would have accepted.
+ *
+ * Pure and exported for the same reason it is here rather than in the
+ * component: this is the one piece of the trim UI a test can execute, since
+ * the suite runs on node with no DOM.
+ */
+export function trimRangeError(startMs: number, endMs: number): string | null {
+  if (endMs <= startMs) return 'Set the out point after the in point.';
+  if (endMs - startMs < MIN_TRIM_MS) return `A trim has to be at least ${MIN_TRIM_MS} ms long.`;
+  return null;
+}
+
 class AppState {
   connected = $state(false);
   status = $state<Status | null>(null);
@@ -189,12 +210,12 @@ class AppState {
    * what to do about it.
    */
   async exportTrim(id: string, startMs: number, endMs: number) {
-    if (endMs <= startMs) {
-      this.toast('error', 'Set the out point after the in point.');
-      return;
-    }
-    if (endMs - startMs < MIN_TRIM_MS) {
-      this.toast('error', `A trim has to be at least ${MIN_TRIM_MS} ms long.`);
+    // Kept here even though the clip page now disables the button for these
+    // two: Ctrl+E has no button to grey out, and this is also the entry point
+    // any future caller reaches.
+    const problem = trimRangeError(startMs, endMs);
+    if (problem) {
+      this.toast('error', problem);
       return;
     }
     try {

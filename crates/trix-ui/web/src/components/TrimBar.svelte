@@ -15,6 +15,7 @@
     keyframes,
     inMs,
     outMs,
+    rangeError,
     onchange,
     onseek,
   }: {
@@ -23,6 +24,10 @@
     keyframes: number[];
     inMs: number;
     outMs: number;
+    /** Why the current range cannot be exported, or null when it can. Decided
+        by the page (which owns the daemon's rules), shown here, so the user
+        reads it while making the mistake rather than after pressing Export. */
+    rangeError: string | null;
     onchange: (inMs: number, outMs: number) => void;
     onseek: (ms: number) => void;
   } = $props();
@@ -80,20 +85,37 @@
   <div class="handles">
     <label>
       In
+      <!-- The element's own value is written back after snapping. `value=` is
+           one-way, so Svelte only touches the DOM when `inMs` actually
+           changes -- and a drag from 1.0s to 1.8s over keyframes [0, 2000]
+           snaps to 0 both times, which is the value the state already holds.
+           No prop change, no DOM write, and the thumb stays under the pointer
+           while the highlight and the readout sit at 0. Assigning it here is
+           what makes the handle land where the export will really cut, which
+           is the whole reason the ticks are drawn. -->
       <input
         type="range" min="0" max={durationMs} step="1" value={inMs}
-        oninput={(e) => onchange(snap(Number(e.currentTarget.value)), outMs)} />
+        oninput={(e) => {
+          const snapped = snap(Number(e.currentTarget.value));
+          e.currentTarget.value = String(snapped);
+          onchange(snapped, outMs);
+        }} />
     </label>
     <label>
       Out
+      <!-- Out is reported raw: fast mode cuts the end where it is asked to, so
+           there is no snap to diverge from and the element already holds what
+           the parent will store. If a transform is ever added here it needs
+           the same write-back as In, for the same reason. -->
       <input
         type="range" min="0" max={durationMs} step="1" value={outMs}
         oninput={(e) => onchange(inMs, Number(e.currentTarget.value))} />
     </label>
   </div>
 
-  <p class="readout">
-    In {secs(inMs)} &middot; Out {secs(outMs)} &middot; {secs(outMs - inMs)} selected
+  <p class="readout" class:bad={rangeError !== null}>
+    In {secs(inMs)} &middot; Out {secs(outMs)} &middot; {secs(outMs - inMs)} selected{#if rangeError}
+      &middot; {rangeError}{/if}
   </p>
 </div>
 
@@ -107,4 +129,7 @@
   .handles label { flex: 1; display: flex; align-items: center; gap: 8px; color: var(--dim); font-size: 12px; }
   .handles input { flex: 1; }
   .readout { margin: 0; color: var(--dim); font-size: 12px; }
+  /* An unexportable range reads as a sliver on the track and "0.0s selected"
+     in the numbers, neither of which says what is wrong. This does. */
+  .readout.bad { color: var(--danger); }
 </style>

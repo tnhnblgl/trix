@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { app } from '../lib/state.svelte';
+  import { app, trimRangeError } from '../lib/state.svelte';
   import { clipUrl, counterLabel, formatBytes, formatDuration } from '../lib/clips';
   import { shouldHandleKey } from '../lib/keys';
   import TrimBar from '../components/TrimBar.svelte';
@@ -32,6 +32,18 @@
   // not to offer the control at all than to hand back a refusal.
   const canTrim = $derived(clipDurationMs > 0);
 
+  // Why the current range cannot be exported, or null when it can. Nothing
+  // stops In and Out crossing -- both sliders and both of `i`/`o` can do it --
+  // and the deliberate choice here is to *say so* rather than to silently drag
+  // the partner handle along. `i` and `o` mean "mark the frame I am looking
+  // at"; a clamp that answered `i` at 12s with an in-point of 8s would be
+  // moving a point the user had just set on purpose. So the mistake is named
+  // where it is made: the readout under the bar states it and the Export
+  // button is disabled, instead of a toast arriving after the press.
+  // Same rule as `exportTrim`'s refusal, from the same function, so the greyed
+  // button and Ctrl+E can never disagree about what is exportable.
+  const rangeError = $derived(canTrim ? trimRangeError(inMs, outMs) : null);
+
   // Guards against a stale fetch landing on the wrong clip. Stepping through
   // clips with the arrow keys is faster than a keyframe index of a long clip,
   // and the ticks of the clip you left must not appear over the one you are
@@ -47,6 +59,15 @@
     inMs = 0;
     outMs = clipDurationMs;
     playheadMs = 0;
+    // Cleared with the rest, not left standing until the new fetch lands. The
+    // token below stops a *late* result appearing over the wrong clip; it does
+    // nothing about the *previous* result still being displayed, and a
+    // keyframe index takes longer than an arrow key. Holding the old list
+    // would draw the previous clip's ticks rescaled to this clip's duration
+    // and -- worse -- `snap()` would report an in-point off that list, so the
+    // readout would name a cut the daemon is not going to make. No ticks for a
+    // moment is honest; the wrong ticks are not.
+    keyframes = [];
     const token = ++keyframeToken;
     void (async () => {
       const found = await app.keyframesFor(id);
@@ -109,7 +130,17 @@
     // placed below it would be swallowed by the control that set the range.
     // The only other input on this page is the rename field, and the
     // `renaming` branch above has already returned by the time we get here.
-    if (e.key === 'e' && e.ctrlKey) {
+    // `!e.altKey` is not defensive tidiness: Windows reports AltGr as
+    // Ctrl+Alt, so every AltGr press arrives here already looking like Ctrl.
+    // This machine runs a Turkish Q layout, where AltGr is a live typing
+    // modifier (AltGr+E is the euro sign), and an AltGr combination the layout
+    // does not map still delivers the base letter in `e.key` -- so a
+    // `ctrlKey`-only test fires a full export and preventDefault()s the
+    // keystroke, leaving a stray trimmed clip in the library from a press
+    // meant to type a character. Settings.svelte's `captureHotkey` already
+    // keeps ctrl and alt apart when it records a combo; this is the same
+    // distinction on the reading side.
+    if (e.key === 'e' && e.ctrlKey && !e.altKey) {
       e.preventDefault();
       void exportTrim();
       return;
@@ -190,6 +221,7 @@
       {keyframes}
       {inMs}
       {outMs}
+      {rangeError}
       onchange={(i, o) => { inMs = i; outMs = o; }}
       onseek={(ms) => { if (video) video.currentTime = ms / 1000; }} />
   {/if}
@@ -208,7 +240,13 @@
       <span class="title">{clip.title}</span>
       <button onclick={startRename} disabled={confirmingDelete}>Rename</button>
       {#if canTrim}
-        <button onclick={exportTrim} disabled={confirmingDelete || exporting}>
+        <!-- `title` carries the reason: a disabled button with no explanation
+             is its own puzzle, and the readout under the bar is the other
+             half of the answer. -->
+        <button
+          onclick={exportTrim}
+          disabled={confirmingDelete || exporting || rangeError !== null}
+          title={rangeError ?? ''}>
           {exporting ? 'Exporting…' : 'Export trimmed'}
         </button>
       {/if}

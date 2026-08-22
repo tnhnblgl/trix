@@ -36,7 +36,7 @@ vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(),
 }));
 
-const { app, wireDaemon, UpdateStore } = await import('./state.svelte');
+const { app, wireDaemon, UpdateStore, trimRangeError } = await import('./state.svelte');
 const { onConnected, onDaemonEvent } = await import('./ipc');
 
 /**
@@ -306,6 +306,29 @@ describe('AppState.exportTrim', () => {
 
     expect(app.toasts.at(-1)?.text).toContain('this clip has no duration to trim');
     expect(app.toasts.at(-1)?.kind).toBe('error');
+  });
+});
+
+describe('trimRangeError', () => {
+  // The clip page disables Export on this and prints the reason under the
+  // bar, and `exportTrim` refuses on the same call -- so the two can only
+  // agree because they ask one function. It is also the only part of the trim
+  // UI a test can execute: the suite runs on node with no DOM, so the bar,
+  // the sliders and the key bindings are read-verified instead.
+  it('accepts a range at or above the 200 ms floor', () => {
+    expect(trimRangeError(0, 200)).toBeNull();
+    expect(trimRangeError(4000, 9000)).toBeNull();
+  });
+
+  it('names the in/out order when the range is empty or inverted', () => {
+    // Crossing is what `i` at 12s after `o` at 8s produces, and what either
+    // slider dragged past the other produces.
+    expect(trimRangeError(12000, 8000)).toBe('Set the out point after the in point.');
+    expect(trimRangeError(4000, 4000)).toBe('Set the out point after the in point.');
+  });
+
+  it('names the floor when the range is positive but too short', () => {
+    expect(trimRangeError(4000, 4150)).toContain('200');
   });
 });
 
