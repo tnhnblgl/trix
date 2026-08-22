@@ -1,4 +1,4 @@
-Trix 0.6.0
+Trix 0.7.0
 ==========
 
 A clip recorder for Windows, for people whose PC cannot spare the frames.
@@ -6,6 +6,26 @@ Trix keeps the last few seconds of your screen in memory and writes them to
 a file when you press a key. Capture and encoding run on the GPU, so the
 cost to your game is close to nothing, and the app itself stays out of the
 way while you play.
+
+
+NEW IN 0.7.0
+------------
+
+You can trim a clip. Open one, drag the In and Out handles on the bar under
+the player to pick the part you want, then press Ctrl+E or the Export
+button. That range is saved as a new clip in your library and the original
+is left exactly as it was. I and O set the two points to whatever the
+player is showing, so you can trim while you watch.
+
+Trimming copies the picture and the sound as they were recorded rather than
+making them again, so an export finishes in well under a second and loses
+no quality at all.
+
+The In handle moves about a second at a time, and the tick marks on the bar
+show you why: a clip can only begin at one of those points, so Trix puts
+your in point on the last one at or before where you dropped it. The Out
+handle can land anywhere. Starting on an exact frame would mean making the
+picture again, and that is not in yet.
 
 
 NEW IN 0.6.0
@@ -36,7 +56,7 @@ at all. Both are fixed, and links in the app now open in your browser.
 
 PLEASE NOTE: this is a version you have to install by hand, once. Every
 release up to and including 0.5.2 carries the broken updater inside it, so
-none of them can fetch this one -- that is the bug. Download 0.6.0 from the
+none of them can fetch this one -- that is the bug. Download 0.7.0 from the
 releases page and unzip it over your old folder. Your settings and your
 clips live elsewhere and are not touched. From 0.5.3 onward the in-app
 updater works normally again.
@@ -62,7 +82,7 @@ component that was never included in the build, and that ended the app on the
 spot. It is included now.
 
 If you are on 0.4.0 or 0.5.0, Trix cannot update itself out of this, because
-the update check is the thing that closed it. Download 0.6.0 by hand from the
+the update check is the thing that closed it. Download 0.7.0 by hand from the
 releases page and unzip it over your old folder. Your settings and your clips
 are somewhere else and are not touched.
 
@@ -197,8 +217,10 @@ KNOWN LIMITS IN THIS RELEASE
     another combination, and the Test button there tells you whether Trix
     actually received your key.
 
-  * No trimming or exporting yet. Clips are saved whole, at the length you
-    set. That is the next thing being built.
+  * Trimming is fast mode only. The in point lands on the last keyframe at
+    or before where you put it -- about a second's grain in clips Trix
+    recorded, and possibly further back in an .mp4 from somewhere else.
+    Frame-accurate trimming, for starting on an exact frame, is not in yet.
 
   * Trix can only clip while the tray recorder is running, and opening the
     app is what starts it. If you would rather have it ready at login

@@ -9,6 +9,38 @@ export type Toast = { id: number; kind: 'error' | 'info'; text: string };
 
 let nextToastId = 1;
 
+/**
+ * The shortest trim the daemon will accept, mirroring `MIN_TRIM_MS` in
+ * `trix-core/src/export.rs`.
+ *
+ * Duplicated rather than asked for: the daemon exposes no command that
+ * reports it, and a range this short is worth refusing with a sentence that
+ * names the floor instead of a round trip that comes back as a raw refusal.
+ * The daemon still enforces it -- this only decides who explains it.
+ */
+const MIN_TRIM_MS = 200;
+
+/**
+ * Why `[startMs, endMs)` cannot be exported, or null when it can.
+ *
+ * Pulled out of `exportTrim` so the clip page can ask the same question
+ * *before* the user commits: In and Out can be crossed by either slider and
+ * by either of `i`/`o`, and until this existed the only thing that said so
+ * was a toast fired after the export button had already been pressed. One
+ * function rather than two copies of the rule -- the button's disabled state
+ * and the refusal that Ctrl+E still needs have to agree, or the button greys
+ * out for a range the keyboard would have accepted.
+ *
+ * Pure and exported for the same reason it is here rather than in the
+ * component: this is the one piece of the trim UI a test can execute, since
+ * the suite runs on node with no DOM.
+ */
+export function trimRangeError(startMs: number, endMs: number): string | null {
+  if (endMs <= startMs) return 'Set the out point after the in point.';
+  if (endMs - startMs < MIN_TRIM_MS) return `A trim has to be at least ${MIN_TRIM_MS} ms long.`;
+  return null;
+}
+
 class AppState {
   connected = $state(false);
   status = $state<Status | null>(null);
@@ -142,6 +174,91 @@ class AppState {
   async reveal(id: string) {
     try {
       await call('library.reveal', { clip_id: id });
+    } catch (e) {
+      this.toast('error', String(e));
+    }
+  }
+
+  /**
+   * The clip's keyframe positions, in milliseconds -- the trim bar's ticks.
+   *
+   * Fast-mode export cuts on keyframes and snaps an in-point backwards to the
+   * nearest one, so drawing them is what makes the bar honest: the handle
+   * lands where the export will actually cut, not where the pointer was let
+   * go.
+   */
+  async keyframesFor(id: string): Promise<number[]> {
+    try {
+      const data = await call<{ keyframes: number[] }>('library.keyframes', { clip_id: id });
+      return data.keyframes ?? [];
+    } catch (e) {
+      // A clip whose keyframes cannot be read is still playable, so this
+      // degrades to a bar with no ticks rather than an error the user must
+      // dismiss before they can watch anything.
+      console.warn('keyframes unavailable', e);
+      return [];
+    }
+  }
+
+  /**
+   * Exports `[startMs, endMs)` of a clip as a new clip in the library.
+   *
+   * Both range rules are checked here as well as in the daemon. That is not
+   * belt-and-braces for its own sake: the daemon's refusals arrive as bare
+   * strings meant for any client, while these two are the mistakes a person
+   * actually makes with two sliders, and they deserve a sentence that says
+   * what to do about it.
+   */
+  async exportTrim(id: string, startMs: number, endMs: number) {
+    // Kept here even though the clip page now disables the button for these
+    // two: Ctrl+E has no button to grey out, and this is also the entry point
+    // any future caller reaches.
+    const problem = trimRangeError(startMs, endMs);
+    if (problem) {
+      this.toast('error', problem);
+      return;
+    }
+    // Read before the call, because the response is what replaces it: the
+    // question below is "did this clip have sound before I trimmed it", and
+    // after `clip_saved` lands `this.clips` also holds the export.
+    const sourceHadAudio = this.clips.find((c) => c.id === id)?.has_audio ?? false;
+    try {
+      // The daemon allocates the new clip's id and path, so there is no
+      // destination to send -- and it broadcasts `clip_saved` for the result,
+      // which `wireDaemon` already prepends on. Nothing here reloads the grid;
+      // doing so would reset `selected` out from under someone still looking
+      // at the clip they trimmed. `fast` is the only mode the daemon accepts
+      // (it refuses `precise` by name), so it is sent as a constant rather
+      // than offered as a choice.
+      const saved = await call<ClipMeta>('library.export', {
+        clip_id: id,
+        start_ms: Math.round(startMs),
+        end_ms: Math.round(endMs),
+        mode: 'fast',
+      });
+      // No success toast here. `clip_saved` arrives from the same daemon call
+      // and the handler in `wireDaemon` already toasts "Saved <title>" --
+      // which for an export names the clip ("... (trimmed)") rather than just
+      // saying that something happened, so it is the more useful of the two.
+      // One export used to announce itself three times: that toast, a flat
+      // "Trimmed clip saved." from here, and the capture chime, which the
+      // daemon no longer plays for an export.
+      //
+      // What is left is the one thing no other message can say. The daemon's
+      // audio policy is a documented fallback: if anything about AAC
+      // passthrough fails, the whole export is re-run with no audio stream and
+      // comes back `has_audio: false` -- a success as far as every other part
+      // of this app is concerned. Whether AAC survives passthrough is the one
+      // thing about fast mode that could not be verified up front, so on the
+      // machine where it does not, *every* export is silent, and without this
+      // the only record is a warning in the daemon's log and the only way to
+      // find out is to play the clip back.
+      if (sourceHadAudio && !saved.has_audio) {
+        this.toast(
+          'error',
+          "The trim was saved without sound: this clip's audio could not be copied.",
+        );
+      }
     } catch (e) {
       this.toast('error', String(e));
     }

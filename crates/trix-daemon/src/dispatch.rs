@@ -72,6 +72,17 @@ impl ClientHandler for Daemon {
             Ok(Command::LibraryReveal { clip_id }) => {
                 acknowledge(request.id, &clip_id, self.reveal(&clip_id))
             }
+            Ok(Command::LibraryKeyframes { clip_id }) => match self.keyframes(&clip_id) {
+                Ok(data) => Response::ok(request.id, data),
+                Err(e) => Response::err(request.id, format!("{e:#}")),
+            },
+            // Answered with the *new* clip's metadata, through the same helper
+            // `library.rename` uses. The export is announced to every other
+            // client by the `clip_saved` `Daemon::export_clip` broadcasts, so
+            // there is no export-specific event to subscribe to.
+            Ok(Command::LibraryExport { clip_id, start_ms, end_ms, mode }) => {
+                updated_clip(request.id, self.export_clip(&clip_id, start_ms, end_ms, &mode))
+            }
             Ok(Command::ConfigGet) => match self.config_json() {
                 Ok(data) => Response::ok(request.id, data),
                 Err(e) => Response::err(request.id, format!("{e:#}")),
@@ -607,6 +618,71 @@ mod tests {
         assert!(!daemon.dispatch(1, &blank).ok, "a whitespace title is not a rename");
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `precise` is on the wire so it can arrive without a protocol change, but
+    /// nothing implements it yet. Refusing it *by name* is the point: a
+    /// third-party client that reads "invalid mode" starts checking its own
+    /// spelling, where one that reads the mode back learns the daemon simply
+    /// does not do that one yet.
+    #[test]
+    fn library_export_refuses_precise_mode_by_name() {
+        let daemon = idle("export-precise");
+        let response = daemon.dispatch(
+            1,
+            &request_with(
+                1,
+                "library.export",
+                &[
+                    ("clip_id", Value::from("20260822_101500")),
+                    ("start_ms", Value::from(0)),
+                    ("end_ms", Value::from(2000)),
+                    ("mode", Value::from("precise")),
+                ],
+            ),
+        );
+        assert!(!response.ok, "precise mode is not implemented and must not pretend to be");
+        let error = response.error.unwrap_or_default();
+        assert!(
+            error.contains("precise"),
+            "the error must name the mode so a client knows what to change: {error}"
+        );
+    }
+
+    /// The same boundary `library.delete` already enforces, reached through the
+    /// new command: `Daemon::paths_for` validates before it builds a path, so a
+    /// traversal id is refused with no I/O at all rather than resolving to
+    /// somewhere outside the clip directory.
+    #[test]
+    fn library_export_refuses_a_hostile_clip_id_before_touching_the_filesystem() {
+        let daemon = idle("export-hostile");
+        let response = daemon.dispatch(
+            1,
+            &request_with(
+                1,
+                "library.export",
+                &[
+                    ("clip_id", Value::from("../../windows/system32/config")),
+                    ("start_ms", Value::from(0)),
+                    ("end_ms", Value::from(2000)),
+                ],
+            ),
+        );
+        assert!(!response.ok, "a traversal id must be refused at the boundary");
+    }
+
+    /// A well-formed id for a clip that is not on disk. The trim bar asks for
+    /// ticks before it can draw anything, so this is the first call a stale UI
+    /// row makes — it has to come back as an error rather than an empty index
+    /// the UI would render as a clip with no keyframes.
+    #[test]
+    fn library_keyframes_refuses_an_unknown_clip() {
+        let daemon = idle("keyframes-unknown");
+        let response = daemon.dispatch(
+            1,
+            &request_with(1, "library.keyframes", &[("clip_id", Value::from("20260822_101500"))]),
+        );
+        assert!(!response.ok, "a clip that is not there has no keyframes");
     }
 
     /// The published `config.get` payload: every key `Config` has, plus

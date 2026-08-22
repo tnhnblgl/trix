@@ -36,7 +36,7 @@ vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(),
 }));
 
-const { app, wireDaemon, UpdateStore } = await import('./state.svelte');
+const { app, wireDaemon, UpdateStore, trimRangeError } = await import('./state.svelte');
 const { onConnected, onDaemonEvent } = await import('./ipc');
 
 /**
@@ -213,6 +213,165 @@ describe('AppState.reveal', () => {
     await app.reveal('a');
 
     expect(callMock).toHaveBeenCalledWith('library.reveal', { clip_id: 'a' });
+  });
+});
+
+describe('AppState.keyframesFor', () => {
+  it('asks the daemon for the clip keyframes and hands back the list', async () => {
+    callMock.mockResolvedValue({ clip_id: 'a', keyframes: [0, 2000, 4000] });
+
+    await expect(app.keyframesFor('a')).resolves.toEqual([0, 2000, 4000]);
+
+    expect(callMock).toHaveBeenCalledWith('library.keyframes', { clip_id: 'a' });
+  });
+
+  // A clip whose keyframes cannot be read is still perfectly playable, so this
+  // must degrade to a bar with no ticks. Toasting here would put an error in
+  // front of someone who only wanted to watch the clip.
+  it('degrades to an empty tick list, without a toast, when the clip cannot be indexed', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    callMock.mockRejectedValue(new Error('could not index the keyframes of clip a'));
+
+    await expect(app.keyframesFor('a')).resolves.toEqual([]);
+
+    expect(app.toasts).toHaveLength(0);
+    warn.mockRestore();
+  });
+});
+
+describe('AppState.exportTrim', () => {
+  it('exportTrim refuses a range whose out point is not after its in point', async () => {
+    const calls: string[] = [];
+    callMock.mockImplementation((cmd: string) => {
+      calls.push(cmd);
+      return Promise.resolve({});
+    });
+
+    await app.exportTrim('20260822_101500', 4000, 4000);
+
+    expect(calls).not.toContain('library.export');
+    expect(app.toasts.at(-1)?.kind).toBe('error');
+  });
+
+  // `MIN_TRIM_MS` in trix-core/src/export.rs. Mirrored here so a too-short
+  // range is refused with a sentence naming the floor, rather than by a
+  // round trip that comes back as the daemon's own refusal.
+  it('refuses a range shorter than the 200 ms floor the daemon enforces', async () => {
+    const calls: string[] = [];
+    callMock.mockImplementation((cmd: string) => {
+      calls.push(cmd);
+      return Promise.resolve({});
+    });
+
+    await app.exportTrim('20260822_101500', 4000, 4150);
+
+    expect(calls).not.toContain('library.export');
+    expect(app.toasts.at(-1)?.text).toContain('200');
+  });
+
+  it('sends whole milliseconds in fast mode', async () => {
+    callMock.mockResolvedValue(clip('20260822_101500_trim'));
+
+    await app.exportTrim('20260822_101500', 4000.4, 9000.6);
+
+    expect(callMock).toHaveBeenCalledWith('library.export', {
+      clip_id: '20260822_101500',
+      start_ms: 4000,
+      end_ms: 9001,
+      mode: 'fast',
+    });
+  });
+
+  // One export used to announce itself three times: the daemon's capture
+  // chime, "Saved <title>" from the `clip_saved` handler, and a flat "Trimmed
+  // clip saved." from here. The chime is gone on the daemon side and this
+  // toast is gone here; `clip_saved` is the survivor because it names the
+  // clip. So a plain successful export must say nothing at all from this
+  // method -- the announcement is the event's job.
+  it('leaves the success announcement to clip_saved rather than toasting twice', async () => {
+    app.clips = [clip('20260822_101500')];
+    callMock.mockResolvedValue(clip('20260822_101500_trim'));
+
+    await app.exportTrim('20260822_101500', 4000, 9000);
+
+    expect(app.toasts).toHaveLength(0);
+  });
+
+  // The daemon's audio fallback is deliberate and documented: any AAC
+  // passthrough failure re-runs the whole export with no audio stream and
+  // reports `has_audio: false`. That is a success everywhere else in this app,
+  // so without this the user finds out by playing the clip back. Whether AAC
+  // survives passthrough is the one thing about fast mode nobody could verify
+  // up front -- on a machine where it does not, every export is silent.
+  it('says so when a clip that had sound comes back without it', async () => {
+    app.clips = [clip('20260822_101500')];
+    callMock.mockResolvedValue({ ...clip('20260822_101500_trim'), has_audio: false });
+
+    await app.exportTrim('20260822_101500', 4000, 9000);
+
+    expect(app.toasts.at(-1)?.kind).toBe('error');
+    expect(app.toasts.at(-1)?.text).toContain('without sound');
+  });
+
+  // The other half of the same rule: a source with no audio track produces an
+  // export with no audio track, and that is not a loss to report. Warning here
+  // would fire on every trim of a clip recorded with the microphone and system
+  // audio both off, and a warning that is always wrong is one nobody reads.
+  it('stays quiet when the source had no sound to lose', async () => {
+    app.clips = [{ ...clip('20260822_101500'), has_audio: false }];
+    callMock.mockResolvedValue({ ...clip('20260822_101500_trim'), has_audio: false });
+
+    await app.exportTrim('20260822_101500', 4000, 9000);
+
+    expect(app.toasts).toHaveLength(0);
+  });
+
+  // The new clip reaches the grid on the daemon's own `clip_saved` broadcast,
+  // which `wireDaemon` already prepends on -- so an export must not also
+  // reload the library, which would reset `selected` out from under whoever
+  // is still looking at the source clip.
+  it('does not reload the library, since clip_saved already announces the new clip', async () => {
+    const calls: string[] = [];
+    callMock.mockImplementation((cmd: string) => {
+      calls.push(cmd);
+      return Promise.resolve(clip('20260822_101500_trim'));
+    });
+
+    await app.exportTrim('20260822_101500', 0, 5000);
+
+    expect(calls).toEqual(['library.export']);
+  });
+
+  it('toasts the daemon refusal rather than throwing at the caller', async () => {
+    callMock.mockRejectedValue(new Error('this clip has no duration to trim'));
+
+    await app.exportTrim('20260822_101500', 0, 5000);
+
+    expect(app.toasts.at(-1)?.text).toContain('this clip has no duration to trim');
+    expect(app.toasts.at(-1)?.kind).toBe('error');
+  });
+});
+
+describe('trimRangeError', () => {
+  // The clip page disables Export on this and prints the reason under the
+  // bar, and `exportTrim` refuses on the same call -- so the two can only
+  // agree because they ask one function. It is also the only part of the trim
+  // UI a test can execute: the suite runs on node with no DOM, so the bar,
+  // the sliders and the key bindings are read-verified instead.
+  it('accepts a range at or above the 200 ms floor', () => {
+    expect(trimRangeError(0, 200)).toBeNull();
+    expect(trimRangeError(4000, 9000)).toBeNull();
+  });
+
+  it('names the in/out order when the range is empty or inverted', () => {
+    // Crossing is what `i` at 12s after `o` at 8s produces, and what either
+    // slider dragged past the other produces.
+    expect(trimRangeError(12000, 8000)).toBe('Set the out point after the in point.');
+    expect(trimRangeError(4000, 4000)).toBe('Set the out point after the in point.');
+  });
+
+  it('names the floor when the range is positive but too short', () => {
+    expect(trimRangeError(4000, 4150)).toContain('200');
   });
 });
 

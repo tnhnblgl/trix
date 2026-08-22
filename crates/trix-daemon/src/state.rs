@@ -13,7 +13,7 @@ use anyhow::{Context as _, Result, bail};
 use serde_json::{Map, Value};
 use trix_core::{
     capture::audio::AudioGains, config::Config, control, control::SingleInstance,
-    engine::EngineHandle, engine::EngineStatus, library, stats,
+    engine::EngineHandle, engine::EngineStatus, export, library, stats,
 };
 use trix_proto::{ClipMeta, Event};
 
@@ -351,6 +351,26 @@ pub(crate) struct ConfigUpdate {
     pub clip_dir_resolved: String,
 }
 
+/// Whether [`Daemon::record_saved_clip`] should play the configured clip
+/// sound, which is the one behaviour a hotkey clip and a trim export do not
+/// share.
+///
+/// A named enum rather than a `bool` because it is read at the call site, not
+/// at the definition: `record_saved_clip(&meta, false)` says nothing about
+/// what is being switched off, and this is exactly the parameter someone will
+/// later add a third caller against.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PlaySound {
+    /// A clip taken off the live ring, by hotkey, tray, or the `clip` command.
+    /// The user may be mid-game with no Trix window in front of them, and the
+    /// chime is the only feedback there is.
+    Yes,
+    /// An export the user asked for in the window and is watching finish. The
+    /// UI's own toast says so; the capture chime here would mean "the replay
+    /// hotkey fired", which is not what happened.
+    No,
+}
+
 pub struct Daemon {
     pub config: Mutex<Config>,
     /// Where `config.set` persists. `None` means there is nowhere to save —
@@ -603,7 +623,10 @@ impl Daemon {
             state.engine.clip()?
         };
         if let Some(meta) = &saved {
-            self.record_saved_clip(meta);
+            // The one path the chime belongs to: something was captured off
+            // the live ring, and the user may well be mid-game with no window
+            // in front of them.
+            self.record_saved_clip(meta, PlaySound::Yes);
         }
         Ok(saved)
     }
@@ -617,7 +640,17 @@ impl Daemon {
     /// went three plans without an event for the hotkey path. This half needs
     /// only a `ClipMeta`, so the guarantee that a recorded clip is an
     /// announced clip is now something a test can hold.
-    fn record_saved_clip(&self, meta: &ClipMeta) {
+    ///
+    /// `sound` is the one thing the two callers disagree about, and it is why
+    /// this takes a parameter rather than always chiming. Everything else here
+    /// -- the cache insert, the ceiling, the `clip_saved` broadcast -- has to
+    /// happen for an export exactly as it does for a hotkey clip, which is why
+    /// `export_clip` routes through this function instead of doing those three
+    /// things by hand. The chime does not: it is the sound that has meant one
+    /// thing since the feature shipped, "the replay hotkey fired", and hearing
+    /// it because a window in front of you finished a trim you asked for is
+    /// both redundant and, mid-game, actively confusing.
+    fn record_saved_clip(&self, meta: &ClipMeta, sound: PlaySound) {
         // Read before the library lock is taken, not after. `config` is only
         // ever held alone or under `armed` (see the lock ordering above), and
         // taking it after `library` here would introduce the first place in
@@ -633,13 +666,16 @@ impl Daemon {
         // takes no lock of its own -- it only reads the guard already held
         // -- so this cannot deadlock the way calling `custom_sound_source`
         // while holding the guard would.
-        let sound = {
-            let config = self.lock_config();
-            // `None` here means "do not play"; `Some(None)` means the
-            // built-in chime, which is what `resolve_sound` returns for a
-            // sound that is unset or has nowhere cached. `play` takes `None`
-            // to mean the built-in chime either way.
-            config.clip_sound.then(|| resolve_sound(&config, self.config_path.as_deref()))
+        let sound = match sound {
+            PlaySound::No => None,
+            PlaySound::Yes => {
+                let config = self.lock_config();
+                // `None` here means "do not play"; `Some(None)` means the
+                // built-in chime, which is what `resolve_sound` returns for a
+                // sound that is unset or has nowhere cached. `play` takes
+                // `None` to mean the built-in chime either way.
+                config.clip_sound.then(|| resolve_sound(&config, self.config_path.as_deref()))
+            }
         };
 
         // Prepended, matching `library::scan`'s newest-first order. This is
@@ -1342,6 +1378,164 @@ impl Daemon {
         }
         crate::reveal::in_explorer(paths.mp4())
             .with_context(|| format!("could not show clip {id} in Explorer"))
+    }
+
+    /// Every keyframe position in a clip, for the trim bar's ticks.
+    ///
+    /// [`Self::paths_for`] is the sealed choke point: it runs
+    /// `library::is_valid_id` before it builds a single path, so a hostile id
+    /// is refused here with no I/O. Never reach a clip file any other way —
+    /// see the `mod clip_paths` doc comment for why that seal exists.
+    ///
+    /// Answers with the whole index rather than a page of it. A replay-buffer
+    /// clip pinned to one keyframe per second yields tens of numbers, so
+    /// paging would cost a protocol and buy nothing.
+    pub(crate) fn keyframes(&self, clip_id: &str) -> Result<Value> {
+        let paths = self.paths_for(clip_id)?;
+        if !paths.mp4().is_file() {
+            bail!("no clip {clip_id}");
+        }
+        let keys = export::keyframes_ms(paths.mp4())
+            .with_context(|| format!("could not index the keyframes of clip {clip_id}"))?;
+        let mut out = Map::new();
+        out.insert("clip_id".to_string(), Value::from(clip_id));
+        out.insert("keyframes".to_string(), Value::from(keys));
+        Ok(Value::Object(out))
+    }
+
+    /// Exports a range of a clip as a new clip in the library.
+    ///
+    /// Synchronous, like [`Self::clip`]: a fast-mode export is a stream copy of
+    /// a few seconds and finishes well inside a socket round trip, so there is
+    /// no worker thread and no progress event to subscribe to.
+    ///
+    /// The source is only ever read. Everything written goes to an id this
+    /// function allocates — there is no caller-supplied destination, so no
+    /// request can aim an export at a path of its own choosing, and
+    /// `export_fast` refuses a destination that names the source anyway.
+    pub(crate) fn export_clip(
+        &self,
+        clip_id: &str,
+        start_ms: u64,
+        end_ms: u64,
+        mode: &str,
+    ) -> Result<ClipMeta> {
+        // Named rather than "invalid mode": `precise` is already on the wire
+        // (see `Command::LibraryExport`) so it can arrive without a protocol
+        // change, and a client that reads its own mode back learns the daemon
+        // does not do that one yet instead of hunting a typo.
+        if mode != "fast" {
+            bail!("export mode \"{mode}\" is not supported yet; only \"fast\" is implemented");
+        }
+        let paths = self.paths_for(clip_id)?;
+        if !paths.mp4().is_file() {
+            bail!("no clip {clip_id}");
+        }
+        // The source's own sidecar carries the width/height/fps/encoder the
+        // export inherits verbatim — a stream copy changes none of them — and
+        // the duration the requested range is clamped against.
+        let source_meta = library::read_sidecar(paths.sidecar())
+            .with_context(|| format!("{clip_id} has no readable metadata"))?;
+        let (start_ms, end_ms) = export::clamp_range(source_meta.duration_ms, start_ms, end_ms)
+            .map_err(anyhow::Error::msg)?;
+
+        let dir = paths.dir();
+        let new_id = library::allocate_clip_id(dir)?;
+        // The destination goes through the same sealed constructor as the
+        // source, over the *same* directory. `allocate_clip_id` returns an id
+        // `is_valid_id` accepts, so this cannot fail in practice — but routing
+        // it through `ClipPaths` anyway keeps that type the only thing in this
+        // crate that ever turns an id into a clip path, which is the whole
+        // point of the seal. Reusing `dir` rather than re-reading the config
+        // also means a `config.set` landing mid-export cannot allocate an id
+        // against one folder and write the file into another.
+        let new_paths = ClipPaths::for_id(dir.to_path_buf(), &new_id)?;
+
+        // `allocate_clip_id` reserved `new_id` by creating the .mp4 empty, so
+        // that a clip taken with the hotkey mid-export cannot be handed the
+        // same wall-clock id and have its footage truncated out from under it.
+        // The reservation is ours, so cleaning it up is ours too.
+        //
+        // This does *not* violate `export.rs`'s `BeforeCreating` rule, and the
+        // distinction is the crux of why it is safe. That rule says: when an
+        // attempt fails before `MFCreateSinkWriterFromURL`, whatever sits at
+        // `dest` belongs to whoever put it there, so `export.rs` must not
+        // delete it. Here the daemon *is* whoever put it there — it created
+        // that file itself, one statement ago, for this export. So the two
+        // halves stay honest: `export.rs` never touches a `dest` it did not
+        // create, and `state.rs` cleans up the file it did.
+        let outcome = match export::export_fast(export::FastExport {
+            source: paths.mp4(),
+            dest: new_paths.mp4(),
+            start_ms,
+            end_ms,
+        }) {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                // `NotFound` is the ordinary case, not a problem: an attempt
+                // that got as far as creating `dest` deletes it on the way out
+                // (`with_video_only_retry`), so there is usually nothing left.
+                match std::fs::remove_file(new_paths.mp4()) {
+                    Ok(()) => {}
+                    Err(remove) if remove.kind() == std::io::ErrorKind::NotFound => {}
+                    // Worth a line rather than a silent `let _`: a reservation
+                    // that will not delete is a zero-byte .mp4 in the clips
+                    // folder, and while `library::scan` skips those so it can
+                    // never become a broken grid card, it does hold the id
+                    // against a clip saved in that same second.
+                    Err(remove) => tracing::warn!(
+                        clip = %new_id,
+                        error = %remove,
+                        "could not remove the reservation left by a failed export"
+                    ),
+                }
+                return Err(e);
+            }
+        };
+
+        // The source's thumbnail, copied. It is the source's first frame rather
+        // than the trim's, which is wrong in the strict sense — but a grid card
+        // with no image at all reads as a broken clip, and this export has no
+        // decoder to pull the real frame from. Best-effort: a clip without a
+        // preview is still a clip.
+        let _ = std::fs::copy(paths.thumb(), new_paths.thumb());
+
+        let meta = ClipMeta {
+            id: new_id.clone(),
+            title: format!("{} (trimmed)", source_meta.title),
+            created: library::now_rfc3339_local(),
+            // From the samples that were written, not from the range that was
+            // asked for: the in-point snapped back to a keyframe.
+            duration_ms: outcome.duration_ms,
+            bytes: std::fs::metadata(new_paths.mp4()).map(|m| m.len()).unwrap_or(0),
+            width: source_meta.width,
+            height: source_meta.height,
+            fps: source_meta.fps,
+            encoder: source_meta.encoder.clone(),
+            has_audio: outcome.has_audio,
+            favorite: false,
+        };
+        // A sidecar that will not write is not a failed export: the `.mp4` is
+        // on disk and `library::scan` synthesizes metadata for a bare clip, so
+        // the user keeps their trim and loses only its title.
+        if let Err(e) = library::write_sidecar(dir, &meta) {
+            tracing::warn!(clip = %new_id, error = %format!("{e:#}"), "export saved without a sidecar");
+        }
+
+        // The same call `Daemon::clip` makes, which is what puts the export
+        // into the live library cache and broadcasts `clip_saved`. Broadcasting
+        // by hand here would announce a clip that `library.list` — cache-only
+        // by design, spec §5.2 — could not then show, and would skip the
+        // library-ceiling check that the bytes this export just added are
+        // exactly what it exists to notice.
+        //
+        // Without the chime, though. It is the sound that has meant "the
+        // replay hotkey fired" since the feature shipped, and an export is a
+        // thing the user just asked for in a window they are looking at --
+        // hearing the capture sound while armed and in-game reads as a clip
+        // they did not take.
+        self.record_saved_clip(&meta, PlaySound::No);
+        Ok(meta)
     }
 
     /// The choke point every id-taking command goes through, and — because
@@ -2069,7 +2263,7 @@ mod tests {
         let (tx, rx) = sync_channel(crate::clients::OUTBOUND_QUEUE_DEPTH);
         daemon.clients.register(tx);
 
-        daemon.record_saved_clip(&meta("20260803_120000"));
+        daemon.record_saved_clip(&meta("20260803_120000"), PlaySound::Yes);
 
         // The library half — the part that already worked.
         assert_eq!(
@@ -2105,7 +2299,7 @@ mod tests {
         let (tx, rx) = sync_channel(crate::clients::OUTBOUND_QUEUE_DEPTH);
         daemon.clients.register(tx);
 
-        daemon.record_saved_clip(&meta("20260817_120000"));
+        daemon.record_saved_clip(&meta("20260817_120000"), PlaySound::Yes);
 
         let line = rx.try_recv().expect("a saved clip must still broadcast clip_saved");
         assert!(line.contains("clip_saved"), "the sound must not displace the event: {line}");

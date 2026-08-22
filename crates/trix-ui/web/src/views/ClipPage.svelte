@@ -1,19 +1,108 @@
 <script lang="ts">
-  import { app } from '../lib/state.svelte';
+  import { app, trimRangeError } from '../lib/state.svelte';
   import { clipUrl, counterLabel, formatBytes, formatDuration } from '../lib/clips';
   import { shouldHandleKey } from '../lib/keys';
+  import TrimBar from '../components/TrimBar.svelte';
 
   let video = $state<HTMLVideoElement | null>(null);
   let renaming = $state(false);
   let draftTitle = $state('');
   let confirmingDelete = $state(false);
+  let keyframes = $state<number[]>([]);
+  let inMs = $state(0);
+  let outMs = $state(0);
+  let playheadMs = $state(0);
+  let exporting = $state(false);
 
   const clip = $derived(app.current);
+
+  // Read off `clip` as primitives rather than tracking the object: `rename`
+  // and `setFavorite` both replace the ClipMeta in `app.clips` with a fresh
+  // object, so an effect that depended on `clip` itself would throw away
+  // in/out points and re-fetch the ticks every time someone starred the clip
+  // they were halfway through trimming. The id and the duration are what the
+  // trim bar actually depends on, and neither changes under a rename.
+  const clipId = $derived(clip?.id ?? null);
+  const clipDurationMs = $derived(clip?.duration_ms ?? 0);
+
+  // `library::scan` adopts a bare .mp4 with `duration_ms: 0` -- which is what a
+  // clip whose sidecar write failed looks like, and what any file dropped into
+  // the clips folder by hand looks like. It plays, and the bar would even draw,
+  // but `clamp_range` refuses it ("this clip has no duration to trim"). Better
+  // not to offer the control at all than to hand back a refusal.
+  const canTrim = $derived(clipDurationMs > 0);
+
+  // Why the current range cannot be exported, or null when it can. Nothing
+  // stops In and Out crossing -- both sliders and both of `i`/`o` can do it --
+  // and the deliberate choice here is to *say so* rather than to silently drag
+  // the partner handle along. `i` and `o` mean "mark the frame I am looking
+  // at"; a clamp that answered `i` at 12s with an in-point of 8s would be
+  // moving a point the user had just set on purpose. So the mistake is named
+  // where it is made: the readout under the bar states it and the Export
+  // button is disabled, instead of a toast arriving after the press.
+  // Same rule as `exportTrim`'s refusal, from the same function, so the greyed
+  // button and Ctrl+E can never disagree about what is exportable.
+  const rangeError = $derived(canTrim ? trimRangeError(inMs, outMs) : null);
+
+  // Guards against a stale fetch landing on the wrong clip. Stepping through
+  // clips with the arrow keys is faster than a keyframe index of a long clip,
+  // and the ticks of the clip you left must not appear over the one you are
+  // now looking at. A plain `let`, not `$state`: nothing renders it.
+  let keyframeToken = 0;
+
+  // Re-fetch whenever the page shows a different clip. Prev/next is a UI-side
+  // repoint of the same component, so without this the bar would keep the
+  // previous clip's ticks and trim points.
+  $effect(() => {
+    const id = clipId;
+    if (!id) return;
+    inMs = 0;
+    outMs = clipDurationMs;
+    playheadMs = 0;
+    // Cleared with the rest, not left standing until the new fetch lands. The
+    // token below stops a *late* result appearing over the wrong clip; it does
+    // nothing about the *previous* result still being displayed, and a
+    // keyframe index takes longer than an arrow key. Holding the old list
+    // would draw the previous clip's ticks rescaled to this clip's duration
+    // and -- worse -- `snap()` would report an in-point off that list, so the
+    // readout would name a cut the daemon is not going to make. No ticks for a
+    // moment is honest; the wrong ticks are not.
+    keyframes = [];
+    const token = ++keyframeToken;
+    void (async () => {
+      const found = await app.keyframesFor(id);
+      if (token === keyframeToken) keyframes = found;
+    })();
+  });
 
   function playPause() {
     if (!video) return;
     if (video.paused) void video.play();
     else video.pause();
+  }
+
+  async function exportTrim() {
+    // `exporting` is the double-fire guard. The data-loss reason it was added
+    // is gone -- clip ids come from the wall clock (YYYYMMDD_HHMMSS) and the
+    // daemon used to pick one by asking whether the file existed, so two
+    // exports inside the same second landed on the same id and the second
+    // overwrote the first; `allocate_clip_id` now reserves the name atomically
+    // and the collision resolves to `_2`. What is left is still worth keeping:
+    // a double click on the button, or leaning on Ctrl+E, would otherwise put
+    // two identical trims in the library and make the user delete one.
+    if (!clip || exporting) return;
+    // Ctrl+E has no button to grey out, so the zero-duration clip is refused
+    // here in plain words rather than by silently doing nothing.
+    if (!canTrim) {
+      app.toast('error', 'This clip has no duration to trim.');
+      return;
+    }
+    exporting = true;
+    try {
+      await app.exportTrim(clip.id, inMs, outMs);
+    } finally {
+      exporting = false;
+    }
   }
 
   function onkeydown(e: KeyboardEvent) {
@@ -33,6 +122,32 @@
     // dialog is up.
     if (confirmingDelete) {
       if (e.key === 'Escape') confirmingDelete = false;
+      return;
+    }
+    // Ahead of the switch because it carries a modifier, which the switch's
+    // plain `e.key` cases cannot express, and ahead of `shouldHandleKey` so
+    // that the one shortcut with no button to fall back on cannot be taken
+    // away by whatever happens to hold focus. It used to be load-bearing:
+    // `shouldHandleKey` dropped every key aimed at an <input>, the trim
+    // sliders included, so this was the only shortcut that survived a click on
+    // a handle. `keys.ts` now excludes non-typing input types, so the sliders
+    // no longer swallow anything and the rest of the switch works after a
+    // drag too — this stays above out of belt-and-braces, not necessity.
+    // The only other input on this page is the rename field, and the
+    // `renaming` branch above has already returned by the time we get here.
+    // `!e.altKey` is not defensive tidiness: Windows reports AltGr as
+    // Ctrl+Alt, so every AltGr press arrives here already looking like Ctrl.
+    // This machine runs a Turkish Q layout, where AltGr is a live typing
+    // modifier (AltGr+E is the euro sign), and an AltGr combination the layout
+    // does not map still delivers the base letter in `e.key` -- so a
+    // `ctrlKey`-only test fires a full export and preventDefault()s the
+    // keystroke, leaving a stray trimmed clip in the library from a press
+    // meant to type a character. Settings.svelte's `captureHotkey` already
+    // keeps ctrl and alt apart when it records a combo; this is the same
+    // distinction on the reading side.
+    if (e.key === 'e' && e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      void exportTrim();
       return;
     }
     // Every button on this page owns its own Space and Enter (WebView2
@@ -55,6 +170,14 @@
       case ' ':
         e.preventDefault();
         playPause();
+        break;
+      // Set from the playhead, not from where the slider happens to sit: the
+      // point of `i`/`o` is to mark the frame you are looking at.
+      case 'i':
+        inMs = playheadMs;
+        break;
+      case 'o':
+        outMs = playheadMs;
         break;
       case 'Delete':
         confirmingDelete = true;
@@ -85,16 +208,28 @@
   <div class="stage">
     <button class="step" onclick={() => app.step(-1)} disabled={confirmingDelete || app.selected === 0}>&lsaquo;</button>
     <!-- svelte-ignore a11y_media_has_caption -->
-    <video bind:this={video} src={clipUrl(app.clipDir, clip.id)} controls autoplay></video>
+    <video bind:this={video} src={clipUrl(app.clipDir, clip.id)} controls autoplay
+      ontimeupdate={() => { if (video) playheadMs = video.currentTime * 1000; }}></video>
     <button class="step" onclick={() => app.step(1)} disabled={confirmingDelete || app.selected >= app.clips.length - 1}>&rsaquo;</button>
   </div>
 
   <!--
-    Spec §6.2 puts the filmstrip trim bar here, full width, between the player
-    and the metadata. It is deliberately absent: trim needs `library.export`,
-    which does not exist yet and is the next plan. The slot is left rather than
-    the layout redrawn, so adding it is one component and no reshuffle.
+    Spec §6.2's slot, full width between the player and the metadata. A plain
+    bar with keyframe ticks rather than the filmstrip the spec sketches --
+    thumbnails would need a decode path the daemon does not have. Hidden for a
+    clip with no duration, which is the one case the daemon will refuse.
   -->
+  {#if canTrim}
+    <TrimBar
+      durationMs={clip.duration_ms}
+      {playheadMs}
+      {keyframes}
+      {inMs}
+      {outMs}
+      {rangeError}
+      onchange={(i, o) => { inMs = i; outMs = o; }}
+      onseek={(ms) => { if (video) video.currentTime = ms / 1000; }} />
+  {/if}
 
   <p class="meta">
     {clip.width}x{clip.height} &middot; {clip.fps} fps &middot; {formatDuration(clip.duration_ms)} &middot;
@@ -109,6 +244,17 @@
     {:else}
       <span class="title">{clip.title}</span>
       <button onclick={startRename} disabled={confirmingDelete}>Rename</button>
+      {#if canTrim}
+        <!-- `title` carries the reason: a disabled button with no explanation
+             is its own puzzle, and the readout under the bar is the other
+             half of the answer. -->
+        <button
+          onclick={exportTrim}
+          disabled={confirmingDelete || exporting || rangeError !== null}
+          title={rangeError ?? ''}>
+          {exporting ? 'Exporting…' : 'Export trimmed'}
+        </button>
+      {/if}
       <button onclick={() => app.setFavorite(clip.id, !clip.favorite)} disabled={confirmingDelete}>
         {clip.favorite ? 'Unfavorite' : 'Favorite'}
       </button>
