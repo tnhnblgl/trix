@@ -13,7 +13,7 @@ use anyhow::{Context as _, Result, bail};
 use serde_json::{Map, Value};
 use trix_core::{
     capture::audio::AudioGains, config::Config, control, control::SingleInstance,
-    engine::EngineHandle, engine::EngineStatus, library, stats,
+    engine::EngineHandle, engine::EngineStatus, export, library, stats,
 };
 use trix_proto::{ClipMeta, Event};
 
@@ -1342,6 +1342,123 @@ impl Daemon {
         }
         crate::reveal::in_explorer(paths.mp4())
             .with_context(|| format!("could not show clip {id} in Explorer"))
+    }
+
+    /// Every keyframe position in a clip, for the trim bar's ticks.
+    ///
+    /// [`Self::paths_for`] is the sealed choke point: it runs
+    /// `library::is_valid_id` before it builds a single path, so a hostile id
+    /// is refused here with no I/O. Never reach a clip file any other way —
+    /// see the `mod clip_paths` doc comment for why that seal exists.
+    ///
+    /// Answers with the whole index rather than a page of it. A replay-buffer
+    /// clip pinned to one keyframe per second yields tens of numbers, so
+    /// paging would cost a protocol and buy nothing.
+    pub(crate) fn keyframes(&self, clip_id: &str) -> Result<Value> {
+        let paths = self.paths_for(clip_id)?;
+        if !paths.mp4().is_file() {
+            bail!("no clip {clip_id}");
+        }
+        let keys = export::keyframes_ms(paths.mp4())
+            .with_context(|| format!("could not index the keyframes of clip {clip_id}"))?;
+        let mut out = Map::new();
+        out.insert("clip_id".to_string(), Value::from(clip_id));
+        out.insert("keyframes".to_string(), Value::from(keys));
+        Ok(Value::Object(out))
+    }
+
+    /// Exports a range of a clip as a new clip in the library.
+    ///
+    /// Synchronous, like [`Self::clip`]: a fast-mode export is a stream copy of
+    /// a few seconds and finishes well inside a socket round trip, so there is
+    /// no worker thread and no progress event to subscribe to.
+    ///
+    /// The source is only ever read. Everything written goes to an id this
+    /// function allocates — there is no caller-supplied destination, so no
+    /// request can aim an export at a path of its own choosing, and
+    /// `export_fast` refuses a destination that names the source anyway.
+    pub(crate) fn export_clip(
+        &self,
+        clip_id: &str,
+        start_ms: u64,
+        end_ms: u64,
+        mode: &str,
+    ) -> Result<ClipMeta> {
+        // Named rather than "invalid mode": `precise` is already on the wire
+        // (see `Command::LibraryExport`) so it can arrive without a protocol
+        // change, and a client that reads its own mode back learns the daemon
+        // does not do that one yet instead of hunting a typo.
+        if mode != "fast" {
+            bail!("export mode \"{mode}\" is not supported yet; only \"fast\" is implemented");
+        }
+        let paths = self.paths_for(clip_id)?;
+        if !paths.mp4().is_file() {
+            bail!("no clip {clip_id}");
+        }
+        // The source's own sidecar carries the width/height/fps/encoder the
+        // export inherits verbatim — a stream copy changes none of them — and
+        // the duration the requested range is clamped against.
+        let source_meta = library::read_sidecar(paths.sidecar())
+            .with_context(|| format!("{clip_id} has no readable metadata"))?;
+        let (start_ms, end_ms) = export::clamp_range(source_meta.duration_ms, start_ms, end_ms)
+            .map_err(anyhow::Error::msg)?;
+
+        let dir = paths.dir();
+        let new_id = library::allocate_clip_id(dir)?;
+        // The destination goes through the same sealed constructor as the
+        // source, over the *same* directory. `allocate_clip_id` returns an id
+        // `is_valid_id` accepts, so this cannot fail in practice — but routing
+        // it through `ClipPaths` anyway keeps that type the only thing in this
+        // crate that ever turns an id into a clip path, which is the whole
+        // point of the seal. Reusing `dir` rather than re-reading the config
+        // also means a `config.set` landing mid-export cannot allocate an id
+        // against one folder and write the file into another.
+        let new_paths = ClipPaths::for_id(dir.to_path_buf(), &new_id)?;
+
+        let outcome = export::export_fast(export::FastExport {
+            source: paths.mp4(),
+            dest: new_paths.mp4(),
+            start_ms,
+            end_ms,
+        })?;
+
+        // The source's thumbnail, copied. It is the source's first frame rather
+        // than the trim's, which is wrong in the strict sense — but a grid card
+        // with no image at all reads as a broken clip, and this export has no
+        // decoder to pull the real frame from. Best-effort: a clip without a
+        // preview is still a clip.
+        let _ = std::fs::copy(paths.thumb(), new_paths.thumb());
+
+        let meta = ClipMeta {
+            id: new_id.clone(),
+            title: format!("{} (trimmed)", source_meta.title),
+            created: library::now_rfc3339_local(),
+            // From the samples that were written, not from the range that was
+            // asked for: the in-point snapped back to a keyframe.
+            duration_ms: outcome.duration_ms,
+            bytes: std::fs::metadata(new_paths.mp4()).map(|m| m.len()).unwrap_or(0),
+            width: source_meta.width,
+            height: source_meta.height,
+            fps: source_meta.fps,
+            encoder: source_meta.encoder.clone(),
+            has_audio: outcome.has_audio,
+            favorite: false,
+        };
+        // A sidecar that will not write is not a failed export: the `.mp4` is
+        // on disk and `library::scan` synthesizes metadata for a bare clip, so
+        // the user keeps their trim and loses only its title.
+        if let Err(e) = library::write_sidecar(dir, &meta) {
+            tracing::warn!(clip = %new_id, error = %format!("{e:#}"), "export saved without a sidecar");
+        }
+
+        // The same call `Daemon::clip` makes, which is what puts the export
+        // into the live library cache and broadcasts `clip_saved`. Broadcasting
+        // by hand here would announce a clip that `library.list` — cache-only
+        // by design, spec §5.2 — could not then show, and would skip the
+        // library-ceiling check that the bytes this export just added are
+        // exactly what it exists to notice.
+        self.record_saved_clip(&meta);
+        Ok(meta)
     }
 
     /// The choke point every id-taking command goes through, and — because
