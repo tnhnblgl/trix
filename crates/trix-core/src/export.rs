@@ -29,7 +29,7 @@ pub const MIN_TRIM_MS: u64 = 200;
 /// forward snap silently drops footage the user explicitly asked to keep, and
 /// the frame they set the in-point on is usually the one that matters.
 pub fn snap_start(keyframes_ms: &[u64], start_ms: u64) -> u64 {
-    keyframes_ms.iter().copied().filter(|&k| k <= start_ms).next_back().unwrap_or(0)
+    keyframes_ms.iter().copied().rfind(|&k| k <= start_ms).unwrap_or(0)
 }
 
 /// Orders and clamps a requested range against the clip's real duration.
