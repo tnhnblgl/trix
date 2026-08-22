@@ -12,10 +12,10 @@ use std::path::Path;
 use anyhow::{Context as _, Result};
 use windows::Win32::Media::MediaFoundation::{
     IMFAttributes, IMFMediaType, IMFSample, IMFSinkWriter, IMFSourceReader,
-    MF_SINK_WRITER_DISABLE_THROTTLING, MF_SOURCE_READER_ALL_STREAMS,
-    MF_SOURCE_READER_FIRST_AUDIO_STREAM, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-    MF_SOURCE_READERF_ENDOFSTREAM, MFCreateAttributes, MFCreateSinkWriterFromURL,
-    MFCreateSourceReaderFromURL, MFSampleExtension_CleanPoint,
+    MF_READWRITE_DISABLE_CONVERTERS, MF_SINK_WRITER_DISABLE_THROTTLING,
+    MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_FIRST_AUDIO_STREAM,
+    MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ENDOFSTREAM, MFCreateAttributes,
+    MFCreateSinkWriterFromURL, MFCreateSourceReaderFromURL, MFSampleExtension_CleanPoint,
 };
 use windows::core::HSTRING;
 
@@ -322,7 +322,7 @@ fn with_video_only_retry(
     // attempt's carcass in place would usually be harmless -- but not if the
     // retry then failed before reaching that call, which would leave the first
     // attempt's broken file on disk for `library::scan` to adopt.
-    let _ = std::fs::remove_file(dest);
+    discard(dest);
     tracing::warn!(
         clip = %source.display(),
         error = %format!("{first:#}"),
@@ -334,9 +334,33 @@ fn with_video_only_retry(
         // Deleted above, and this attempt never got as far as recreating it.
         Err(Failed::BeforeCreating(err)) => Err(err),
         Err(Failed::AfterCreating(err)) => {
-            let _ = std::fs::remove_file(dest);
+            discard(dest);
             Err(err)
         }
+    }
+}
+
+/// Deletes a half-written `dest`, and says so in the log if it cannot.
+///
+/// The delete is best-effort by necessity — the export has already failed and
+/// nothing better is going to happen by failing harder — but *silently*
+/// best-effort was the wrong shape. Windows Defender routinely still holds a
+/// handle on a file it has just finished scanning, so `remove_file` comes back
+/// with a sharing violation, and a discarded error left the truncated MP4 on
+/// disk with nothing anywhere explaining where it came from. (`library::scan`
+/// now skips zero-byte `.mp4`s, which covers the commonest shape of leftover;
+/// this covers the rest, and turns either into something diagnosable.)
+///
+/// `NotFound` is not a failure: it is the state this function exists to reach.
+fn discard(dest: &Path) {
+    match std::fs::remove_file(dest) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(
+            path = %dest.display(),
+            error = %e,
+            "could not delete a failed export; a broken .mp4 may be left behind"
+        ),
     }
 }
 
@@ -479,6 +503,19 @@ fn run_export(
 /// passthrough guarantee: the sink writer has no transform to insert when the
 /// input type it is handed is already the output type it was asked for.
 ///
+/// It also gets `MF_READWRITE_DISABLE_CONVERTERS`, which turns that reasoning
+/// from an assumption into something the platform enforces. Handed an input
+/// type it cannot pass straight through, a sink writer's *documented*
+/// behaviour is to quietly insert a converter — for H.264 that means a full
+/// encoder MFT, and fast mode would become a re-encode: seconds instead of
+/// milliseconds, a generation of quality gone, and not one line anywhere
+/// saying so. The pairing above should make that unreachable, but "should"
+/// covers a lot of ground once the MP4 sink normalizes a type or a future
+/// Windows build rewrites an attribute. With this set, the day the short
+/// circuit stops holding is the day `SetInputMediaType` returns an error and
+/// the export fails loudly, which is what this module's doc comments have been
+/// claiming all along.
+///
 /// The writer gets `MF_SINK_WRITER_DISABLE_THROTTLING`, exactly as
 /// `ClipMuxer::new` does and for the same reason: this module writes one whole
 /// track and then the other, and a throttled writer blocks `WriteSample`
@@ -497,9 +534,11 @@ fn open_sink(
 ) -> Result<(IMFSinkWriter, u32, Option<u32>)> {
     unsafe {
         let mut attrs: Option<IMFAttributes> = None;
-        MFCreateAttributes(&mut attrs, 1)?;
+        MFCreateAttributes(&mut attrs, 2)?;
         let attrs = attrs.unwrap();
         attrs.SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1)?;
+        // The passthrough guarantee, enforced rather than assumed. See above.
+        attrs.SetUINT32(&MF_READWRITE_DISABLE_CONVERTERS, 1)?;
         let writer = MFCreateSinkWriterFromURL(&HSTRING::from(dest), None, Some(&attrs))
             .with_context(|| format!("could not create {}", dest.display()))?;
 
@@ -906,7 +945,17 @@ mod tests {
     }
 
     /// The other half of the by-hand gate. Exports the middle of a real clip
-    /// and asserts the output is a real, shorter, independently indexable MP4.
+    /// and asserts the output is a real, shorter, independently indexable MP4
+    /// -- and, when the source carries audio, that the audio came with it.
+    ///
+    /// That last assertion is the only guard `has_audio` has. Its real
+    /// computation (`audio.packets > 0`, in `run_export`) needs Media
+    /// Foundation and a real AAC track to exercise, so nothing in the ordinary
+    /// suite touches it: reverting it to `audio_out.is_some()` -- the exact
+    /// regression an earlier fix wave corrected, which reports sound on a clip
+    /// that has none -- leaves `cargo test --workspace` entirely green. It also
+    /// covers the one thing this feature could not verify up front, which is
+    /// whether AAC survives passthrough at all on a given machine.
     ///
     ///   cargo test -p trix-core -- --ignored fast_export_of_a_real_clip
     #[test]
@@ -932,6 +981,22 @@ mod tests {
         // The proof it is a valid MP4 and not just bytes: re-index it.
         let keys = keyframes_ms(&dest).expect("the export must itself be readable");
         assert_eq!(keys.first(), Some(&0), "the export must start on a keyframe");
+
+        // Guarded on the source, because TRIX_TEST_CLIP may legitimately point
+        // at a clip recorded with the microphone and system audio both off.
+        // Asked through `prepare`, which is the same call the export itself
+        // uses to decide whether to declare an audio stream, so the two can
+        // never disagree about what "the source has audio" means.
+        let (_reader, _video, audio_type) =
+            prepare(source, true).expect("the source must at least open");
+        if audio_type.is_some() {
+            assert!(
+                outcome.has_audio,
+                "the source has an audio track and the export reported none -- either AAC \
+                 passthrough was refused on this machine and `with_video_only_retry` silently \
+                 dropped the sound, or `has_audio` stopped counting written packets"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }
