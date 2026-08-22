@@ -68,7 +68,7 @@ The spec was written before the daemon existed in its current shape, and the use
 
 **Why the pure functions come first:** they are the part a test can pin down without a GPU, a codec, or a real file. The Media Foundation half gets an `#[ignore]`d test that runs against a real clip by hand.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `crates/trix-core/src/export.rs` with only the tests and the signatures:
 
@@ -159,13 +159,13 @@ Register it in `crates/trix-core/src/lib.rs` alongside the other `pub mod` lines
 pub mod export;
 ```
 
-- [ ] **Step 2: Run the tests to verify they pass**
+- [x] **Step 2: Run the tests to verify they pass**
 
 Run: `cargo test -p trix-core export::`
 
 Expected: 4 passed. (These are written complete rather than failing-first because they are pure assertions over functions small enough to read — the failing-first cycle belongs to `keyframes_ms` below, which cannot be unit-tested at all.)
 
-- [ ] **Step 3: Add the compressed-sample reader and the keyframe index**
+- [x] **Step 3: Add the compressed-sample reader and the keyframe index**
 
 Append to `crates/trix-core/src/export.rs`, above the test module:
 
@@ -289,7 +289,7 @@ Add `Context as _` to the `anyhow` import at the top of the file:
 use anyhow::{Context as _, Result};
 ```
 
-- [ ] **Step 4: Add the by-hand integration test**
+- [x] **Step 4: Add the by-hand integration test**
 
 Append inside `mod tests`:
 
@@ -314,13 +314,13 @@ Append inside `mod tests`:
     }
 ```
 
-- [ ] **Step 5: Verify it builds and the pure tests still pass**
+- [x] **Step 5: Verify it builds and the pure tests still pass**
 
 Run: `cargo test -p trix-core export::`
 
 Expected: 4 passed, 1 ignored.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/trix-core/src/export.rs crates/trix-core/src/lib.rs
@@ -347,7 +347,7 @@ git commit -m "feat(export): index a clip's keyframes without decoding"
 1. **No seeking.** `IMFSourceReader::SetCurrentPosition` is gated behind the `Win32_System_Com_StructuredStorage` cargo feature, which this workspace does not enable, and enabling it drags `PROPVARIANT` in for one call. Instead the reader runs from the start and samples before the snapped in-point are read and dropped. On a replay-buffer-length clip that is a demux with no decode — cheap. If a future precise mode needs real seeking, that is when the feature gets added.
 2. **Video first, then audio, in two passes.** The sink writer is created with `MF_SINK_WRITER_DISABLE_THROTTLING`, exactly as `ClipMuxer` does and for the same documented reason: a throttled writer blocks `WriteSample` waiting for the lagging stream. Writing one whole track and then the other is the pattern that already works in this codebase.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append inside `mod tests`:
 
@@ -383,13 +383,13 @@ Append inside `mod tests`:
     }
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cargo test -p trix-core -- --ignored fast_export_of_a_real_clip`
 
 Expected: FAIL to compile — `cannot find function export_fast in this scope`.
 
-- [ ] **Step 3: Implement the remux**
+- [x] **Step 3: Implement the remux**
 
 Append to `crates/trix-core/src/export.rs`, above the test module. Extend the Media Foundation import list with the sink-writer names:
 
@@ -564,7 +564,7 @@ fn copy_stream(
 }
 ```
 
-- [ ] **Step 4: Verify it builds and the by-hand test passes**
+- [x] **Step 4: Verify it builds and the by-hand test passes**
 
 Run: `cargo build -p trix-core`
 
@@ -578,7 +578,7 @@ Expected: PASS.
 
 **If the audio passthrough is the thing that fails** (the MP4 sink refusing the source's AAC type back verbatim is the one genuinely uncertain step in this plan): the export still succeeds silently, and `has_audio` comes back `false`. That is the designed fallback, not a bug to chase. Report it — the follow-up is to decode AAC to PCM and re-encode through `ClipMuxer`'s existing audio path, which is a separate task and not this plan's.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/trix-core/src/export.rs
@@ -598,7 +598,7 @@ git commit -m "feat(export): stream-copy a keyframe-snapped range to a new mp4"
 
 **Note:** `mode` is parsed but not validated here. `Command::parse` is a syntax layer — the daemon decides which modes it can actually perform, the same way it, and not this file, decides which config values are in range.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `crates/trix-proto/src/command.rs`'s test module (match the existing tests' style — read two of them first):
 
@@ -653,13 +653,13 @@ Add to `crates/trix-proto/src/command.rs`'s test module (match the existing test
     }
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run: `cargo test -p trix-proto`
 
 Expected: FAIL — `no variant named LibraryKeyframes found for enum Command`.
 
-- [ ] **Step 3: Add the variants and the parsing**
+- [x] **Step 3: Add the variants and the parsing**
 
 In the `Command` enum, replace the doc comment that reads "`library.export` is deliberately absent — it arrives with trim support" (it has now arrived) and add the variants after `LibraryReveal`:
 
@@ -720,13 +720,13 @@ fn u64_arg(req: &Request, cmd: &str, key: &str) -> Result<u64, String> {
 }
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test -p trix-proto`
 
 Expected: all pass. The dispatcher will not compile yet — `Daemon::dispatch`'s match is deliberately exhaustive with no catch-all arm, so adding a variant breaks it until Task 4. That is the design working: fix it in Task 4, not with a `_ =>` arm here.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/trix-proto/src/command.rs
@@ -751,7 +751,7 @@ git commit -m "feat(proto): add library.keyframes and library.export"
 - `mode: "precise"` is refused by name, so the error tells a third-party client what is actually going on rather than "invalid mode".
 - A successful export broadcasts `clip_saved` with the new meta, so every connected UI updates through the handler it already has.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `crates/trix-daemon/src/dispatch.rs`'s test module:
 
@@ -809,13 +809,13 @@ Add to `crates/trix-daemon/src/dispatch.rs`'s test module:
     }
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run: `cargo test -p trix-daemon`
 
 Expected: FAIL to compile — the `dispatch` match is not exhaustive over the two new `Command` variants.
 
-- [ ] **Step 3: Implement the daemon methods**
+- [x] **Step 3: Implement the daemon methods**
 
 Add to `crates/trix-daemon/src/state.rs`, beside `rename` / `set_favorite` / `reveal` (read `reveal` first — it already does the id validation and path resolution this needs, and the new methods must match it rather than invent a second style):
 
@@ -927,19 +927,19 @@ Then in `crates/trix-daemon/src/dispatch.rs`, beside the other `Library*` arms:
 
 `updated_clip` already serializes a bare `ClipMeta` into an ok response — the same shape `library.rename` answers with. Confirm that before reusing it.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test -p trix-daemon`
 
 Expected: all pass, including the three new ones.
 
-- [ ] **Step 5: Verify the whole workspace still builds**
+- [x] **Step 5: Verify the whole workspace still builds**
 
 Run: `cargo build --workspace`
 
 Expected: builds clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/trix-daemon/src/state.rs crates/trix-daemon/src/dispatch.rs
@@ -960,7 +960,7 @@ git commit -m "feat(daemon): answer library.keyframes and library.export"
 - Consumes: `call` from `../lib/ipc`; `app.current`, `app.toast` from `../lib/state.svelte`.
 - Produces: `app.keyframesFor(id: string): Promise<number[]>`, `app.exportTrim(id: string, startMs: number, endMs: number): Promise<void>`.
 
-- [ ] **Step 1: Write the component**
+- [x] **Step 1: Write the component**
 
 Create `crates/trix-ui/web/src/components/TrimBar.svelte`:
 
@@ -1045,7 +1045,7 @@ Create `crates/trix-ui/web/src/components/TrimBar.svelte`:
 </style>
 ```
 
-- [ ] **Step 2: Write the failing state test**
+- [x] **Step 2: Write the failing state test**
 
 Add to `crates/trix-ui/web/src/lib/state.svelte.test.ts`, matching how the existing tests stub `call`:
 
@@ -1058,13 +1058,13 @@ Add to `crates/trix-ui/web/src/lib/state.svelte.test.ts`, matching how the exist
   });
 ```
 
-- [ ] **Step 3: Run it to verify it fails**
+- [x] **Step 3: Run it to verify it fails**
 
 Run: `npx vitest run` from `crates/trix-ui/web`
 
 Expected: FAIL — `app.exportTrim is not a function`.
 
-- [ ] **Step 4: Add the two state methods**
+- [x] **Step 4: Add the two state methods**
 
 In `crates/trix-ui/web/src/lib/state.svelte.ts`, beside `rename` / `setFavorite` / `reveal`:
 
@@ -1105,7 +1105,7 @@ In `crates/trix-ui/web/src/lib/state.svelte.ts`, beside `rename` / `setFavorite`
 
 Check `toast`'s real signature before using `'ok'` — match whatever the existing success toasts pass.
 
-- [ ] **Step 5: Wire it into the clip page**
+- [x] **Step 5: Wire it into the clip page**
 
 In `crates/trix-ui/web/src/views/ClipPage.svelte`, replace the reserved-slot comment with the bar, and add the state and keys. Import at the top:
 
@@ -1198,7 +1198,7 @@ Add the keys to the existing `switch` in `onkeydown`, and handle `Ctrl+E` before
 
 **Check `shouldHandleKey` first** (`crates/trix-ui/web/src/lib/keys.ts`): `i` and `o` are ordinary printable characters, so they must not fire while the rename input has focus. If the existing guard already covers that (it exists precisely to stop window-level shortcuts stealing from focused controls), change nothing.
 
-- [ ] **Step 6: Verify**
+- [x] **Step 6: Verify**
 
 Run, from `crates/trix-ui/web`:
 
@@ -1210,7 +1210,7 @@ npm run build
 
 Expected: 0 errors, all tests pass, build succeeds.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/trix-ui/web/src
@@ -1225,15 +1225,15 @@ git commit -m "feat(ui): trim bar with keyframe ticks and export"
 - Modify: `docs/ship/README.txt`
 - Modify: `docs/superpowers/specs/2026-07-26-trix-desktop-ui-design.md`
 
-- [ ] **Step 1: Correct the shipped README**
+- [x] **Step 1: Correct the shipped README**
 
 `docs/ship/README.txt:200` currently reads "No trimming or exporting yet. Clips are saved whole, at the length you…". Read the surrounding lines and replace it with what is now true — fast trimming exists, in-points snap to the nearest second, and precise (frame-accurate) trimming does not exist yet.
 
-- [ ] **Step 2: Mark the spec's deferred lines as delivered**
+- [x] **Step 2: Mark the spec's deferred lines as delivered**
 
 The spec says in several places that trim/export "arrive with the plan that follows" stage 4. Add a short status note under §6.3 recording that fast mode shipped on 2026-08-22, that precise mode did not, and listing the four deviations from the table at the top of this plan. Do not rewrite the spec's design text — the record of what was designed stays intact.
 
-- [ ] **Step 3: Hand-verification (a person must do this — no script covers it)**
+- [x] **Step 3: Hand-verification (a person must do this — no script covers it)**
 
 Build and run the real app:
 
@@ -1244,16 +1244,21 @@ cd crates/trix-ui && cargo tauri build --no-bundle
 
 Then, with a real clip of at least 5 seconds in the library, check each of:
 
-- [ ] Opening a clip shows the bar with ticks roughly one second apart.
-- [ ] Dragging **In** snaps to a tick; dragging **Out** moves freely.
-- [ ] `I` and `O` set the points at the playhead; `Space` still plays and pauses.
-- [ ] `Ctrl+E` and the button both export, and the new clip appears in the grid **without a manual refresh**.
-- [ ] The exported clip plays, starts at the in-point, and is about the expected length.
-- [ ] **The exported clip has sound.** This is the one uncertain step in the plan — if it is silent, the AAC passthrough fell back, which Task 2 documents.
-- [ ] The source clip is untouched: same size, still plays in full.
-- [ ] Export while **armed** — it must not disturb the replay ring or drop the arm state.
+- [x] Opening a clip shows the bar with ticks roughly one second apart.
+- [x] Dragging **In** snaps to a tick; dragging **Out** moves freely.
+- [x] `I` and `O` set the points at the playhead; `Space` still plays and pauses.
+- [x] `Ctrl+E` and the button both export, and the new clip appears in the grid **without a manual refresh**.
+- [x] The exported clip plays, starts at the in-point, and is about the expected length.
+- [x] **The exported clip has sound.** This is the one uncertain step in the plan — if it is silent, the AAC passthrough fell back, which Task 2 documents.
+- [x] The source clip is untouched: same size, still plays in full.
+- [x] Export while **armed** — it must not disturb the replay ring or drop the arm state.
 
-- [ ] **Step 4: Commit**
+**Verified by hand on 2026-08-22 by tnhnblgl, against the release build at
+v0.7.0.** All eight checks above passed, including the AAC passthrough
+question this plan flagged as its one unverified assumption -- exported
+clips carry their sound. Shipped as v0.7.0 (merge `7e0b5e7`).
+
+- [x] **Step 4: Commit**
 
 ```bash
 git add docs
