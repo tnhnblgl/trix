@@ -323,6 +323,24 @@ fast-mode snap error at ~1 s, and as a bonus makes the replay ring start closer 
 `replay_seconds` instead of overshooting to the previous keyframe. The bitrate cost at 8 Mbps is
 small.
 
+**Delivered, 2026-08-22.** `fast` mode above shipped as designed. `precise` mode did not — it stays
+exactly as designed above, for a later plan. Four particulars shipped differently than this section
+describes:
+
+| Spec said | What shipped | Why |
+|---|---|---|
+| request carries `{clip_id, dest, start_ms, end_ms, mode}` | no `dest` | the daemon allocates the new clip's id and path; a caller-supplied destination would be invisible to the library grid |
+| `export_progress` / `export_done` events | neither | fast export is sub-second and synchronous like `clip`; the response carries the new clip's `ClipMeta` and the existing `clip_saved` broadcast announces it |
+| a `trim_mode` config key | not added | a setting with one legal value is not a setting; `mode` still travels on the wire and anything other than `"fast"` is refused |
+| a filmstrip trim bar | a plain bar with keyframe tick marks | thumbnails along the range need a video decode path the daemon does not have; the user chose ticks |
+
+One addition this section never mentioned: **`library.keyframes`**, a new command. This section
+requires the bar to show where cuts can land, but nothing here exposed keyframe positions to a
+client.
+
+Full account, including the reasoning behind each deviation:
+`docs/superpowers/plans/2026-08-22-trix-clip-trimming.md`.
+
 ### 6.4 Settings
 
 One page per config section, populated from `config.get` and written through `config.set`, with

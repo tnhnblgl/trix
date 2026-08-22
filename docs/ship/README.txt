@@ -197,8 +197,12 @@ KNOWN LIMITS IN THIS RELEASE
     another combination, and the Test button there tells you whether Trix
     actually received your key.
 
-  * No trimming or exporting yet. Clips are saved whole, at the length you
-    set. That is the next thing being built.
+  * Trimming has arrived, fast mode only. Open a clip, set an in and an out
+    point, and export the range to a new clip in your library -- Trix
+    copies the picture and sound as they are, so it takes well under a
+    second and loses no quality. The in point snaps back to the nearest
+    second; the out point does not. Frame-accurate trimming, for landing on
+    an exact frame, is not in yet.
 
   * Trix can only clip while the tray recorder is running, and opening the
     app is what starts it. If you would rather have it ready at login
