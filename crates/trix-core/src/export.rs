@@ -54,8 +54,32 @@ pub fn clamp_range(duration_ms: u64, start_ms: u64, end_ms: u64) -> Result<(u64,
 /// A read that returns no sample without being the end of the stream is legal
 /// (a format change, a gap). Skipping is correct; treating it as the end would
 /// truncate. Bounded so a source that only ever returns nothing cannot spin
-/// forever -- same reasoning, and the same number, as `sound/decode.rs`.
+/// forever -- the same reasoning as `sound/decode.rs`'s
+/// `MAX_CONSECUTIVE_EMPTY_READS`, but a smaller number. `to_wav`'s loop runs
+/// while the daemon's config mutex is held, so a hang there wedges every
+/// `status` and `config.get` call, and the clip path too -- that severity is
+/// why it is set generous, at 1,000. This loop holds no lock and blocks
+/// nothing but its own caller, so a tighter bound is deliberate here.
 const MAX_CONSECUTIVE_EMPTY_READS: u32 = 64;
+
+/// Advances the consecutive-empty-read counter, bailing with `source` named
+/// once [`MAX_CONSECUTIVE_EMPTY_READS`] is exceeded.
+///
+/// Pulled out of the read loop so this bound can be unit-tested without
+/// Media Foundation, the same way -- and for the same reason -- as
+/// `sound/decode.rs`'s `count_empty_read`: the loop below calls this exact
+/// function rather than repeating the check inline.
+fn count_empty_read(empty_reads: u32, source: &Path) -> Result<u32> {
+    let empty_reads = empty_reads + 1;
+    if empty_reads > MAX_CONSECUTIVE_EMPTY_READS {
+        anyhow::bail!(
+            "{} stopped delivering video samples after {MAX_CONSECUTIVE_EMPTY_READS} \
+             consecutive empty reads",
+            source.display()
+        );
+    }
+    Ok(empty_reads)
+}
 
 fn video_stream() -> u32 {
     MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32
@@ -141,10 +165,7 @@ pub fn keyframes_ms(source: &Path) -> Result<Vec<u64>> {
             break;
         }
         let Some(sample) = sample else {
-            empty_reads += 1;
-            if empty_reads > MAX_CONSECUTIVE_EMPTY_READS {
-                anyhow::bail!("{} stopped delivering video samples", source.display());
-            }
+            empty_reads = count_empty_read(empty_reads, source)?;
             continue;
         };
         empty_reads = 0;
@@ -190,6 +211,73 @@ mod tests {
     #[test]
     fn clamp_range_trims_an_overlong_end_to_the_clip() {
         assert_eq!(clamp_range(10_000, 8_000, 99_000), Ok((8_000, 10_000)));
+    }
+
+    /// The bound from `MAX_CONSECUTIVE_EMPTY_READS`: a long run of legitimate
+    /// gaps must not trip it (a real file can have a few), but it must still
+    /// end the loop eventually so a source that only ever returns nothing
+    /// cannot hang `keyframes_ms` forever. This calls the exact function the
+    /// read loop calls, so it exercises the real guard without needing Media
+    /// Foundation -- same shape as `sound/decode.rs`'s equivalent test.
+    #[test]
+    fn the_empty_read_guard_bails_after_the_limit_but_not_before() {
+        let path = Path::new(r"C:\clips\fixture.mp4");
+
+        let mut empty_reads = 0u32;
+        for _ in 0..MAX_CONSECUTIVE_EMPTY_READS {
+            empty_reads = count_empty_read(empty_reads, path)
+                .expect("must not bail before the limit is exceeded");
+        }
+
+        let err = count_empty_read(empty_reads, path).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("fixture.mp4"), "the error must name the file: {message}");
+        assert!(
+            message.contains(&MAX_CONSECUTIVE_EMPTY_READS.to_string()),
+            "the error should say how many reads it gave up after: {message}"
+        );
+    }
+
+    /// A single empty read, or a handful, must not bail -- resetting on a
+    /// successful sample is what lets a long clip with occasional legitimate
+    /// gaps still index fully. This only checks the counter does not fire
+    /// early; the reset itself is a plain assignment in the loop, covered
+    /// below.
+    #[test]
+    fn a_handful_of_empty_reads_does_not_bail() {
+        let path = Path::new(r"C:\clips\fixture.mp4");
+
+        let mut empty_reads = 0u32;
+        for _ in 0..5 {
+            empty_reads =
+                count_empty_read(empty_reads, path).expect("a few gaps in a row must not bail");
+        }
+        assert_eq!(empty_reads, 5);
+    }
+
+    /// `sound/decode.rs`'s equivalent test left its reset-on-success line
+    /// uncovered, because a bare `empty_reads = 0` triggered by a real sample
+    /// is hard to reach without Media Foundation. This pins the interaction
+    /// the reset exists for at the level that *can* be checked without MF:
+    /// two gaps, then a reset standing in for the loop's `empty_reads = 0` on
+    /// a real sample, then one more gap. If the reset did not actually zero
+    /// the counter, this would report 4 rather than the true 1 -- and on a
+    /// real file, a bound sized for the gaps after one reset would then fire
+    /// too early on a clip with several periodic, legitimate gaps.
+    #[test]
+    fn a_reset_between_gaps_means_only_the_later_gaps_count() {
+        let path = Path::new(r"C:\clips\fixture.mp4");
+
+        let mut empty_reads = 0u32;
+        empty_reads = count_empty_read(empty_reads, path).expect("gap 1");
+        empty_reads = count_empty_read(empty_reads, path).expect("gap 2");
+        assert_eq!(empty_reads, 2);
+
+        // Stands in for the read loop's `empty_reads = 0` on a real sample.
+        empty_reads = 0;
+
+        empty_reads = count_empty_read(empty_reads, path).expect("gap after the reset");
+        assert_eq!(empty_reads, 1, "the two gaps before the reset must not still be counted");
     }
 
     /// Runs against a real clip, so it is `#[ignore]`d: `cargo test` on a
