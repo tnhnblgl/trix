@@ -11,6 +11,10 @@
   --line: rgba(255, 255, 255, 0.07);
   --line-soft: rgba(255, 255, 255, 0.05);
   --line-strong: rgba(255, 255, 255, 0.11);
+  /* --line-strong, brightened under the pointer. The two-step is what makes
+     an outlined control feel like a control: a border that does not move on
+     hover reads as decoration. */
+  --line-hi: rgba(255, 255, 255, 0.18);
 
   /* Interaction. One wash for every transparent control's hover, and the
      lifted form of the two surfaces that have one. Tokens rather than
@@ -118,11 +122,11 @@ body {
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.11);
+  background: var(--line-strong);
   border-radius: var(--r-full);
   border: 2px solid var(--bg);
 }
-::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.18); }
+::-webkit-scrollbar-thumb:hover { background: var(--line-hi); }
 
 @media (prefers-reduced-motion: reduce) {
   :root { --t-fast: 0.01ms; --t: 0.01ms; --t-slow: 0.01ms; }

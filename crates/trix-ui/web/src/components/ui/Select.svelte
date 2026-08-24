@@ -158,7 +158,7 @@
     cursor: pointer;
     transition: border-color var(--t-fast) var(--ease);
   }
-  .trigger:hover { border-color: var(--line-strong); }
+  .trigger:hover { border-color: var(--line-hi); }
   .trigger.open { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
   .trigger :global(svg) { color: var(--faint); }
   .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
