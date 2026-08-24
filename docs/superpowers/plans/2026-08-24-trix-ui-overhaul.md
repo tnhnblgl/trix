@@ -229,13 +229,20 @@ export function valueToRatio(value: number, min: number, max: number): number {
 /**
  * `value` moved `delta` steps.
  *
- * Snapped after moving, not before, so a value the daemon handed back that is
- * off the UI's own grid is pulled onto it by the first arrow key rather than
- * carrying its offset for the rest of the drag.
+ * Snapped after moving, so a value the daemon handed back that is off the
+ * UI's own grid is pulled onto it by the first arrow key rather than carrying
+ * its offset for the rest of the drag.
+ *
+ * Rounded in the direction of travel rather than to the nearest step, which
+ * is what makes that pull-onto-grid land where the user aimed: from 37 on a
+ * grid of tens, Up must reach 40 and Down must reach 30. Nearest-rounding
+ * sends Up to 50 -- past the grid point the user was reaching for.
  */
 export function stepBy(value: number, delta: number, min: number, max: number, step: number): number {
-  const moved = value + delta * (step <= 0 ? 1 : step);
-  return clamp(snapToStep(moved, min, step), min, max);
+  const s = step <= 0 ? 1 : step;
+  const moved = value + delta * s;
+  const idx = delta >= 0 ? Math.floor((moved - min) / s) : Math.ceil((moved - min) / s);
+  return clamp(min + idx * s, min, max);
 }
 
 /**
@@ -3722,6 +3729,18 @@ grep -rn "type=[\"']range[\"']\|type=[\"']checkbox[\"']\|type=[\"']number[\"']\|
 ```
 
 Expected: **no output.** Any hit is a control that missed the overhaul.
+
+Then check that no screen still reaches for a token Task 1 removed:
+
+```bash
+grep -rn "var(--panel)" crates/trix-ui/web/src --include=*.svelte
+```
+
+Expected: **no output.** Task 1 replaced `--panel` with `--surface` /
+`--raised` / `--overlay`, and every file that referenced it is rewritten by
+Task 8, 9, 11 or 12 or deleted by Task 10. A hit means one of those rewrites
+missed a rule, and it renders as a transparent background rather than as an
+error — nothing else in the toolchain will catch it.
 
 - [ ] **Step 6: Full hand-verification (a person must do this)**
 
