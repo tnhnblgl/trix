@@ -286,6 +286,10 @@ Overwrite `crates/trix-ui/web/src/app.css`. The `input`/`select`/`button` elemen
   --line: rgba(255, 255, 255, 0.07);
   --line-soft: rgba(255, 255, 255, 0.05);
   --line-strong: rgba(255, 255, 255, 0.11);
+  /* --line-strong, brightened under the pointer. The two-step is what makes
+     an outlined control feel like a control: a border that does not move on
+     hover reads as decoration. */
+  --line-hi: rgba(255, 255, 255, 0.18);
 
   /* Interaction. One wash for every transparent control's hover, and the
      lifted form of the two surfaces that have one. Tokens rather than
@@ -393,11 +397,11 @@ body {
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.11);
+  background: var(--line-strong);
   border-radius: var(--r-full);
   border: 2px solid var(--bg);
 }
-::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.18); }
+::-webkit-scrollbar-thumb:hover { background: var(--line-hi); }
 
 @media (prefers-reduced-motion: reduce) {
   :root { --t-fast: 0.01ms; --t: 0.01ms; --t-slow: 0.01ms; }
@@ -1523,6 +1527,11 @@ off-theme widget in Settings.
 - [ ] **Step 1: Create `Select.svelte`**
 
 ```svelte
+<script module lang="ts">
+  /** Instance counter -- see `uid` below, same reasoning as Menu.svelte. */
+  let nextSelectId = 0;
+</script>
+
 <script lang="ts">
   import Icon from './Icon.svelte';
   import { nextIndex } from '../../lib/ui';
@@ -1543,6 +1552,16 @@ off-theme widget in Settings.
   let active = $state(0);
   let root = $state<HTMLDivElement | null>(null);
   let trigger = $state<HTMLButtonElement | null>(null);
+
+  /**
+   * A prefix unique to this instance, for the option ids `aria-activedescendant`
+   * points at. Index-based rather than keyed on `option.value` -- a config
+   * value is not guaranteed to be a valid id token, and the index is unique
+   * regardless. Module-scoped counter for the same reason as Menu.svelte's
+   * `uid`: deterministic, free, and safe if two selects are ever mounted in
+   * the same frame.
+   */
+  const uid = `select-${nextSelectId++}`;
 
   const selected = $derived(options.find((o) => o.value === value));
 
@@ -1609,24 +1628,30 @@ off-theme widget in Settings.
   }
 </script>
 
-<div bind:this={root} class="wrap" {onkeydown}>
+<div bind:this={root} class="wrap">
   <button
     bind:this={trigger}
+    type="button"
     class="trigger"
     class:open
     role="combobox"
     aria-expanded={open}
     aria-haspopup="listbox"
+    aria-controls="{uid}-listbox"
+    aria-activedescendant={open && options[active] ? `${uid}-${active}` : undefined}
     aria-label={label}
-    onclick={() => (open ? dismiss() : show())}>
+    onclick={() => (open ? dismiss() : show())}
+    {onkeydown}>
     <span class="txt">{selected?.label ?? ''}</span>
     <Icon name="chevron-down" size={11} />
   </button>
 
   {#if open}
-    <div class="pop" role="listbox" aria-label={label}>
+    <div id="{uid}-listbox" class="pop" role="listbox" aria-label={label}>
       {#each options as option, i (option.value)}
         <button
+          type="button"
+          id="{uid}-{i}"
           class="opt"
           class:active={i === active}
           class:on={option.value === value}
@@ -1662,7 +1687,7 @@ off-theme widget in Settings.
     cursor: pointer;
     transition: border-color var(--t-fast) var(--ease);
   }
-  .trigger:hover { border-color: var(--line-strong); }
+  .trigger:hover { border-color: var(--line-hi); }
   .trigger.open { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
   .trigger :global(svg) { color: var(--faint); }
   .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
