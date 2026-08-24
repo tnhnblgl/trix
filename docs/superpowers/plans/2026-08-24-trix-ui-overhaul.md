@@ -1654,7 +1654,8 @@ round-trip decision.
    */
   let {
     field, config, monitors, capture, listening, heard,
-    onset, oncapture, onsavehotkey, ontogglelisten, onpickfolder, onpicksound, ontestsound,
+    onset, oncapture, onstartcapture, onsavehotkey, ontogglelisten,
+    onpickfolder, onpicksound, ontestsound,
   }: {
     field: Field;
     config: Record<string, unknown>;
@@ -1664,6 +1665,7 @@ round-trip decision.
     heard: boolean;
     onset: (key: string, value: unknown) => void;
     oncapture: (e: KeyboardEvent) => void;
+    onstartcapture: () => void;
     onsavehotkey: () => void;
     ontogglelisten: () => void;
     onpickfolder: () => void;
@@ -1782,7 +1784,7 @@ round-trip decision.
         combo={capture ?? String(config[field.key] ?? '')}
         capturing={capture !== null}
         oncapture={oncapture}
-        onstart={() => oncapture(new KeyboardEvent('keydown', { key: 'Unidentified' }))} />
+        onstart={onstartcapture} />
       {#if capture && capture !== config[field.key]}
         <Button size="sm" variant="primary" onclick={onsavehotkey}>Save</Button>
       {/if}
@@ -1821,13 +1823,11 @@ round-trip decision.
 </style>
 ```
 
-**Note on the hotkey `onstart` line above:** `Settings.svelte`'s
-`captureHotkey` returns early for a bare modifier and for
-`key: 'Unidentified'` it will push `'unidentified'` into `parts` — which is
-wrong. Fix it in Step 3 by giving `Settings.svelte` a real `startCapture`
-instead, and pass that: replace the `onstart` line with
-`onstart={onstartcapture}` and add `onstartcapture: () => void` to the props
-type.
+`onstartcapture` is a separate prop from `oncapture` on purpose. Arming the
+field and recording a combination are different events, and routing "the user
+clicked the field" through `captureHotkey` would mean synthesising a
+`KeyboardEvent` for it — which `captureHotkey` would dutifully turn into the
+combination `unidentified` and save.
 
 - [ ] **Step 3: Add `startCapture` to `Settings.svelte`'s script**
 
@@ -3429,8 +3429,13 @@ Everything from `{#if clip}` to the end of the file:
       <Button variant="primary" size="sm" onclick={commitRename}>Save</Button>
       <Button variant="ghost" size="sm" onclick={() => (renaming = false)}>Cancel</Button>
     {:else}
-      <span class="title">{clip.title}</span>
-      {#if clip.favorite}<span class="star"><Icon name="star-filled" size={14} /></span>{/if}
+      <!-- Star and title in one box: two siblings each carrying
+           `margin-right: auto` would both claim the free space and push
+           twice. -->
+      <span class="titlebox">
+        {#if clip.favorite}<span class="star"><Icon name="star-filled" size={14} /></span>{/if}
+        <span class="title">{clip.title}</span>
+      </span>
       <IconButton
         icon={clip.favorite ? 'star-filled' : 'star'}
         label={clip.favorite ? 'Unfavourite' : 'Favourite'}
@@ -3473,8 +3478,9 @@ Everything from `{#if clip}` to the end of the file:
   .meta { color: var(--faint); font-size: 11px; margin: 14px 0 12px; }
 
   .actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-  .actions .title { font-weight: 650; font-size: 13.5px; margin-right: auto; }
-  .actions .star { color: var(--fav); display: flex; margin-right: auto; margin-left: -2px; }
+  .titlebox { display: flex; align-items: center; gap: 6px; margin-right: auto; min-width: 0; }
+  .actions .title { font-weight: 650; font-size: 13.5px; }
+  .actions .star { color: var(--fav); display: flex; }
   .sep { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
   .rn {
     flex: 1;
@@ -3486,22 +3492,6 @@ Everything from `{#if clip}` to the end of the file:
     font: inherit;
   }
 </style>
-```
-
-**Note:** the `.title` and `.star` rules above both carry `margin-right: auto`,
-which would push twice. Use this instead — wrap the two in one element:
-
-```svelte
-      <span class="titlebox">
-        {#if clip.favorite}<span class="star"><Icon name="star-filled" size={14} /></span>{/if}
-        <span class="title">{clip.title}</span>
-      </span>
-```
-
-```css
-  .titlebox { display: flex; align-items: center; gap: 6px; margin-right: auto; min-width: 0; }
-  .actions .title { font-weight: 650; font-size: 13.5px; }
-  .actions .star { color: var(--fav); display: flex; }
 ```
 
 - [ ] **Step 5: Verify the gates**
@@ -3776,14 +3766,13 @@ git commit -m "feat(ui): toasts, daemon-down and first-run on the new primitives
 
 **Known soft spots, stated rather than hidden:**
 
-- **Task 7 Step 2 contains a deliberate correction.** The first version of the
-  `hotkey` branch passes a synthetic `KeyboardEvent` into `oncapture`, which
-  `captureHotkey` would turn into the literal combination `unidentified`. Step 3
-  replaces it with a real `startCapture`. The implementer must apply both steps;
-  applying Step 2 alone ships that bug.
-- **Task 11 Step 4 contains a second deliberate correction** — two elements both
-  carrying `margin-right: auto`, fixed by the `.titlebox` wrapper at the end of
-  the step. Same rule: apply the whole step.
+- **Task 7 spans two files for one control.** `Field.svelte` declares an
+  `onstartcapture` prop (Step 2) that `Settings.svelte` only supplies in Step 3.
+  Between the two steps `npm run check` fails on a missing required prop. That
+  is expected; the task's gate is Step 5, not each step.
+- **Task 10 deliberately ends red.** It deletes `TrimBar.svelte` while
+  `ClipPage.svelte` still imports it, so `npm run check` fails until Task 11.
+  Task 10's gate is `npx vitest run` alone, and its step list says so.
 - **No component has a unit test**, by the rule in the Global Constraints. If a
   reviewer wants component coverage they are asking for a new dependency, which
   the spec forbids. The compensating controls are `svelte-check` and Task 12's
