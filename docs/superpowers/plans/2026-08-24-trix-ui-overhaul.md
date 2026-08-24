@@ -1156,7 +1156,7 @@ git commit -m "feat(ui): menu popover and focus-trapped modal"
 - Create: `crates/trix-ui/web/src/components/ui/Stepper.svelte`
 
 **Interfaces:**
-- Consumes: `clamp`, `ratioToValue`, `valueToRatio`, `stepBy` from `lib/ui.ts`; `Icon.svelte`.
+- Consumes: `clamp`, `ratioToValue`, `valueToRatio`, `stepBy` from `lib/ui.ts`. No icons: the stepper's buttons are the typographic `&minus;` and `+`, which are symbols rather than the arrow glyphs this overhaul is removing.
 - Produces:
   - `Slider` — `{ value: number; min: number; max: number; step?: number; label: string; disabled?: boolean; oninput?: (v: number) => void; onchange: (v: number) => void }`
   - `Stepper` — `{ value: number; min: number; max: number; step?: number; unit?: string; label: string; onchange: (v: number) => void }`
