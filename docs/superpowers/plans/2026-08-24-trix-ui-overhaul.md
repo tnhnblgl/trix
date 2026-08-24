@@ -322,6 +322,21 @@ body {
    they count. */
 .tnum { font-variant-numeric: tabular-nums; }
 
+/* The settings row: label and help on the left, control on the right.
+   Global rather than scoped to a component because two components render
+   this same row -- `Field.svelte` for every config-backed setting, and
+   `Settings.svelte` inline for the Version row, which has no config key
+   behind it to render through `Field`. Svelte scopes a component's styles to
+   its own markup, so a copy in each would be these six rules maintained in
+   two places. Layout, not control styling -- the controls themselves are
+   still components. */
+.row { display: flex; align-items: center; gap: 20px; padding: 13px 0; }
+.row + .row { border-top: 1px solid rgba(255, 255, 255, 0.05); }
+.row .lt { flex: 1; min-width: 0; }
+.row .lt b { display: block; font-weight: 500; font-size: 13px; }
+.row .lt span { display: block; color: var(--dim); font-size: 11.5px; margin-top: 2px; }
+.row .rt { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
+
 /* The app had no focus styling at all before this. `:focus-visible` rather
    than `:focus`, so clicking a control does not leave a ring behind it. */
 :focus-visible {
@@ -1797,12 +1812,10 @@ round-trip decision.
 </div>
 
 <style>
-  .row { display: flex; align-items: center; gap: 20px; padding: 13px 0; }
-  .row + :global(.row) { border-top: 1px solid rgba(255, 255, 255, 0.05); }
-  .lt { flex: 1; min-width: 0; }
-  .lt b { display: block; font-weight: 500; font-size: 13px; }
-  .lt span { display: block; color: var(--dim); font-size: 11.5px; margin-top: 2px; }
-  .rt { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
+  /* `.row`, `.lt` and `.rt` are global, in app.css: `Settings.svelte`
+     renders the same row shape inline for its Version entry, and a scoped
+     copy here would mean maintaining both. Only what is unique to a field's
+     control lives here. */
   .pct { min-width: 44px; text-align: right; font-size: 12.5px; color: var(--dim); }
   .path {
     display: block;
@@ -1941,14 +1954,10 @@ from `<h1>Settings</h1>` to the end of the file:
   }
   .notice :global(svg) { color: var(--live); }
   .spacer { margin-left: auto; }
-  /* Matches Field.svelte's own `.row`, so the inline Version row lines up
-     with the generated ones above it. */
-  .row { display: flex; align-items: center; gap: 20px; padding: 13px 0; border-top: 1px solid rgba(255, 255, 255, 0.05); }
-  .lt { flex: 1; min-width: 0; }
-  .lt b { display: block; font-weight: 500; font-size: 13px; }
-  .lt span { display: block; color: var(--dim); font-size: 11.5px; margin-top: 2px; }
+  /* `.row`, `.lt` and `.rt` come from app.css, shared with `Field.svelte` --
+     the Version row is this same shape and must line up with the generated
+     rows above it. Only what is unique to this row lives here. */
   .checked { color: var(--text) !important; }
-  .rt { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
   .ver { color: var(--dim); font-size: 12.5px; }
   .extras { font-size: 11.5px; color: var(--dim); margin: 0; }
 </style>
