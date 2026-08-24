@@ -33,7 +33,7 @@
     padding: 0;
     border-radius: var(--r-full);
     border: 1px solid var(--line-strong);
-    background: rgba(255, 255, 255, 0.13);
+    background: var(--line-strong);
     cursor: pointer;
     transition: background var(--t) var(--ease), border-color var(--t) var(--ease);
   }

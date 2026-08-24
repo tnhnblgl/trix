@@ -1,3 +1,8 @@
+<script module lang="ts">
+  /** Instance counter -- see `uid` below. */
+  let nextModalId = 0;
+</script>
+
 <script lang="ts">
   import type { Snippet } from 'svelte';
 
@@ -16,6 +21,8 @@
   let panel = $state<HTMLDivElement | null>(null);
   /** Whatever had focus before the dialog opened, so it can be given back. */
   let opener: Element | null = null;
+  /** Instance-unique, so `aria-labelledby` names this dialog's own heading. */
+  const uid = `modal-${nextModalId++}`;
 
   $effect(() => {
     opener = document.activeElement;
@@ -39,8 +46,15 @@
       return;
     }
     if (e.key !== 'Tab' || !panel) return;
+    // `select` and `textarea` are in the list even though today's only
+    // consumer is a pair of buttons. Leaving them out does not merely strand
+    // focus: the wrap is triggered by comparing `activeElement` against the
+    // first and last of *this* list, so focus sitting on an unlisted control
+    // matches neither, `preventDefault` never runs, and the browser's own Tab
+    // walks straight out of the dialog into the page behind it.
     const focusable = panel.querySelectorAll<HTMLElement>(
-      'button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]),'
+        + ' textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
     );
     if (focusable.length === 0) return;
     const first = focusable[0];
@@ -55,17 +69,29 @@
   }
 </script>
 
-<svelte:window {onkeydown} />
+<!--
+  The keydown handler is bound to the panel, NOT to `<svelte:window>`.
 
+  `ClipPage` and `Grid` each already mount their own `<svelte:window
+  onkeydown>`. Two listeners on the *same* window are siblings, and
+  `stopPropagation` does not stop a sibling on the same node -- only
+  `stopImmediatePropagation` does. So a window-bound modal handler would
+  double-fire with the page underneath it, and Escape would both close the
+  dialog and run the page's shortcut. Bound to the panel, the event stops
+  where it is handled and never reaches window at all -- which is exactly why
+  `Menu` binds to its own element too. Focus is trapped inside the panel, so
+  there is no keydown outside it to miss.
+-->
 <div class="scrim">
   <div
     bind:this={panel}
     class="panel"
     role="dialog"
     aria-modal="true"
-    aria-label={title}
-    tabindex="-1">
-    <h2>{title}</h2>
+    aria-labelledby="{uid}-title"
+    tabindex="-1"
+    {onkeydown}>
+    <h2 id="{uid}-title">{title}</h2>
     <div class="body">{@render children()}</div>
     <div class="actions">{@render actions()}</div>
   </div>
@@ -78,14 +104,14 @@
     z-index: 40;
     display: grid;
     place-items: center;
-    background: rgba(0, 0, 0, 0.55);
+    background: var(--scrim);
     animation: fade var(--t-slow) var(--ease);
   }
   .panel {
     width: min(420px, calc(100vw - 48px));
     padding: 18px 20px 16px;
     background: var(--overlay);
-    border: 1px solid rgba(255, 255, 255, 0.12);
+    border: 1px solid var(--line-strong);
     border-radius: var(--r-lg);
     box-shadow: var(--shadow);
     animation: rise var(--t-slow) var(--ease);

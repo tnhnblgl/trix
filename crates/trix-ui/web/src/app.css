@@ -22,6 +22,10 @@
   --raised-hi: #1d222b;
   --accent-hi: #6ea8ff;
 
+  /* The wash behind a modal. Dark rather than tinted, because it sits over
+     video as often as over a page. */
+  --scrim: rgba(0, 0, 0, 0.55);
+
   /* Text */
   --text: #e4e8ee;
   --dim: #8b94a3;

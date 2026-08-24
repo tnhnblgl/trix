@@ -1,3 +1,8 @@
+<script module lang="ts">
+  /** Instance counter -- see `uid` below. */
+  let nextMenuId = 0;
+</script>
+
 <script lang="ts">
   import Icon from './Icon.svelte';
   import { nextIndex } from '../../lib/ui';
@@ -23,6 +28,16 @@
 
   let active = $state(0);
   let el = $state<HTMLDivElement | null>(null);
+  /**
+   * A prefix unique to this menu instance, for the item ids that
+   * `aria-activedescendant` points at.
+   *
+   * Module-scoped counter rather than a random id: it is deterministic, costs
+   * nothing, and two menus can be mounted at once during the frame where one
+   * card's menu is closing as another opens. Colliding ids there would leave
+   * `aria-activedescendant` naming an element in the wrong menu.
+   */
+  const uid = `menu-${nextMenuId++}`;
 
   // Focus lands on the menu itself, not on an item: one roving `active`
   // index is simpler than moving DOM focus between items, and it keeps
@@ -69,11 +84,17 @@
   role="menu"
   tabindex="-1"
   aria-orientation="vertical"
+  aria-activedescendant={items[active] ? `${uid}-${items[active].id}` : undefined}
   {onkeydown}>
   {#each items as item, i (item.id)}
     {#if item.separatorBefore}<hr />{/if}
+    <!-- Focus stays on the container and `active` is a visual index, so
+         without `aria-activedescendant` naming this id a screen reader would
+         announce nothing as the arrows move. `role="menu"` promises one or
+         the other; this is the half that does not fight the pointer. -->
     <button
       type="button"
+      id="{uid}-{item.id}"
       class="item"
       class:danger={item.danger}
       class:active={i === active}
@@ -97,7 +118,7 @@
     display: grid;
     gap: 1px;
     background: var(--overlay);
-    border: 1px solid rgba(255, 255, 255, 0.12);
+    border: 1px solid var(--line-strong);
     border-radius: var(--r-md);
     box-shadow: var(--shadow);
   }
