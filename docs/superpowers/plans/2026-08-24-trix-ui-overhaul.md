@@ -963,6 +963,7 @@ git commit -m "feat(ui): button, icon button and toggle primitives"
       class:danger={item.danger}
       class:active={i === active}
       role="menuitem"
+      tabindex="-1"
       onpointerenter={() => (active = i)}
       onclick={() => onpick(item.id)}>
       {#if item.icon}<Icon name={item.icon} size={14} />{/if}
@@ -1527,6 +1528,7 @@ off-theme widget in Settings.
 - [ ] **Step 1: Create `Select.svelte`**
 
 ```svelte
+      e.stopPropagation();
 <script module lang="ts">
   /** Instance counter -- see `uid` below, same reasoning as Menu.svelte. */
   let nextSelectId = 0;
@@ -1619,6 +1621,7 @@ off-theme widget in Settings.
       pick(active);
     } else if (e.key === 'Home' || e.key === 'End') {
       e.preventDefault();
+      e.stopPropagation();
       active = e.key === 'Home' ? 0 : options.length - 1;
     } else if (e.key === 'Tab') {
       // Tab moves on rather than being trapped, but the list must not be
@@ -1637,7 +1640,7 @@ off-theme widget in Settings.
     role="combobox"
     aria-expanded={open}
     aria-haspopup="listbox"
-    aria-controls="{uid}-listbox"
+    aria-controls={open ? `${uid}-listbox` : undefined}
     aria-activedescendant={open && options[active] ? `${uid}-${active}` : undefined}
     aria-label={label}
     onclick={() => (open ? dismiss() : show())}
@@ -1656,6 +1659,7 @@ off-theme widget in Settings.
           class:active={i === active}
           class:on={option.value === value}
           role="option"
+          tabindex="-1"
           aria-selected={option.value === value}
           onpointerenter={() => (active = i)}
           onclick={() => pick(i)}>
