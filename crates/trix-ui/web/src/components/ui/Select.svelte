@@ -52,7 +52,11 @@
 
   function pick(index: number) {
     const option = options[index];
-    if (option) onchange(option.value);
+    // Re-picking the option already showing is not a change, and every
+    // consumer's `onchange` here is a daemon round trip that rewrites
+    // config.toml. Guarded in the primitive rather than in each caller, so
+    // `Stepper` and `Select` agree about what a no-op means.
+    if (option && option.value !== value) onchange(option.value);
     dismiss();
   }
 
