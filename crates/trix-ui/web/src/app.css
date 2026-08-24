@@ -33,6 +33,14 @@
   --scrim-soft: rgba(0, 0, 0, 0.45);
   --scrim-strong: rgba(0, 0, 0, 0.75);
 
+  /* Platform constants, deliberately outside the theme. --win-close is the
+     Windows close-button hover red, which users expect on a title bar; it is
+     NOT --danger, because closing a window is not destructive and --danger
+     means exactly one thing. --video-bg is true black, used only behind video,
+     where the UI's slightly blue --bg would read as a seam. */
+  --win-close: #e81123;
+  --video-bg: #000;
+
   /* Text */
   --text: #e4e8ee;
   --dim: #8b94a3;
