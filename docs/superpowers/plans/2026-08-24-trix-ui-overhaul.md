@@ -3916,7 +3916,7 @@ error — nothing else in the toolchain will catch it.
 Then check that no literal colour survives outside `app.css`:
 
 ```bash
-grep -rnE '#[0-9a-fA-F]{3,8}|rgba?\(|hsla?\(' crates/trix-ui/web/src --include=*.svelte
+grep -rnE '#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(' crates/trix-ui/web/src --include=*.svelte
 ```
 
 Expected: **no output.** `app.css` is the one file allowed to hold literal
