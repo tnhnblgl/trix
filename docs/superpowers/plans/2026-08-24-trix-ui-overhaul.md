@@ -301,6 +301,21 @@ Overwrite `crates/trix-ui/web/src/app.css`. The `input`/`select`/`button` elemen
      video as often as over a page. */
   --scrim: rgba(0, 0, 0, 0.55);
 
+  /* Two more weights of the same wash, each with one job. --scrim-soft dims
+     the trimmed-away film on the timeline and must stay readable through it;
+     --scrim-strong backs 10px text on a clip card over an unpredictable video
+     frame, where 0.55 does not reliably carry it. Consumed by Tasks 9 and 10. */
+  --scrim-soft: rgba(0, 0, 0, 0.45);
+  --scrim-strong: rgba(0, 0, 0, 0.75);
+
+  /* Platform constants, deliberately outside the theme. --win-close is the
+     Windows close-button hover red, which users expect on a title bar; it is
+     NOT --danger, because closing a window is not destructive and --danger
+     means exactly one thing. --video-bg is true black, used only behind video,
+     where the UI's slightly blue --bg would read as a seam. */
+  --win-close: #e81123;
+  --video-bg: #000;
+
   /* Text */
   --text: #e4e8ee;
   --dim: #8b94a3;
@@ -742,7 +757,7 @@ icon-only button with no accessible name at build time.
   }
   .ib:hover:not(:disabled) { background: var(--hover); color: var(--text); }
   .ib:active:not(:disabled) { transform: translateY(1px); }
-  .ib.active { background: color-mix(in srgb, var(--accent) 15%, transparent); color: #eaf1fb; }
+  .ib.active { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--text); }
   .ib:disabled { opacity: 0.35; cursor: default; }
 </style>
 ```
@@ -788,7 +803,7 @@ Space and Enter are native and no key handling is written here at all.
     padding: 0;
     border-radius: var(--r-full);
     border: 1px solid var(--line-strong);
-    background: rgba(255, 255, 255, 0.13);
+    background: var(--line-strong);
     cursor: pointer;
     transition: background var(--t) var(--ease), border-color var(--t) var(--ease);
   }
@@ -803,7 +818,7 @@ Space and Enter are native and no key handling is written here at all.
     transition: left var(--t) var(--ease), background var(--t) var(--ease);
   }
   .tg.on { background: var(--accent); border-color: var(--accent); }
-  .tg.on .knob { left: 20px; background: #fff; }
+  .tg.on .knob { left: 20px; background: var(--text); }
   .tg:disabled { opacity: 0.4; cursor: default; }
 </style>
 ```
@@ -1276,7 +1291,7 @@ that mechanism, and it only works if these two events mean what they say here.
     right: 0;
     height: 4px;
     border-radius: 2px;
-    background: rgba(255, 255, 255, 0.13);
+    background: var(--line-strong);
   }
   .fill { position: absolute; left: 0; height: 4px; border-radius: 2px; background: var(--accent); }
   .thumb {
@@ -1285,7 +1300,7 @@ that mechanism, and it only works if these two events mean what they say here.
     height: 15px;
     border-radius: 50%;
     background: var(--accent);
-    border: 2px solid #dceaff;
+    border: 2px solid var(--text);
     transform: translateX(-7.5px);
     transition: box-shadow var(--t-fast) var(--ease);
   }
@@ -1574,7 +1589,7 @@ off-theme widget in Settings.
     cursor: pointer;
     transition: border-color var(--t-fast) var(--ease);
   }
-  .trigger:hover { border-color: rgba(255, 255, 255, 0.2); }
+  .trigger:hover { border-color: var(--line-strong); }
   .trigger.open { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
   .trigger :global(svg) { color: var(--faint); }
   .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1588,7 +1603,7 @@ off-theme widget in Settings.
     display: grid;
     gap: 1px;
     background: var(--overlay);
-    border: 1px solid rgba(255, 255, 255, 0.13);
+    border: 1px solid var(--line-strong);
     border-radius: var(--r-md);
     box-shadow: var(--shadow);
   }
@@ -1609,7 +1624,7 @@ off-theme widget in Settings.
   }
   .opt .txt { flex: 1; }
   .opt.active { background: var(--hover); }
-  .opt.on { color: #eaf1fb; }
+  .opt.on { color: var(--text); }
   .opt.on :global(svg) { color: var(--accent); }
 </style>
 ```
@@ -2283,7 +2298,7 @@ block and add:
   }
   .arm.on .dot { background: var(--live); box-shadow: 0 0 0 3px color-mix(in srgb, var(--live) 20%, transparent); }
   .arm:disabled { opacity: 0.4; cursor: default; }
-  .meter { width: 44px; height: 3px; border-radius: 2px; background: rgba(255, 255, 255, 0.14); overflow: hidden; }
+  .meter { width: 44px; height: 3px; border-radius: 2px; background: var(--line-strong); overflow: hidden; }
   .meter i { display: block; height: 100%; background: var(--live); transition: width 200ms linear; }
   .n { opacity: 0.85; }
 
@@ -2291,7 +2306,7 @@ block and add:
   /* Windows-standard 44px, and square to the bar rather than the 30px
      rounded shape IconButton uses everywhere else. */
   .wc :global(.ib) { width: 44px; height: 100%; border-radius: 0; }
-  .close :global(.ib:hover) { background: #e81123; color: #fff; }
+  .close :global(.ib:hover) { background: var(--win-close); color: var(--text); }
 </style>
 ```
 
@@ -2444,7 +2459,7 @@ is navigation only and narrows from 200px to 150px.
     transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
   }
   .nav:hover { background: var(--hover); color: var(--text); }
-  .nav.on { background: color-mix(in srgb, var(--accent) 15%, transparent); color: #eaf1fb; font-weight: 600; }
+  .nav.on { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--text); font-weight: 600; }
   .ver { margin-top: auto; font-size: 10px; color: var(--faint); padding: 0 10px; }
 </style>
 ```
@@ -2627,7 +2642,7 @@ the grid. Step 3 handles this.
     transition: box-shadow var(--t-fast) var(--ease);
   }
   .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .card:hover .thumb { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14); }
+  .card:hover .thumb { box-shadow: inset 0 0 0 1px var(--line-strong); }
   .card.selected .thumb {
     box-shadow: inset 0 0 0 2px var(--accent), 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
@@ -2637,8 +2652,8 @@ the grid. Step 3 handles this.
     bottom: 6px;
     padding: 1px 6px;
     border-radius: var(--r-sm);
-    background: rgba(0, 0, 0, 0.75);
-    color: #fff;
+    background: var(--scrim-strong);
+    color: var(--text);
     font-size: 10px;
   }
 
@@ -2746,7 +2761,7 @@ Then the markup and styles:
   .head h1 { margin: 0; font-size: 15px; font-weight: 650; }
   .cnt { font-size: 11px; color: var(--faint); }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; }
-  .preview { width: 100%; aspect-ratio: 16 / 10; border-radius: var(--r-md); background: #000; object-fit: cover; }
+  .preview { width: 100%; aspect-ratio: 16 / 10; border-radius: var(--r-md); background: var(--video-bg); object-fit: cover; }
   .empty { display: grid; place-content: center; height: 60vh; text-align: center; gap: 6px; color: var(--dim); }
   .empty .big { font-size: 15px; color: var(--text); margin: 0; }
   .empty p { margin: 0; font-size: 12.5px; }
@@ -3179,8 +3194,8 @@ Expected: PASS — 4 suites, 12 tests.
     cursor: pointer;
     touch-action: none;
   }
-  .tick { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(255, 255, 255, 0.13); }
-  .scrim { position: absolute; top: 0; bottom: 0; background: rgba(0, 0, 0, 0.45); pointer-events: none; }
+  .tick { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--line-strong); }
+  .scrim { position: absolute; top: 0; bottom: 0; background: var(--scrim-soft); pointer-events: none; }
   .range {
     position: absolute;
     top: 0;
@@ -3190,7 +3205,7 @@ Expected: PASS — 4 suites, 12 tests.
     border-right: 2px solid var(--accent);
     pointer-events: none;
   }
-  .playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; pointer-events: none; }
+  .playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--text); pointer-events: none; }
   .playhead::before {
     content: '';
     position: absolute;
@@ -3198,7 +3213,7 @@ Expected: PASS — 4 suites, 12 tests.
     left: -3px;
     width: 8px;
     height: 5px;
-    background: #fff;
+    background: var(--text);
     border-radius: 0 0 2px 2px;
   }
   .handle {
@@ -3208,7 +3223,7 @@ Expected: PASS — 4 suites, 12 tests.
     height: 15px;
     border-radius: 50%;
     background: var(--accent);
-    border: 2px solid #dceaff;
+    border: 2px solid var(--text);
     transform: translate(-50%, -50%);
     cursor: ew-resize;
     transition: box-shadow var(--t-fast) var(--ease);
@@ -3308,11 +3323,11 @@ Expected: PASS — 4 suites, 12 tests.
 
 <style>
   .stage { display: grid; gap: 12px; }
-  .stage:fullscreen { background: #000; align-content: center; padding: 0 24px 24px; }
+  .stage:fullscreen { background: var(--video-bg); align-content: center; padding: 0 24px 24px; }
   video {
     width: 100%;
     max-height: 58vh;
-    background: #000;
+    background: var(--video-bg);
     border-radius: var(--r-lg);
     display: block;
     cursor: pointer;
@@ -3824,6 +3839,19 @@ Expected: **no output.** Task 1 replaced `--panel` with `--surface` /
 Task 8, 9, 11 or 12 or deleted by Task 10. A hit means one of those rewrites
 missed a rule, and it renders as a transparent background rather than as an
 error — nothing else in the toolchain will catch it.
+
+Then check that no literal colour survives outside `app.css`:
+
+```bash
+grep -rnE '#[0-9a-fA-F]{3,8}|rgba?\(|hsla?\(' crates/trix-ui/web/src --include=*.svelte
+```
+
+Expected: **no output.** `app.css` is the one file allowed to hold literal
+colour values, because that is where the tokens are defined; every other file
+reaches them through `var(--...)`, which is what `--include=*.svelte` above
+encodes. This gate exists because the Task 4 sweep grepped only for `rgba(`
+and two hex literals walked straight through it. Nothing else in the
+toolchain objects to a hard-coded colour: it renders, and only looks wrong.
 
 - [ ] **Step 6: Full hand-verification (a person must do this)**
 
