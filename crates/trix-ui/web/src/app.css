@@ -1,11 +1,45 @@
 :root {
-  --bg: #16181d;
-  --panel: #1e2128;
-  --line: #2b2f39;
-  --text: #e8eaee;
-  --dim: #99a0ad;
-  --accent: #4a9eff;
+  /* Surfaces */
+  --bg: #0b0d10;
+  --surface: #101319;
+  --raised: #161a21;
+  --overlay: #151920;
+
+  /* Lines */
+  --line: rgba(255, 255, 255, 0.07);
+  --line-strong: rgba(255, 255, 255, 0.11);
+
+  /* Text */
+  --text: #e4e8ee;
+  --dim: #8b94a3;
+  --faint: #5d6675;
+
+  /* Semantics. Each of these means exactly one thing -- see the plan's
+     colour contract. --accent is "you selected this", --live is "Trix is
+     live", --danger is destructive or broken, --fav is kept. */
+  --accent: #5b9dff;
+  --accent-ink: #04122e;
+  --live: #3ddc97;
   --danger: #ff5c5c;
+  --fav: #f5c451;
+
+  /* Radii */
+  --r-sm: 6px;
+  --r: 7px;
+  --r-md: 9px;
+  --r-lg: 10px;
+  --r-full: 999px;
+
+  /* Motion. Nothing in this app animates longer than --t-slow. */
+  --t-fast: 120ms;
+  --t: 160ms;
+  --t-slow: 220ms;
+  --ease: cubic-bezier(0.2, 0.8, 0.3, 1);
+
+  /* Floating surfaces only: menus, dropdowns, modals, toasts. Elevation is
+     otherwise carried by surface lightness, never by shadow. */
+  --shadow: 0 14px 34px rgba(0, 0, 0, 0.6);
+
   color-scheme: dark;
 }
 
@@ -15,46 +49,54 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font: 14px/1.45 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  font: 13px/1.45 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   user-select: none;
+  overflow: hidden;
 }
 
-/* Form controls are styled here rather than in a component, because Svelte
-   scopes a component's styles to that component's own markup. These rules
-   used to live in Field.svelte, which meant a control rendered anywhere else
-   fell back to the native Windows look -- and that is exactly what happened
-   to the Version row in Settings.svelte, which is written inline because it
-   is not backed by a config key. Element selectors, so a component that wants
-   a different look still wins: a Svelte scoped rule carries an extra class
-   and outranks these without needing !important. */
-input,
-select {
-  padding: 6px 10px;
-  border-radius: 6px;
-  border: 1px solid var(--line);
-  background: var(--bg);
-  color: var(--text);
-  font: inherit;
-  min-width: 120px;
+/* Every readout with digits in it. Durations, byte counts, percentages,
+   buffer seconds, trim points, clip counts -- digits must not jitter as
+   they count. */
+.tnum { font-variant-numeric: tabular-nums; }
+
+/* The settings row: label and help on the left, control on the right.
+   Global rather than scoped to a component because two components render
+   this same row -- `Field.svelte` for every config-backed setting, and
+   `Settings.svelte` inline for the Version row, which has no config key
+   behind it to render through `Field`. Svelte scopes a component's styles to
+   its own markup, so a copy in each would be these six rules maintained in
+   two places. Layout, not control styling -- the controls themselves are
+   still components. */
+.row { display: flex; align-items: center; gap: 20px; padding: 13px 0; }
+.row + .row { border-top: 1px solid rgba(255, 255, 255, 0.05); }
+.row .lt { flex: 1; min-width: 0; }
+.row .lt b { display: block; font-weight: 500; font-size: 13px; }
+.row .lt span { display: block; color: var(--dim); font-size: 11.5px; margin-top: 2px; }
+.row .rt { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
+
+/* The app had no focus styling at all before this. `:focus-visible` rather
+   than `:focus`, so clicking a control does not leave a ring behind it. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: inherit;
 }
 
-input[readonly] {
-  color: var(--dim);
+/* WebView2 draws a scrollbar that belongs to no part of this design. */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.11);
+  border-radius: var(--r-full);
+  border: 2px solid var(--bg);
 }
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.18); }
 
-input[type='range'] {
-  min-width: 200px;
-  padding: 0;
-  border: none;
-  background: none;
-}
-
-button {
-  padding: 5px 12px;
-  border-radius: 6px;
-  border: 1px solid var(--line);
-  background: var(--panel);
-  color: var(--text);
-  font: inherit;
-  cursor: pointer;
+@media (prefers-reduced-motion: reduce) {
+  :root { --t-fast: 0.01ms; --t: 0.01ms; --t-slow: 0.01ms; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
