@@ -1160,6 +1160,7 @@ git commit -m "feat(ui): menu popover and focus-trapped modal"
 - Produces:
   - `Slider` — `{ value: number; min: number; max: number; step?: number; label: string; disabled?: boolean; oninput?: (v: number) => void; onchange: (v: number) => void }`
   - `Stepper` — `{ value: number; min: number; max: number; step?: number; unit?: string; label: string; onchange: (v: number) => void }`
+  - `resolveStepperInput(raw, current, min, max)` in `lib/ui.ts`, added by Step 2. Task 6's `Select` does not need it; nothing else does yet.
 
 **The `Slider` event contract is load-bearing and must be exactly this:**
 `oninput` fires continuously while dragging or on every arrow key; `onchange`
@@ -1308,7 +1309,74 @@ that mechanism, and it only works if these two events mean what they say here.
 </style>
 ```
 
-- [ ] **Step 2: Create `Stepper.svelte`**
+- [ ] **Step 2: Add `resolveStepperInput` to `lib/ui.ts`, test first**
+
+The Stepper's text box has to decide what a committed string means, and that
+decision is arithmetic, not event wiring -- so it lives in `lib/ui.ts` where
+vitest can reach it. The trap it exists to close: `Number('')` is `0`, not
+`NaN`, so a naive `Number.isFinite` test reads a cleared box as "the user
+typed zero" and silently commits 0 instead of putting the previous value
+back. `Number('   ')` does the same.
+
+Add to `crates/trix-ui/web/src/lib/ui.test.ts`:
+
+```ts
+describe('resolveStepperInput', () => {
+  it('returns the current value for an empty box rather than treating it as zero', () => {
+    // Number('') is 0, not NaN -- an empty box must be caught before that
+    // coercion runs, or clearing the box would commit zero.
+    expect(resolveStepperInput('', 42, 0, 100)).toBe(42);
+  });
+
+  it('returns the current value for a whitespace-only box', () => {
+    // Number('   ') is also 0, for the same reason.
+    expect(resolveStepperInput('   ', 42, 0, 100)).toBe(42);
+  });
+
+  it('returns the current value for unparseable text', () => {
+    expect(resolveStepperInput('abc', 42, 0, 100)).toBe(42);
+  });
+
+  it('returns a plain in-range number as-is', () => {
+    expect(resolveStepperInput('55', 42, 0, 100)).toBe(55);
+  });
+
+  it('clamps a number above max down to max', () => {
+    expect(resolveStepperInput('150', 42, 0, 100)).toBe(100);
+  });
+
+  it('clamps a number below min up to min', () => {
+    expect(resolveStepperInput('-10', 42, 0, 100)).toBe(0);
+  });
+});
+```
+
+Run them and confirm they fail because the function does not exist yet. Then
+add to `crates/trix-ui/web/src/lib/ui.ts`:
+
+```ts
+/**
+ * What a Stepper's text box should commit as: `raw` parsed and clamped, or
+ * `current` if `raw` cannot be read as a number.
+ *
+ * The empty string gets its own check before `Number()` ever runs. `Number('')`
+ * -- and `Number('   ')` -- coerce to `0`, not `NaN`, so a naive
+ * `Number.isFinite` test would read a cleared box as "the user typed zero"
+ * instead of "the user typed nothing," silently committing 0 rather than
+ * putting the previous value back.
+ */
+export function resolveStepperInput(raw: string, current: number, min: number, max: number): number {
+  const trimmed = raw.trim();
+  if (trimmed === '') return current;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? clamp(parsed, min, max) : current;
+}
+```
+
+Run them again and confirm all six pass. Clamping only -- no step snapping
+here; the arrow keys and the +/- buttons own that, through `stepBy`.
+
+- [ ] **Step 3: Create `Stepper.svelte`**
 
 Replaces `<input type="number">` and its native spinner arrows. Typing is
 still allowed; the unit is rendered after the value so it no longer lives
@@ -1316,7 +1384,7 @@ only in the help text.
 
 ```svelte
 <script lang="ts">
-  import { clamp, stepBy } from '../../lib/ui';
+  import { resolveStepperInput, stepBy } from '../../lib/ui';
 
   let {
     value,
@@ -1336,11 +1404,17 @@ only in the help text.
     onchange: (v: number) => void;
   } = $props();
 
-  function commit(raw: string) {
-    const parsed = Number(raw);
-    // An unparseable box is a typo, not an instruction: put the old value
-    // back rather than sending the daemon a NaN it will refuse.
-    onchange(Number.isFinite(parsed) ? clamp(parsed, min, max) : value);
+  function commit(el: HTMLInputElement) {
+    const resolved = resolveStepperInput(el.value, value, min, max);
+    // The box takes `value` as a one-way attribute, so if the resolved value
+    // matches what's already in effect, Svelte has nothing to re-render and
+    // the box would otherwise keep showing whatever the user typed -- most
+    // visibly a rejected (unparseable) edit that fell back to the old value.
+    // Writing it back onto the element directly makes the box always show
+    // what actually took effect.
+    el.value = String(resolved);
+    // An unresolved or unchanged edit doesn't reach the daemon at all.
+    if (resolved !== value) onchange(resolved);
   }
 
   function onkeydown(e: KeyboardEvent) {
@@ -1355,7 +1429,7 @@ only in the help text.
       e.preventDefault();
       onchange(max);
     } else if (e.key === 'Enter') {
-      commit((e.currentTarget as HTMLInputElement).value);
+      commit(e.currentTarget as HTMLInputElement);
     }
   }
 </script>
@@ -1372,8 +1446,7 @@ only in the help text.
     inputmode="numeric"
     aria-label={label}
     {value}
-    onchange={(e) => commit(e.currentTarget.value)}
-    onblur={(e) => commit(e.currentTarget.value)}
+    onchange={(e) => commit(e.currentTarget)}
     {onkeydown} />
   {#if unit}<span class="u">{unit}</span>{/if}
   <button
@@ -1421,12 +1494,12 @@ only in the help text.
 </style>
 ```
 
-- [ ] **Step 3: Verify the gates**
+- [ ] **Step 4: Verify the gates**
 
 Run: `npm run check && npx vitest run && npm run build`
-Expected: check 0 errors / 0 warnings; vitest 107 passing; build succeeds.
+Expected: check 0 errors / 0 warnings; vitest 113 passing (107 + 6 new); build succeeds.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add crates/trix-ui/web/src/components/ui/Slider.svelte crates/trix-ui/web/src/components/ui/Stepper.svelte
@@ -1632,7 +1705,7 @@ off-theme widget in Settings.
 - [ ] **Step 2: Verify the gates**
 
 Run: `npm run check && npx vitest run && npm run build`
-Expected: check 0 errors / 0 warnings; vitest 107 passing; build succeeds.
+Expected: check 0 errors / 0 warnings; vitest 113 passing; build succeeds.
 
 - [ ] **Step 3: Commit**
 
@@ -2078,7 +2151,7 @@ Add to the imports at the top of the `<script>`:
 - [ ] **Step 5: Verify the gates**
 
 Run: `npm run check && npx vitest run && npm run build`
-Expected: check 0 errors / 0 warnings; vitest 107 passing; build succeeds.
+Expected: check 0 errors / 0 warnings; vitest 113 passing; build succeeds.
 
 `settings.test.ts` must pass **without being edited**. It tests `FIELDS`,
 `unknownKeys` and `validate`, none of which this task touches. An edit to it is
@@ -2467,7 +2540,7 @@ is navigation only and narrows from 200px to 150px.
 - [ ] **Step 7: Verify the gates**
 
 Run: `npm run check && npx vitest run && npm run build`
-Expected: check 0 errors / 0 warnings; vitest 107 passing; build succeeds.
+Expected: check 0 errors / 0 warnings; vitest 113 passing; build succeeds.
 
 - [ ] **Step 8: Hand-check the window (no script covers this)**
 
@@ -2823,7 +2896,7 @@ Add to `crates/trix-ui/web/src/lib/keys.test.ts`, inside the existing
 - [ ] **Step 5: Verify the gates**
 
 Run: `npm run check && npx vitest run && npm run build`
-Expected: check 0 errors / 0 warnings; vitest 109 passing; build succeeds.
+Expected: check 0 errors / 0 warnings; vitest 115 passing; build succeeds.
 
 - [ ] **Step 6: Commit**
 
@@ -3366,7 +3439,7 @@ expected and Task 11 fixes it — **this task's gate is the unit tests only.**
 - [ ] **Step 8: Verify the unit gate**
 
 Run: `npx vitest run`
-Expected: 121 passing (109 + 12 new).
+Expected: 127 passing (115 + 12 new).
 
 - [ ] **Step 9: Commit**
 
@@ -3611,7 +3684,7 @@ Everything from `{#if clip}` to the end of the file:
 - [ ] **Step 5: Verify the gates**
 
 Run: `npm run check && npx vitest run && npm run build`
-Expected: check 0 errors / 0 warnings; vitest 121 passing; build succeeds.
+Expected: check 0 errors / 0 warnings; vitest 127 passing; build succeeds.
 
 The `TrimBar.svelte` import error from Task 10 is resolved by this task.
 
@@ -3807,7 +3880,7 @@ From `crates/trix-ui/web`:
 npm run check && npx vitest run && npm run build
 ```
 
-Expected: check 0 errors / 0 warnings; vitest 121 passing; build succeeds.
+Expected: check 0 errors / 0 warnings; vitest 127 passing; build succeeds.
 
 From the repo root:
 
