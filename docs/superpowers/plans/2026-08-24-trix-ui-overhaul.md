@@ -473,13 +473,17 @@ export type IconName =
   | 'chevron-down' | 'dots' | 'check' | 'rearm' | 'minimize' | 'maximize'
   | 'restore' | 'close' | 'alert';
 
+/** Shared by the outline and filled stars, which are one shape drawn twice. */
 const STAR = 'M8 2l1.8 3.9 4.2.5-3.1 2.9.8 4.2L8 11.5 4.3 13.5l.8-4.2L2 6.4l4.2-.5z';
-const TRASH = 'M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.2h5.8l.6-8.2';
 
 export const ICONS: Record<IconName, IconDef> = {
   play: { d: 'M4 2.5l9 5.5-9 5.5z', filled: true },
   pause: { d: 'M5 3v10M11 3v10' },
-  clips: { d: 'M1.5 3h13a1.5 1.5 0 011.5 1.5v7A1.5 1.5 0 0114.5 13h-13A1.5 1.5 0 010 11.5v-7A1.5 1.5 0 011.5 3zM6.5 6.2v3.6l3.2-1.8z' },
+  // Inset to x 1.5..14.5, not 0..16. A path that reaches the edge of the
+  // viewBox has half its 1.35 stroke clipped off, so the frame's left and
+  // right sides render visibly thinner than its top and bottom -- and this
+  // is the Clips nav icon, on screen at all times.
+  clips: { d: 'M3 3h10a1.5 1.5 0 011.5 1.5v7A1.5 1.5 0 0113 13H3a1.5 1.5 0 01-1.5-1.5v-7A1.5 1.5 0 013 3zM6.5 6.2v3.6l3.2-1.8z' },
   // A cog, not a sun. The first draft of this set drew rays and it read as
   // weather rather than settings.
   settings: {
@@ -489,7 +493,7 @@ export const ICONS: Record<IconName, IconDef> = {
   star: { d: STAR },
   'star-filled': { d: STAR, filled: true },
   pencil: { d: 'M11 2.8l2.2 2.2L6 12.2 3.2 13l.8-2.8z' },
-  trash: { d: TRASH },
+  trash: { d: 'M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.2h5.8l.6-8.2' },
   folder: { d: 'M1.8 4.2h4.4l1.2 1.4h6.8v7.2H1.8z' },
   scissors: {
     d: 'M6 4a2 2 0 11-4 0 2 2 0 014 0zM6 12a2 2 0 11-4 0 2 2 0 014 0z'
