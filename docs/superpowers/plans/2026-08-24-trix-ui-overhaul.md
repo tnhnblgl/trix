@@ -2794,6 +2794,17 @@ the grid. Step 3 handles this.
 </style>
 ```
 
+`onclose` here closes the menu and does nothing else. **It must not move focus
+back to the `⋯` button**, however natural that looks. `Menu` fires this same
+callback from three places -- an outside pointerdown, Escape, and Tab -- and
+gives the consumer no way to tell them apart. It runs synchronously inside the
+keydown handler, before the browser performs Tab's own focus move, so a
+`.focus()` here would yank focus back onto the trigger and undo the Tab. That
+would rebuild the focus trap `Menu`'s Tab branch exists to prevent. If a future
+screen genuinely needs focus restored on Escape but not on Tab, the fix is to
+give `onclose` a reason argument in `Menu` -- not to restore focus here and
+hope.
+
 - [ ] **Step 2: Update `Grid.svelte`'s markup and styles**
 
 Keep the entire `<script>` block — the `ResizeObserver` column count, the
@@ -3965,8 +3976,10 @@ Then check that nothing sits above the first tag in any component:
 
 ```bash
 for f in $(find crates/trix-ui/web/src -name "*.svelte"); do
-  case "$(head -1 "$f")" in "<"*|"") ;; *) echo "STRAY: $f -> $(head -1 "$f")";; esac
+  case "$(head -1 "$f")" in "<"*|"{"*|"") ;; *) echo "STRAY: $f -> $(head -1 "$f")";; esac
 done
+awk '/^```svelte\r?$/{getline; if ($0 !~ /^[<{]/) print FILENAME": "NR": "$0}' \
+  docs/superpowers/plans/2026-08-24-trix-ui-overhaul.md
 ```
 
 Expected: **no output.** Anything before the first `<script>` or `<style>` tag
