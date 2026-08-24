@@ -20,7 +20,7 @@
   } = $props();
 </script>
 
-<button class="ib" class:active aria-label={label} title={label} {disabled} {onclick}>
+<button type="button" class="ib" class:active aria-label={label} title={label} {disabled} {onclick}>
   <Icon name={icon} {size} />
 </button>
 
@@ -38,8 +38,8 @@
     cursor: pointer;
     transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
   }
-  .ib:hover { background: rgba(255, 255, 255, 0.08); color: var(--text); }
-  .ib:active { transform: translateY(1px); }
+  .ib:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+  .ib:active:not(:disabled) { transform: translateY(1px); }
   .ib.active { background: color-mix(in srgb, var(--accent) 15%, transparent); color: #eaf1fb; }
-  .ib:disabled { opacity: 0.35; cursor: default; background: transparent; transform: none; }
+  .ib:disabled { opacity: 0.35; cursor: default; }
 </style>

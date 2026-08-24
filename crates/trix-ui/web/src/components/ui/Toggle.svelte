@@ -13,6 +13,7 @@
 </script>
 
 <button
+  type="button"
   class="tg"
   class:on={checked}
   role="switch"

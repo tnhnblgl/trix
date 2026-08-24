@@ -5,9 +5,22 @@
   --raised: #161a21;
   --overlay: #151920;
 
-  /* Lines */
+  /* Lines. Two weights: `--line` edges a panel against the page,
+     `--line-soft` separates rows inside one panel and must not compete
+     with it. */
   --line: rgba(255, 255, 255, 0.07);
+  --line-soft: rgba(255, 255, 255, 0.05);
   --line-strong: rgba(255, 255, 255, 0.11);
+
+  /* Interaction. One wash for every transparent control's hover, and the
+     lifted form of the two surfaces that have one. Tokens rather than
+     literals because these appear across a dozen components: the first
+     draft of this design used 0.05, 0.07 and 0.08 in different files for
+     the same gesture, which is exactly the incoherence the overhaul is
+     meant to remove. */
+  --hover: rgba(255, 255, 255, 0.07);
+  --raised-hi: #1d222b;
+  --accent-hi: #6ea8ff;
 
   /* Text */
   --text: #e4e8ee;
@@ -68,7 +81,7 @@ body {
    two places. Layout, not control styling -- the controls themselves are
    still components. */
 .row { display: flex; align-items: center; gap: 20px; padding: 13px 0; }
-.row + .row { border-top: 1px solid rgba(255, 255, 255, 0.05); }
+.row + .row { border-top: 1px solid var(--line-soft); }
 .row .lt { flex: 1; min-width: 0; }
 .row .lt b { display: block; font-weight: 500; font-size: 13px; }
 .row .lt span { display: block; color: var(--dim); font-size: 11.5px; margin-top: 2px; }
