@@ -275,9 +275,22 @@ Overwrite `crates/trix-ui/web/src/app.css`. The `input`/`select`/`button` elemen
   --raised: #161a21;
   --overlay: #151920;
 
-  /* Lines */
+  /* Lines. Two weights: `--line` edges a panel against the page,
+     `--line-soft` separates rows inside one panel and must not compete
+     with it. */
   --line: rgba(255, 255, 255, 0.07);
+  --line-soft: rgba(255, 255, 255, 0.05);
   --line-strong: rgba(255, 255, 255, 0.11);
+
+  /* Interaction. One wash for every transparent control's hover, and the
+     lifted form of the two surfaces that have one. Tokens rather than
+     literals because these appear across a dozen components: the first
+     draft of this design used 0.05, 0.07 and 0.08 in different files for
+     the same gesture, which is exactly the incoherence the overhaul is
+     meant to remove. */
+  --hover: rgba(255, 255, 255, 0.07);
+  --raised-hi: #1d222b;
+  --accent-hi: #6ea8ff;
 
   /* Text */
   --text: #e4e8ee;
@@ -338,7 +351,7 @@ body {
    two places. Layout, not control styling -- the controls themselves are
    still components. */
 .row { display: flex; align-items: center; gap: 20px; padding: 13px 0; }
-.row + .row { border-top: 1px solid rgba(255, 255, 255, 0.05); }
+.row + .row { border-top: 1px solid var(--line-soft); }
 .row .lt { flex: 1; min-width: 0; }
 .row .lt b { display: block; font-weight: 500; font-size: 13px; }
 .row .lt span { display: block; color: var(--dim); font-size: 11.5px; margin-top: 2px; }
@@ -628,7 +641,7 @@ test framework. `npm run check` is the gate.
   } = $props();
 </script>
 
-<button class="b {variant} {size}" {disabled} {title} {onclick}>
+<button type="button" class="b {variant} {size}" {disabled} {title} {onclick}>
   {#if icon}<Icon name={icon} size={size === 'sm' ? 13 : 14} />{/if}
   {@render children()}
 </button>
@@ -651,19 +664,24 @@ test framework. `npm run check` is the gate.
   .md { padding: 7px 12px; }
   .sm { padding: 5px 10px; }
 
-  .b:hover { background: #1d222b; }
-  .b:active { transform: translateY(1px); }
-  .b:disabled { opacity: 0.4; cursor: default; transform: none; background: var(--raised); }
+  /* Every hover and press is guarded with `:not(:disabled)` rather than
+     relying on a later `:disabled` rule to undo them. A browser still
+     matches `:hover` on a disabled button -- disabling blocks activation,
+     not pointer-over styling -- and `.b:disabled` ties on specificity with
+     `.ghost:hover`, so whichever is written last wins. Guarding each one
+     makes the result independent of source order. */
+  .b:hover:not(:disabled) { background: var(--raised-hi); }
+  .b:active:not(:disabled) { transform: translateY(1px); }
+  .b:disabled { opacity: 0.4; cursor: default; }
 
   .primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
-  .primary:hover { background: #6ea8ff; }
-  .primary:disabled { background: var(--accent); }
+  .primary:hover:not(:disabled) { background: var(--accent-hi); }
 
   .ghost { background: transparent; border-color: transparent; color: var(--dim); }
-  .ghost:hover { background: rgba(255, 255, 255, 0.07); color: var(--text); }
+  .ghost:hover:not(:disabled) { background: var(--hover); color: var(--text); }
 
   .danger { background: transparent; border-color: color-mix(in srgb, var(--danger) 40%, transparent); color: var(--danger); }
-  .danger:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); }
+  .danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 12%, transparent); }
 </style>
 ```
 
@@ -695,7 +713,7 @@ icon-only button with no accessible name at build time.
   } = $props();
 </script>
 
-<button class="ib" class:active aria-label={label} title={label} {disabled} {onclick}>
+<button type="button" class="ib" class:active aria-label={label} title={label} {disabled} {onclick}>
   <Icon name={icon} {size} />
 </button>
 
@@ -713,10 +731,10 @@ icon-only button with no accessible name at build time.
     cursor: pointer;
     transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
   }
-  .ib:hover { background: rgba(255, 255, 255, 0.08); color: var(--text); }
-  .ib:active { transform: translateY(1px); }
+  .ib:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+  .ib:active:not(:disabled) { transform: translateY(1px); }
   .ib.active { background: color-mix(in srgb, var(--accent) 15%, transparent); color: #eaf1fb; }
-  .ib:disabled { opacity: 0.35; cursor: default; background: transparent; transform: none; }
+  .ib:disabled { opacity: 0.35; cursor: default; }
 </style>
 ```
 
@@ -741,6 +759,7 @@ Space and Enter are native and no key handling is written here at all.
 </script>
 
 <button
+  type="button"
   class="tg"
   class:on={checked}
   role="switch"
@@ -930,7 +949,7 @@ git commit -m "feat(ui): button, icon button and toggle primitives"
     text-align: left;
     cursor: pointer;
   }
-  .item.active { background: rgba(255, 255, 255, 0.07); }
+  .item.active { background: var(--hover); }
   .item.danger { color: var(--danger); }
   .item.danger.active { background: color-mix(in srgb, var(--danger) 13%, transparent); }
   hr { border: 0; border-top: 1px solid var(--line); margin: 4px 2px; }
@@ -1309,7 +1328,7 @@ only in the help text.
     font-size: 14px;
     cursor: pointer;
   }
-  .pm:hover { background: rgba(255, 255, 255, 0.07); color: var(--text); }
+  .pm:hover { background: var(--hover); color: var(--text); }
   .pm:disabled { opacity: 0.3; cursor: default; background: transparent; }
   .v {
     width: 58px;
@@ -1529,7 +1548,7 @@ off-theme widget in Settings.
     cursor: pointer;
   }
   .opt .txt { flex: 1; }
-  .opt.active { background: rgba(255, 255, 255, 0.07); }
+  .opt.active { background: var(--hover); }
   .opt.on { color: #eaf1fb; }
   .opt.on :global(svg) { color: var(--accent); }
 </style>
@@ -2364,7 +2383,7 @@ is navigation only and narrows from 200px to 150px.
     cursor: pointer;
     transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
   }
-  .nav:hover { background: rgba(255, 255, 255, 0.05); color: var(--text); }
+  .nav:hover { background: var(--hover); color: var(--text); }
   .nav.on { background: color-mix(in srgb, var(--accent) 15%, transparent); color: #eaf1fb; font-weight: 600; }
   .ver { margin-top: auto; font-size: 10px; color: var(--faint); padding: 0 10px; }
 </style>
@@ -2543,7 +2562,7 @@ the grid. Step 3 handles this.
     border-radius: var(--r-md);
     overflow: hidden;
     background: var(--surface);
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+    box-shadow: inset 0 0 0 1px var(--line-soft);
     cursor: pointer;
     transition: box-shadow var(--t-fast) var(--ease);
   }
@@ -3254,7 +3273,7 @@ Expected: PASS — 4 suites, 12 tests.
     cursor: pointer;
     transition: background var(--t-fast) var(--ease);
   }
-  .play:hover { background: #6ea8ff; }
+  .play:hover { background: var(--accent-hi); }
   .tl { flex: 1; min-width: 0; }
   .clock { font-size: 11px; color: var(--faint); flex: 0 0 auto; }
 </style>
