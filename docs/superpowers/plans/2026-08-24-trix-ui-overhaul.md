@@ -15,7 +15,12 @@
 Every task's requirements implicitly include all of these.
 
 - **No new npm dependency**, runtime or dev. Trix targets low-end PCs.
-- **No file outside `crates/trix-ui/` is touched.** Nothing in `trix-core`, `trix-daemon` or `trix-proto`.
+- **No implementer touches a file outside `crates/trix-ui/`.** Nothing in
+  `trix-core`, `trix-daemon` or `trix-proto`. The one exception is not an
+  implementer's to make: when review finds that this plan's own prescribed
+  code was wrong, the controller amends **this document** in a separate
+  `docs:` commit so the plan and the shipped code do not drift. Those commits
+  are expected, and are not a breach of this rule.
 - **No new, removed or renamed config key. No new daemon command.** Every `call(...)` used already exists.
 - **No user-facing sentence changes** except units moving out of help text onto a control (Task 7) and the empty-state hotkey (Task 9).
 - **Testing rule, deliberate:** this project has **zero component tests** and no DOM test library, and adding one would break the dependency rule. All 90 existing vitest cases test `lib/*.ts`. Therefore: **logic goes in `lib/`, and is tested there; `.svelte` files carry markup and styling only.** A reviewer must not treat "no test for this component" as a defect — they must treat "testable logic left inside a component" as one.
