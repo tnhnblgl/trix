@@ -26,6 +26,13 @@
      video as often as over a page. */
   --scrim: rgba(0, 0, 0, 0.55);
 
+  /* Two more weights of the same wash, each with one job. --scrim-soft dims
+     the trimmed-away film on the timeline and must stay readable through it;
+     --scrim-strong backs 10px text on a clip card over an unpredictable video
+     frame, where 0.55 does not reliably carry it. Consumed by Tasks 9 and 10. */
+  --scrim-soft: rgba(0, 0, 0, 0.45);
+  --scrim-strong: rgba(0, 0, 0, 0.75);
+
   /* Text */
   --text: #e4e8ee;
   --dim: #8b94a3;

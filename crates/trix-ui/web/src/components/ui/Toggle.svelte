@@ -48,6 +48,6 @@
     transition: left var(--t) var(--ease), background var(--t) var(--ease);
   }
   .tg.on { background: var(--accent); border-color: var(--accent); }
-  .tg.on .knob { left: 20px; background: #fff; }
+  .tg.on .knob { left: 20px; background: var(--text); }
   .tg:disabled { opacity: 0.4; cursor: default; }
 </style>

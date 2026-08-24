@@ -40,6 +40,6 @@
   }
   .ib:hover:not(:disabled) { background: var(--hover); color: var(--text); }
   .ib:active:not(:disabled) { transform: translateY(1px); }
-  .ib.active { background: color-mix(in srgb, var(--accent) 15%, transparent); color: #eaf1fb; }
+  .ib.active { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--text); }
   .ib:disabled { opacity: 0.35; cursor: default; }
 </style>
