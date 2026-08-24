@@ -59,6 +59,23 @@ export function stepBy(value: number, delta: number, min: number, max: number, s
 }
 
 /**
+ * What a Stepper's text box should commit as: `raw` parsed and clamped, or
+ * `current` if `raw` cannot be read as a number.
+ *
+ * The empty string gets its own check before `Number()` ever runs. `Number('')`
+ * -- and `Number('   ')` -- coerce to `0`, not `NaN`, so a naive
+ * `Number.isFinite` test would read a cleared box as "the user typed zero"
+ * instead of "the user typed nothing," silently committing 0 rather than
+ * putting the previous value back.
+ */
+export function resolveStepperInput(raw: string, current: number, min: number, max: number): number {
+  const trimmed = raw.trim();
+  if (trimmed === '') return current;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? clamp(parsed, min, max) : current;
+}
+
+/**
  * The next index in a list of `count`, clamped rather than wrapped.
  *
  * Same rule as `moveSelection` in `keys.ts`, and for a related reason: a menu

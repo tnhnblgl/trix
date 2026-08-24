@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clamp, nextIndex, ratioToValue, snapToStep, stepBy, valueToRatio } from './ui';
+import { clamp, nextIndex, ratioToValue, resolveStepperInput, snapToStep, stepBy, valueToRatio } from './ui';
 
 describe('clamp', () => {
   it('passes a value already inside the range through', () => {
@@ -71,6 +71,35 @@ describe('stepBy', () => {
   it('lands on the step grid even from an off-grid start', () => {
     // The daemon can hand back a value the UI's own step would never produce.
     expect(stepBy(37, 1, 0, 100, 10)).toBe(40);
+  });
+});
+
+describe('resolveStepperInput', () => {
+  it('returns the current value for an empty box rather than treating it as zero', () => {
+    // Number('') is 0, not NaN -- an empty box must be caught before that
+    // coercion runs, or clearing the box would commit zero.
+    expect(resolveStepperInput('', 42, 0, 100)).toBe(42);
+  });
+
+  it('returns the current value for a whitespace-only box', () => {
+    // Number('   ') is also 0, for the same reason.
+    expect(resolveStepperInput('   ', 42, 0, 100)).toBe(42);
+  });
+
+  it('returns the current value for unparseable text', () => {
+    expect(resolveStepperInput('abc', 42, 0, 100)).toBe(42);
+  });
+
+  it('returns a plain in-range number as-is', () => {
+    expect(resolveStepperInput('55', 42, 0, 100)).toBe(55);
+  });
+
+  it('clamps a number above max down to max', () => {
+    expect(resolveStepperInput('150', 42, 0, 100)).toBe(100);
+  });
+
+  it('clamps a number below min up to min', () => {
+    expect(resolveStepperInput('-10', 42, 0, 100)).toBe(0);
   });
 });
 

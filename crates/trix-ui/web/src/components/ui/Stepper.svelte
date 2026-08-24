@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { clamp, stepBy } from '../../lib/ui';
+  import { resolveStepperInput, stepBy } from '../../lib/ui';
 
   let {
     value,
@@ -19,11 +19,17 @@
     onchange: (v: number) => void;
   } = $props();
 
-  function commit(raw: string) {
-    const parsed = Number(raw);
-    // An unparseable box is a typo, not an instruction: put the old value
-    // back rather than sending the daemon a NaN it will refuse.
-    onchange(Number.isFinite(parsed) ? clamp(parsed, min, max) : value);
+  function commit(el: HTMLInputElement) {
+    const resolved = resolveStepperInput(el.value, value, min, max);
+    // The box takes `value` as a one-way attribute, so if the resolved value
+    // matches what's already in effect, Svelte has nothing to re-render and
+    // the box would otherwise keep showing whatever the user typed -- most
+    // visibly a rejected (unparseable) edit that fell back to the old value.
+    // Writing it back onto the element directly makes the box always show
+    // what actually took effect.
+    el.value = String(resolved);
+    // An unresolved or unchanged edit doesn't reach the daemon at all.
+    if (resolved !== value) onchange(resolved);
   }
 
   function onkeydown(e: KeyboardEvent) {
@@ -38,7 +44,7 @@
       e.preventDefault();
       onchange(max);
     } else if (e.key === 'Enter') {
-      commit((e.currentTarget as HTMLInputElement).value);
+      commit(e.currentTarget as HTMLInputElement);
     }
   }
 </script>
@@ -56,8 +62,7 @@
     inputmode="numeric"
     aria-label={label}
     {value}
-    onchange={(e) => commit(e.currentTarget.value)}
-    onblur={(e) => commit(e.currentTarget.value)}
+    onchange={(e) => commit(e.currentTarget)}
     {onkeydown} />
   {#if unit}<span class="u">{unit}</span>{/if}
   <button
