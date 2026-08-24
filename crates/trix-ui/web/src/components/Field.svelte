@@ -1,13 +1,16 @@
 <script lang="ts">
   import type { Field } from '../lib/settings';
   import type { Monitor } from '../lib/types';
+  import Button from './ui/Button.svelte';
+  import KeycapInput from './ui/KeycapInput.svelte';
+  import Select from './ui/Select.svelte';
+  import Slider from './ui/Slider.svelte';
+  import Stepper from './ui/Stepper.svelte';
+  import Toggle from './ui/Toggle.svelte';
 
   /**
-   * One row of the settings page: a label, the control for `field.kind`, and
-   * its help text. Pulled out of `Settings.svelte` because the control chain
-   * is a seven-branch `{#if}` on `field.kind` (and, for `select`, its
-   * `dynamic`) nested inside two `{#each}` blocks -- that reads far better as
-   * its own component than inline.
+   * One row of the settings page: a label with its help text on the left, and
+   * the control for `field.kind` on the right.
    *
    * Owns one piece of state, `dragging`, documented below. `capture`/
    * `listening`/`heard` live in `Settings.svelte` because the daemon's
@@ -16,19 +19,9 @@
    * user actions back up through the `on*` callbacks.
    */
   let {
-    field,
-    config,
-    monitors,
-    capture,
-    listening,
-    heard,
-    onset,
-    oncapture,
-    onsavehotkey,
-    ontogglelisten,
-    onpickfolder,
-    onpicksound,
-    ontestsound,
+    field, config, monitors, capture, listening, heard,
+    onset, oncapture, onstartcapture, onsavehotkey, ontogglelisten,
+    onpickfolder, onpicksound, ontestsound,
   }: {
     field: Field;
     config: Record<string, unknown>;
@@ -38,6 +31,7 @@
     heard: boolean;
     onset: (key: string, value: unknown) => void;
     oncapture: (e: KeyboardEvent) => void;
+    onstartcapture: () => void;
     onsavehotkey: () => void;
     ontogglelisten: () => void;
     onpickfolder: () => void;
@@ -48,11 +42,10 @@
   /**
    * The value under the user's thumb, shown while dragging.
    *
-   * The one piece of state this component owns, and it is display-only: the
-   * daemon is told on `change` (thumb released), not on `input`, so a drag
-   * across the track is one round trip rather than eighty. Without it the
-   * percentage beside the slider would sit at the old value for the whole
-   * drag, which reads as a broken control.
+   * Display-only: the daemon is told on `change` (thumb released), not on
+   * `input`, so a drag across the track is one round trip rather than eighty.
+   * Without it the percentage beside the slider would sit at the old value for
+   * the whole drag, which reads as a broken control.
    */
   let dragging = $state<number | null>(null);
   const shown = $derived(dragging ?? Number(config[field.key] ?? 0));
@@ -65,79 +58,130 @@
     void config[field.key];
     dragging = null;
   });
+
+  const monitorOptions = $derived(
+    monitors.map((m) => ({
+      value: String(m.index),
+      label: `${m.name} - ${m.width}x${m.height} (${m.adapter})`,
+    })),
+  );
+
+  /** The unit shown inside the stepper, so it is no longer only in the help text. */
+  const UNITS: Record<string, string> = {
+    fps: 'fps',
+    replay_seconds: 's',
+    bitrate_kbps: 'kbps',
+    max_bitrate_kbps: 'kbps',
+    max_library_gb: 'GB',
+    stats_seconds: 's',
+  };
 </script>
 
 <div class="row">
-  <label for={field.key}>{field.label}</label>
-  <div class="control">
+  <div class="lt">
+    <b>{field.label}</b>
+    <span>{field.help}</span>
+  </div>
+
+  <div class="rt">
     {#if field.kind === 'bool'}
-      <input id={field.key} type="checkbox" checked={Boolean(config[field.key])}
-        onchange={(e) => onset(field.key, e.currentTarget.checked)} />
+      <Toggle
+        checked={Boolean(config[field.key])}
+        label={field.label}
+        onchange={(next) => onset(field.key, next)} />
+
     {:else if field.kind === 'select' && field.dynamic === 'monitors'}
-      <select id={field.key} value={String(config[field.key] ?? 0)}
-        onchange={(e) => onset(field.key, Number(e.currentTarget.value))}>
-        {#each monitors as monitor (monitor.index)}
-          <option value={String(monitor.index)}>
-            {monitor.name} - {monitor.width}x{monitor.height} ({monitor.adapter})
-          </option>
-        {/each}
-      </select>
+      <Select
+        value={String(config[field.key] ?? 0)}
+        options={monitorOptions}
+        label={field.label}
+        onchange={(v) => onset(field.key, Number(v))} />
+
     {:else if field.kind === 'select'}
-      <select id={field.key} value={String(config[field.key] ?? '')}
-        onchange={(e) => onset(field.key, e.currentTarget.value)}>
-        {#each field.options ?? [] as option (option.value)}
-          <option value={option.value}>{option.label}</option>
-        {/each}
-      </select>
+      <Select
+        value={String(config[field.key] ?? '')}
+        options={field.options ?? []}
+        label={field.label}
+        onchange={(v) => onset(field.key, v)} />
+
     {:else if field.kind === 'number'}
-      <input id={field.key} type="number" min={field.min} max={field.max}
+      <Stepper
         value={Number(config[field.key] ?? 0)}
-        onchange={(e) => onset(field.key, Number(e.currentTarget.value))} />
+        min={field.min ?? 0}
+        max={field.max ?? 0}
+        unit={UNITS[field.key]}
+        label={field.label}
+        onchange={(v) => onset(field.key, v)} />
+
     {:else if field.kind === 'slider'}
-      <input id={field.key} type="range" min={field.min} max={field.max} step="1"
+      <Slider
         value={shown}
-        oninput={(e) => (dragging = Number(e.currentTarget.value))}
-        onchange={(e) => onset(field.key, Number(e.currentTarget.value))} />
-      <span class="hint">{shown}%</span>
+        min={field.min ?? 0}
+        max={field.max ?? 100}
+        label={field.label}
+        oninput={(v) => (dragging = v)}
+        onchange={(v) => onset(field.key, v)} />
+      <span class="pct tnum">{shown}%</span>
+
     {:else if field.kind === 'folder'}
       <!-- `clip_dir_resolved`, not `clip_dir`: the config key is empty by
            default and an empty box tells the user nothing about where their
-           clips actually are. Readonly rather than editable for the same
-           reason the sound row is -- the daemon owns the picker, and a typed
-           path that does not exist is a refusal the user has to decode. Reset
-           writes `clip_dir` itself (the empty string), because "back to the
-           default" is a value the picker cannot express. -->
-      <input id={field.key} readonly value={String(config['clip_dir_resolved'] ?? '')} />
-      <button onclick={onpickfolder}>Choose...</button>
-      <button disabled={!config[field.key]} onclick={() => onset(field.key, '')}>Reset</button>
+           clips actually are. Read-only rather than editable because the
+           daemon owns the picker, and a typed path that does not exist is a
+           refusal the user has to decode. Reset writes `clip_dir` itself (the
+           empty string), because "back to the default" is a value the picker
+           cannot express. -->
+      <span class="path">{String(config['clip_dir_resolved'] ?? '')}</span>
+      <Button size="sm" onclick={onpickfolder}>Choose...</Button>
+      <Button size="sm" variant="ghost" disabled={!config[field.key]}
+        onclick={() => onset(field.key, '')}>Reset</Button>
+
     {:else if field.kind === 'sound'}
-      <input id={field.key} readonly disabled={!config['clip_sound']}
-        value={String(config[field.key] ?? '') || "Trix's built-in sound"} />
-      <button disabled={!config['clip_sound']} onclick={onpicksound}>Choose...</button>
-      <button disabled={!config['clip_sound']} onclick={ontestsound}>Test</button>
-      <button disabled={!config['clip_sound'] || !config[field.key]}
-        onclick={() => onset(field.key, '')}>Reset</button>
+      <span class="path" class:off={!config['clip_sound']}>
+        {String(config[field.key] ?? '') || "Trix's built-in sound"}
+      </span>
+      <Button size="sm" disabled={!config['clip_sound']} onclick={onpicksound}>Choose...</Button>
+      <Button size="sm" variant="ghost" disabled={!config['clip_sound']} onclick={ontestsound}>Test</Button>
+      <Button size="sm" variant="ghost" disabled={!config['clip_sound'] || !config[field.key]}
+        onclick={() => onset(field.key, '')}>Reset</Button>
+
     {:else if field.kind === 'hotkey'}
-      <input id={field.key} readonly value={capture ?? String(config[field.key] ?? '')}
-        onkeydown={oncapture} placeholder="click, then press a combination" />
+      <KeycapInput
+        combo={capture ?? String(config[field.key] ?? '')}
+        capturing={capture !== null}
+        oncapture={oncapture}
+        onstart={onstartcapture} />
       {#if capture && capture !== config[field.key]}
-        <button onclick={onsavehotkey}>Save</button>
+        <Button size="sm" variant="primary" onclick={onsavehotkey}>Save</Button>
       {/if}
-      <button onclick={ontogglelisten}>{listening ? 'Stop test' : 'Test'}</button>
+      <Button size="sm" variant="ghost" onclick={ontogglelisten}>{listening ? 'Stop test' : 'Test'}</Button>
       {#if listening}
-        <span class="hint" class:ok={heard}>
-          {heard ? 'Trix received it.' : 'Press the hotkey now...'}
-        </span>
+        <span class="hint" class:ok={heard}>{heard ? 'Trix received it.' : 'Press the hotkey now...'}</span>
       {/if}
     {/if}
   </div>
-  <p class="help">{field.help}</p>
 </div>
 
 <style>
-  .row { display: grid; grid-template-columns: 180px 1fr; gap: 6px 14px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
-  .control { display: flex; align-items: center; gap: 8px; }
-  .help { grid-column: 2; margin: 0; font-size: 12px; color: var(--dim); }
-  .hint { font-size: 12px; color: var(--dim); }
-  .hint.ok { color: var(--accent); }
+  /* `.row`, `.lt` and `.rt` are global, in app.css: `Settings.svelte`
+     renders the same row shape inline for its Version entry, and a scoped
+     copy here would mean maintaining both. Only what is unique to a field's
+     control lives here. */
+  .pct { min-width: 44px; text-align: right; font-size: 12.5px; color: var(--dim); }
+  .path {
+    display: block;
+    max-width: 280px;
+    padding: 7px 10px;
+    background: var(--bg);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r);
+    color: var(--dim);
+    font-size: 12px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .path.off { opacity: 0.45; }
+  .hint { font-size: 11.5px; color: var(--dim); }
+  .hint.ok { color: var(--live); }
 </style>

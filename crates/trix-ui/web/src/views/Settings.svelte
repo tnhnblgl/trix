@@ -5,6 +5,8 @@
   import { app, updates } from '../lib/state.svelte';
   import { FIELDS, SECTIONS, unknownKeys, validate } from '../lib/settings';
   import Field from '../components/Field.svelte';
+  import Button from '../components/ui/Button.svelte';
+  import Icon from '../components/ui/Icon.svelte';
   import type { Monitor } from '../lib/types';
 
   let config = $state<Record<string, unknown>>({});
@@ -117,6 +119,16 @@
     capture = null;
   }
 
+  /**
+   * Arms the hotkey field. `capture` doubles as "we are listening" for
+   * `KeycapInput`, so it starts as the saved combination rather than as an
+   * empty string -- an empty field would blank the keycaps the moment it was
+   * clicked, before the user had pressed anything.
+   */
+  function startCapture() {
+    capture = String(config['clip_hotkey'] ?? '');
+  }
+
   function captureHotkey(e: KeyboardEvent) {
     e.preventDefault();
     const parts: string[] = [];
@@ -168,64 +180,95 @@
 </script>
 
 <h1>Settings</h1>
+<p class="lede">Changes take effect on the next clip. A few need a re-arm, and Trix says which.</p>
 
 {#if app.rearmNeeded.length > 0}
+  <!-- `--live`, not `--accent`: this is about the running capture, which is
+       what green means everywhere else in the app. -->
   <div class="notice">
+    <Icon name="rearm" size={15} />
     Re-arm to apply: {app.rearmNeeded.join(', ')}
-    <button onclick={() => app.rearmNow()}>Re-arm now</button>
+    <span class="spacer"></span>
+    <Button size="sm" onclick={() => app.rearmNow()}>Re-arm now</Button>
   </div>
 {/if}
 
 {#each SECTIONS as section (section)}
   <section>
     <h2>{section}</h2>
-    {#each FIELDS.filter((f) => f.section === section) as field (field.key)}
-      <Field
-        {field}
-        {config}
-        {monitors}
-        {capture}
-        {listening}
-        {heard}
-        onset={set}
-        oncapture={captureHotkey}
-        onsavehotkey={saveHotkey}
-        onpickfolder={pickFolder}
-        onpicksound={pickSound}
-        ontestsound={testSound}
-        ontogglelisten={() => {
-          listening = !listening;
-          heard = false;
-        }}
-      />
-    {/each}
-    {#if section === 'Updates'}
-      <div class="row">
-        <label for="current-version">Version</label>
-        <div class="control">
-          <input id="current-version" readonly value={version} />
-          <button onclick={checkNow} disabled={checking || updates.busy}>
-            {checking ? 'Checking…' : 'Check now'}
-          </button>
+    <div class="panel">
+      {#each FIELDS.filter((f) => f.section === section) as field (field.key)}
+        <Field
+          {field} {config} {monitors} {capture} {listening} {heard}
+          onset={set}
+          oncapture={captureHotkey}
+          onstartcapture={startCapture}
+          onsavehotkey={saveHotkey}
+          onpickfolder={pickFolder}
+          onpicksound={pickSound}
+          ontestsound={testSound}
+          ontogglelisten={() => { listening = !listening; heard = false; }} />
+      {/each}
+      {#if section === 'Updates'}
+        <div class="row">
+          <div class="lt">
+            <b>Version</b>
+            <span>The build you are running.</span>
+            {#if checked}<span class="checked">{checked}</span>{/if}
+          </div>
+          <div class="rt">
+            <span class="ver tnum">{version}</span>
+            <Button size="sm" disabled={checking || updates.busy} onclick={checkNow}>
+              {checking ? 'Checking…' : 'Check now'}
+            </Button>
+          </div>
         </div>
-        {#if checked}<p class="help">{checked}</p>{/if}
-      </div>
-    {/if}
+      {/if}
+    </div>
   </section>
 {/each}
 
 {#if extras.length > 0}
-  <p class="help">
+  <p class="extras">
     This daemon has settings this app does not render yet: {extras.join(', ')}. Edit them in config.toml.
   </p>
 {/if}
 
 <style>
-  h1 { font-size: 18px; margin: 0 0 18px; }
-  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim); margin: 22px 0 10px; }
-  .row { display: grid; grid-template-columns: 180px 1fr; gap: 6px 14px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
-  .control { display: flex; align-items: center; gap: 8px; }
-  .help { grid-column: 2; margin: 0; font-size: 12px; color: var(--dim); }
-  .notice { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border: 1px solid var(--accent); border-radius: 8px; margin-bottom: 16px; }
-  .notice button { margin-left: auto; }
+  h1 { font-size: 19px; font-weight: 650; margin: 0 0 4px; }
+  .lede { color: var(--dim); font-size: 12px; margin: 0 0 18px; }
+  section { margin-bottom: 20px; }
+  h2 {
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.11em;
+    color: var(--faint);
+    font-weight: 600;
+    margin: 0 0 8px;
+  }
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--r-lg);
+    padding: 2px 15px;
+  }
+  .notice {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 10px 13px;
+    margin-bottom: 18px;
+    border-radius: var(--r-md);
+    font-size: 12.5px;
+    background: color-mix(in srgb, var(--live) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--live) 40%, transparent);
+  }
+  .notice :global(svg) { color: var(--live); }
+  .spacer { margin-left: auto; }
+  /* `.row`, `.lt` and `.rt` come from app.css, shared with `Field.svelte` --
+     the Version row is this same shape and must line up with the generated
+     rows above it. Only what is unique to this row lives here. */
+  .checked { color: var(--text) !important; }
+  .ver { color: var(--dim); font-size: 12.5px; }
+  .extras { font-size: 11.5px; color: var(--dim); margin: 0; }
 </style>
