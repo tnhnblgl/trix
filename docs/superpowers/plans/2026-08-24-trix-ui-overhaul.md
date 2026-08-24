@@ -261,7 +261,7 @@ export function nextIndex(current: number, delta: number, count: number): number
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `npx vitest run src/lib/ui.test.ts`
-Expected: PASS — 6 suites, 15 tests.
+Expected: PASS — 6 suites, 14 tests.
 
 - [ ] **Step 5: Replace `app.css` entirely**
 
@@ -375,7 +375,7 @@ body {
 - [ ] **Step 6: Confirm the app still builds with every control unstyled**
 
 Run from `crates/trix-ui/web`: `npm run check && npx vitest run && npm run build`
-Expected: check 0 errors / 0 warnings; vitest 105 passing (90 existing + 15 new); build succeeds.
+Expected: check 0 errors / 0 warnings; vitest 104 passing (90 existing + 14 new); build succeeds.
 
 The running app now shows native Windows controls with no styling. That is correct for this point in the branch — Tasks 3 through 11 replace them.
 
@@ -564,7 +564,7 @@ Create `crates/trix-ui/web/src/components/ui/Icon.svelte`:
 - [ ] **Step 6: Verify the gates**
 
 Run: `npm run check && npx vitest run`
-Expected: check 0 errors / 0 warnings; vitest 108 passing.
+Expected: check 0 errors / 0 warnings; vitest 107 passing.
 
 - [ ] **Step 7: Commit**
 
@@ -779,7 +779,7 @@ Space and Enter are native and no key handling is written here at all.
 - [ ] **Step 4: Verify the gates**
 
 Run: `npm run check && npx vitest run && npm run build`
-Expected: check 0 errors / 0 warnings; vitest 108 passing; build succeeds.
+Expected: check 0 errors / 0 warnings; vitest 107 passing; build succeeds.
 
 - [ ] **Step 5: Commit**
 
@@ -1040,7 +1040,7 @@ git commit -m "feat(ui): button, icon button and toggle primitives"
 - [ ] **Step 3: Verify the gates**
 
 Run: `npm run check && npx vitest run && npm run build`
-Expected: check 0 errors / 0 warnings; vitest 108 passing; build succeeds.
+Expected: check 0 errors / 0 warnings; vitest 107 passing; build succeeds.
 
 - [ ] **Step 4: Commit**
 
@@ -1326,7 +1326,7 @@ only in the help text.
 - [ ] **Step 3: Verify the gates**
 
 Run: `npm run check && npx vitest run && npm run build`
-Expected: check 0 errors / 0 warnings; vitest 108 passing; build succeeds.
+Expected: check 0 errors / 0 warnings; vitest 107 passing; build succeeds.
 
 - [ ] **Step 4: Commit**
 
@@ -1534,7 +1534,7 @@ off-theme widget in Settings.
 - [ ] **Step 2: Verify the gates**
 
 Run: `npm run check && npx vitest run && npm run build`
-Expected: check 0 errors / 0 warnings; vitest 108 passing; build succeeds.
+Expected: check 0 errors / 0 warnings; vitest 107 passing; build succeeds.
 
 - [ ] **Step 3: Commit**
 
@@ -1980,7 +1980,7 @@ Add to the imports at the top of the `<script>`:
 - [ ] **Step 5: Verify the gates**
 
 Run: `npm run check && npx vitest run && npm run build`
-Expected: check 0 errors / 0 warnings; vitest 108 passing; build succeeds.
+Expected: check 0 errors / 0 warnings; vitest 107 passing; build succeeds.
 
 `settings.test.ts` must pass **without being edited**. It tests `FIELDS`,
 `unknownKeys` and `validate`, none of which this task touches. An edit to it is
@@ -2369,7 +2369,7 @@ is navigation only and narrows from 200px to 150px.
 - [ ] **Step 7: Verify the gates**
 
 Run: `npm run check && npx vitest run && npm run build`
-Expected: check 0 errors / 0 warnings; vitest 108 passing; build succeeds.
+Expected: check 0 errors / 0 warnings; vitest 107 passing; build succeeds.
 
 - [ ] **Step 8: Hand-check the window (no script covers this)**
 
@@ -2725,7 +2725,7 @@ Add to `crates/trix-ui/web/src/lib/keys.test.ts`, inside the existing
 - [ ] **Step 5: Verify the gates**
 
 Run: `npm run check && npx vitest run && npm run build`
-Expected: check 0 errors / 0 warnings; vitest 110 passing; build succeeds.
+Expected: check 0 errors / 0 warnings; vitest 109 passing; build succeeds.
 
 - [ ] **Step 6: Commit**
 
@@ -2939,7 +2939,7 @@ export function formatClock(ms: number): string {
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `npx vitest run src/lib/timeline.test.ts`
-Expected: PASS — 4 suites, 13 tests.
+Expected: PASS — 4 suites, 12 tests.
 
 - [ ] **Step 5: Create `Timeline.svelte`**
 
@@ -3268,7 +3268,7 @@ expected and Task 11 fixes it — **this task's gate is the unit tests only.**
 - [ ] **Step 8: Verify the unit gate**
 
 Run: `npx vitest run`
-Expected: 123 passing (110 + 13 new).
+Expected: 121 passing (109 + 12 new).
 
 - [ ] **Step 9: Commit**
 
@@ -3513,7 +3513,7 @@ Everything from `{#if clip}` to the end of the file:
 - [ ] **Step 5: Verify the gates**
 
 Run: `npm run check && npx vitest run && npm run build`
-Expected: check 0 errors / 0 warnings; vitest 123 passing; build succeeds.
+Expected: check 0 errors / 0 warnings; vitest 121 passing; build succeeds.
 
 The `TrimBar.svelte` import error from Task 10 is resolved by this task.
 
@@ -3709,7 +3709,7 @@ From `crates/trix-ui/web`:
 npm run check && npx vitest run && npm run build
 ```
 
-Expected: check 0 errors / 0 warnings; vitest 123 passing; build succeeds.
+Expected: check 0 errors / 0 warnings; vitest 121 passing; build succeeds.
 
 From the repo root:
 
