@@ -938,6 +938,13 @@ git commit -m "feat(ui): button, icon button and toggle primitives"
       e.stopPropagation();
       const item = items[active];
       if (item) onpick(item.id);
+    } else if (e.key === 'Tab') {
+      // Not prevented: Tab should carry on to the next real control. But the
+      // items are `tabindex="-1"`, so focus leaves this subtree entirely --
+      // and the key handler lives on `el`, so once focus is gone Escape can
+      // no longer reach it. A menu left open behind a focus that has moved on
+      // would be undismissable from the keyboard.
+      onclose();
     }
   }
 </script>
@@ -1528,7 +1535,6 @@ off-theme widget in Settings.
 - [ ] **Step 1: Create `Select.svelte`**
 
 ```svelte
-      e.stopPropagation();
 <script module lang="ts">
   /** Instance counter -- see `uid` below, same reasoning as Menu.svelte. */
   let nextSelectId = 0;
@@ -3954,6 +3960,23 @@ reaches them through `var(--...)`, which is what `--include=*.svelte` above
 encodes. This gate exists because the Task 4 sweep grepped only for `rgba(`
 and two hex literals walked straight through it. Nothing else in the
 toolchain objects to a hard-coded colour: it renders, and only looks wrong.
+
+Then check that nothing sits above the first tag in any component:
+
+```bash
+for f in $(find crates/trix-ui/web/src -name "*.svelte"); do
+  case "$(head -1 "$f")" in "<"*|"") ;; *) echo "STRAY: $f -> $(head -1 "$f")";; esac
+done
+```
+
+Expected: **no output.** Anything before the first `<script>` or `<style>` tag
+in a `.svelte` file is template markup, so a stray line there renders on
+screen. During Task 6 a bad patch left `e.stopPropagation();` as the first
+line of `Select.svelte` and **all three gates passed**: it is valid markup to
+`svelte-check`, this project has no component tests, and `vite build` has
+nothing to object to. Only reading the file caught it. This is the one class
+of defect the toolchain here is structurally blind to, so it gets its own
+check.
 
 - [ ] **Step 6: Full hand-verification (a person must do this)**
 
