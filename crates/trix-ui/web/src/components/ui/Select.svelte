@@ -1,3 +1,4 @@
+      e.stopPropagation();
 <script module lang="ts">
   /** Instance counter -- see `uid` below, same reasoning as Menu.svelte. */
   let nextSelectId = 0;
@@ -90,6 +91,7 @@
       pick(active);
     } else if (e.key === 'Home' || e.key === 'End') {
       e.preventDefault();
+      e.stopPropagation();
       active = e.key === 'Home' ? 0 : options.length - 1;
     } else if (e.key === 'Tab') {
       // Tab moves on rather than being trapped, but the list must not be
@@ -108,7 +110,7 @@
     role="combobox"
     aria-expanded={open}
     aria-haspopup="listbox"
-    aria-controls="{uid}-listbox"
+    aria-controls={open ? `${uid}-listbox` : undefined}
     aria-activedescendant={open && options[active] ? `${uid}-${active}` : undefined}
     aria-label={label}
     onclick={() => (open ? dismiss() : show())}
@@ -127,6 +129,7 @@
           class:active={i === active}
           class:on={option.value === value}
           role="option"
+          tabindex="-1"
           aria-selected={option.value === value}
           onpointerenter={() => (active = i)}
           onclick={() => pick(i)}>

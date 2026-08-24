@@ -99,6 +99,7 @@
       class:danger={item.danger}
       class:active={i === active}
       role="menuitem"
+      tabindex="-1"
       onpointerenter={() => (active = i)}
       onclick={() => onpick(item.id)}>
       {#if item.icon}<Icon name={item.icon} size={14} />{/if}
