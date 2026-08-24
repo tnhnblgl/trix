@@ -1,4 +1,3 @@
-      e.stopPropagation();
 <script module lang="ts">
   /** Instance counter -- see `uid` below, same reasoning as Menu.svelte. */
   let nextSelectId = 0;

@@ -74,6 +74,13 @@
       e.stopPropagation();
       const item = items[active];
       if (item) onpick(item.id);
+    } else if (e.key === 'Tab') {
+      // Not prevented: Tab should carry on to the next real control. But the
+      // items are `tabindex="-1"`, so focus leaves this subtree entirely --
+      // and the key handler lives on `el`, so once focus is gone Escape can
+      // no longer reach it. A menu left open behind a focus that has moved on
+      // would be undismissable from the keyboard.
+      onclose();
     }
   }
 </script>
