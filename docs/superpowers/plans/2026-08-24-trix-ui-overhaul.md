@@ -22,7 +22,7 @@ Every task's requirements implicitly include all of these.
   `docs:` commit so the plan and the shipped code do not drift. Those commits
   are expected, and are not a breach of this rule.
 - **No new, removed or renamed config key. No new daemon command.** Every `call(...)` used already exists.
-- **No user-facing sentence changes** except units moving out of help text onto a control (Task 7) and the empty-state hotkey (Task 9).
+- **No user-facing sentence changes** except units moving out of help text onto a control (Task 7) and the empty-state hotkey (Task 9). Adding a sentence where there was none is not a *change*: new help text on a row this overhaul restructures is allowed, and Task 7's Settings lede ("Changes take effect on the next clip...") and the Version row's help line ship as written. Rewriting or deleting a sentence that already ships is still forbidden. Ruled by the project owner on 2026-08-25, after review found the brief mandating copy this line as first written forbade.
 - **Testing rule, deliberate:** this project has **zero component tests** and no DOM test library, and adding one would break the dependency rule. All 90 existing vitest cases test `lib/*.ts`. Therefore: **logic goes in `lib/`, and is tested there; `.svelte` files carry markup and styling only.** A reviewer must not treat "no test for this component" as a defect — they must treat "testable logic left inside a component" as one.
 - **Dark only.** `color-scheme: dark` stays; no light theme.
 - **Every task ends green:** `npm run check` at 0 errors / 0 warnings, `npx vitest run` all passing, `npm run build` succeeding. Run from `crates/trix-ui/web`.
