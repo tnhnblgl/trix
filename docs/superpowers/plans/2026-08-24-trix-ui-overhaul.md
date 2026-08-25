@@ -2060,7 +2060,7 @@ round-trip decision.
   }
   .path.off { opacity: 0.45; }
   .hint { font-size: 11.5px; color: var(--dim); }
-  .hint.ok { color: var(--live); }
+  .hint.ok { color: var(--accent); }  /* amended 2026-08-25: was --live */
 </style>
 ```
 
@@ -3876,6 +3876,16 @@ git commit -m "feat(ui): clip page on the unified player"
 
 ### Post-review amendments (2026-08-25)
 
+**A colour-contract breach in two tasks' prescribed CSS.** Both Task 7's
+`Field.svelte` and Task 12's `FirstRun.svelte` were given
+`.hint.ok { color: var(--live); }` for the hotkey-confirmation line "Trix
+received it." That sentence reports that the hotkey reached Trix past an
+overlay -- it is not Trix being live, and it can show before anything is
+armed. The contract reserves `--live` for the arm control, its dot, the
+buffer meter and the re-arm notice, and nowhere else. Task 12's review caught
+the second instance; Task 7's shipped and was reviewed clean. Both snippets
+above now read `var(--accent)`, and both files were corrected. Owner's ruling.
+
 Task 11 shipped as written above and passed review with all eight
 preserve-verbatim items intact. Four things in the prescribed code were then
 found wrong, and the shipped code differs from the blocks above accordingly.
@@ -4067,7 +4077,7 @@ with `KeycapInput` in a non-capturing state, the path `<input>` with the same
   h2 { font-size: 15px; font-weight: 650; margin: 14px 0 4px; }
   .step { color: var(--faint); margin: 0; font-size: 11px; }
   .hint { color: var(--dim); font-size: 11.5px; margin: 2px 0; }
-  .hint.ok { color: var(--live); }
+  .hint.ok { color: var(--accent); }  /* amended 2026-08-25: was --live */
   .pathrow { display: flex; align-items: center; gap: 8px; width: 100%; }
   .path {
     flex: 1;
