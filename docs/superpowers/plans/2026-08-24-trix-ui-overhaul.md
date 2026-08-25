@@ -3352,9 +3352,11 @@ Expected: PASS — 4 suites, 12 tests.
 </script>
 
 <!-- The band itself is a pointer convenience: press or drag anywhere along it
-     to seek. Everything it can reach is also reachable from the playhead
-     inside it, which is a real focusable slider, so the suppression below
-     costs a keyboard user nothing.
+     to seek. The playhead inside it is a real focusable
+     slider, so seeking is not pointer-only: a keyboard moves it in 5s steps,
+     1s with Shift, and jumps to either end. That is coarser than a drag, which
+     lands on any millisecond -- the suppression below costs a keyboard user
+     precision, not access.
 
      The band cannot take the slider role itself. `slider` is a leaf role and
      this element contains three of them. -->

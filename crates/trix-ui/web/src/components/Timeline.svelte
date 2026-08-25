@@ -111,9 +111,11 @@
 </script>
 
 <!-- The band itself is a pointer convenience: press or drag anywhere along it
-     to seek. Everything it can reach is also reachable from the playhead
-     inside it, which is a real focusable slider, so the suppression below
-     costs a keyboard user nothing.
+     to seek. The playhead inside it is a real focusable
+     slider, so seeking is not pointer-only: a keyboard moves it in 5s steps,
+     1s with Shift, and jumps to either end. That is coarser than a drag, which
+     lands on any millisecond -- the suppression below costs a keyboard user
+     precision, not access.
 
      An earlier draft justified this by pointing at the two trim handles. That
      was wrong -- they move `inMs` and `outMs` through `onchange` and never
