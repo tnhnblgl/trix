@@ -17,13 +17,28 @@
    * cut can land.
    */
   let {
-    durationMs, playheadMs, keyframes, inMs, outMs, onchange, onseek,
+    durationMs, playheadMs, keyframes, inMs, outMs, trimmable = true, onchange, onseek,
   }: {
     durationMs: number;
     playheadMs: number;
     keyframes: number[];
     inMs: number;
     outMs: number;
+    /**
+     * False leaves a seek-only band: the track, the playhead and both ways of
+     * moving it stay, and everything that expresses a range -- both handles,
+     * the fill between them and the dimming outside them -- is not rendered.
+     *
+     * For the clip the daemon will not trim. `library::scan` adopts a bare
+     * .mp4 with `duration_ms: 0`, and `clamp_range` refuses it; drawing
+     * handles that cannot produce an export would be an offer the daemon does
+     * not honour. Seeking has nothing to do with the daemon, so it stays.
+     *
+     * `onchange` cannot fire while this is false, because the only two things
+     * that call it -- a drag on a handle and a key press on one -- are bound
+     * to elements that are not on the page.
+     */
+    trimmable?: boolean;
     onchange: (inMs: number, outMs: number) => void;
     onseek: (ms: number) => void;
   } = $props();
@@ -124,7 +139,8 @@
      and the one thing this design removes.
 
      The band cannot take the slider role itself. `slider` is a leaf role and
-     this element contains three of them. -->
+     this element contains one already -- the playhead -- plus both handles
+     whenever `trimmable` is on. -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   bind:this={band}
@@ -136,9 +152,11 @@
     <span class="tick" style="left: {pct(k)}"></span>
   {/each}
 
-  <span class="scrim" style="left: 0; width: {pct(inMs)}"></span>
-  <span class="scrim" style="left: {pct(outMs)}; right: 0"></span>
-  <span class="range" style="left: {pct(inMs)}; width: {ratioFromMs(Math.max(0, outMs - inMs), durationMs) * 100}%"></span>
+  {#if trimmable}
+    <span class="scrim" style="left: 0; width: {pct(inMs)}"></span>
+    <span class="scrim" style="left: {pct(outMs)}; right: 0"></span>
+    <span class="range" style="left: {pct(inMs)}; width: {ratioFromMs(Math.max(0, outMs - inMs), durationMs) * 100}%"></span>
+  {/if}
   <span
     class="playhead"
     style="left: {pct(playheadMs)}"
@@ -151,35 +169,37 @@
     aria-valuetext={formatClock(playheadMs)}
     onkeydown={onSeekKey}></span>
 
-  <span
-    class="handle"
-    class:dragging={drag === 'in'}
-    style="left: {pct(inMs)}"
-    role="slider"
-    tabindex="0"
-    aria-label="Trim start"
-    aria-valuemin={0}
-    aria-valuemax={durationMs}
-    aria-valuenow={inMs}
-    onpointerdown={(e) => grab('in', e)}
-    onpointermove={move}
-    onpointerup={drop}
-    onkeydown={(e) => onHandleKey('in', e)}></span>
+  {#if trimmable}
+    <span
+      class="handle"
+      class:dragging={drag === 'in'}
+      style="left: {pct(inMs)}"
+      role="slider"
+      tabindex="0"
+      aria-label="Trim start"
+      aria-valuemin={0}
+      aria-valuemax={durationMs}
+      aria-valuenow={inMs}
+      onpointerdown={(e) => grab('in', e)}
+      onpointermove={move}
+      onpointerup={drop}
+      onkeydown={(e) => onHandleKey('in', e)}></span>
 
-  <span
-    class="handle"
-    class:dragging={drag === 'out'}
-    style="left: {pct(outMs)}"
-    role="slider"
-    tabindex="0"
-    aria-label="Trim end"
-    aria-valuemin={0}
-    aria-valuemax={durationMs}
-    aria-valuenow={outMs}
-    onpointerdown={(e) => grab('out', e)}
-    onpointermove={move}
-    onpointerup={drop}
-    onkeydown={(e) => onHandleKey('out', e)}></span>
+    <span
+      class="handle"
+      class:dragging={drag === 'out'}
+      style="left: {pct(outMs)}"
+      role="slider"
+      tabindex="0"
+      aria-label="Trim end"
+      aria-valuemin={0}
+      aria-valuemax={durationMs}
+      aria-valuenow={outMs}
+      onpointerdown={(e) => grab('out', e)}
+      onpointermove={move}
+      onpointerup={drop}
+      onkeydown={(e) => onHandleKey('out', e)}></span>
+  {/if}
 </div>
 
 <style>

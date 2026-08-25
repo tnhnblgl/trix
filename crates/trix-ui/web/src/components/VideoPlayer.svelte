@@ -11,8 +11,13 @@
   }: {
     src: string;
     ontime: (ms: number) => void;
-    /** The unified band, rendered inside the transport row. */
-    timeline: Snippet;
+    /**
+     * The unified band, rendered inside the transport row. Handed the
+     * duration this player read off the file -- which is the only duration
+     * available for a clip the library recorded as `duration_ms: 0`, and is
+     * 0 itself until `loadedmetadata` fires.
+     */
+    timeline: Snippet<[number]>;
   } = $props();
 
   let video = $state<HTMLVideoElement | null>(null);
@@ -68,7 +73,7 @@
       <Icon name={playing ? 'pause' : 'play'} size={13} />
     </button>
 
-    <div class="tl">{@render timeline()}</div>
+    <div class="tl">{@render timeline(durationMs)}</div>
 
     <span class="clock tnum">{formatClock(positionMs)} / {formatClock(durationMs)}</span>
 

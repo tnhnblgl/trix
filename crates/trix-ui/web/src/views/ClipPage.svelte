@@ -219,21 +219,25 @@
     bind:this={player}
     src={clipUrl(app.clipDir, clip.id)}
     ontime={(ms) => (playheadMs = ms)}>
-    {#snippet timeline()}
-      <!-- Hidden for a clip with no duration, which is the one case the
-           daemon will refuse: `library::scan` adopts a bare .mp4 with
-           `duration_ms: 0`, and `clamp_range` refuses it. Better not to offer
-           the control than to hand back a refusal. -->
-      {#if canTrim}
-        <Timeline
-          durationMs={clip.duration_ms}
-          {playheadMs}
-          {keyframes}
-          {inMs}
-          {outMs}
-          onchange={(i, o) => { inMs = i; outMs = o; }}
-          onseek={(ms) => player?.seekTo(ms)} />
-      {/if}
+    {#snippet timeline(playerDurationMs)}
+      <!-- A clip with no duration still gets the band, and still cannot be
+           trimmed on it: the track and the playhead are there to seek with,
+           the handles are not, because `library::scan` adopts a bare .mp4 with
+           `duration_ms: 0` and `clamp_range` refuses to trim it. The player
+           read a real duration off the file even though the library has none,
+           so seeking has something to scale against; the daemon has not, so
+           the trim chrome would be an offer it would refuse. Keyframes go with
+           the handles -- they exist only to snap the In point, and there is no
+           In point to snap. -->
+      <Timeline
+        durationMs={canTrim ? clip.duration_ms : playerDurationMs}
+        trimmable={canTrim}
+        {playheadMs}
+        keyframes={canTrim ? keyframes : []}
+        {inMs}
+        {outMs}
+        onchange={(i, o) => { inMs = i; outMs = o; }}
+        onseek={(ms) => player?.seekTo(ms)} />
     {/snippet}
   </VideoPlayer>
 
