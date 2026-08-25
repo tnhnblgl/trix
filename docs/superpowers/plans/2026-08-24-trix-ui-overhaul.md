@@ -3857,7 +3857,9 @@ Everything from `{#if clip}` to the end of the file:
 Run: `npm run check && npx vitest run && npm run build`
 Expected: check 0 errors / 0 warnings; vitest 152 passing; build succeeds.
 
-The `TrimBar.svelte` import error from Task 10 is resolved by this task.
+`TrimBar.svelte` is deleted in this task's commit, in the same breath as the
+import of it -- so the tree is green before the change and green after, never
+in between.
 
 - [ ] **Step 6: Commit**
 
