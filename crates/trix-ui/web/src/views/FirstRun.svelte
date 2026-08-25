@@ -3,6 +3,9 @@
   import { call, onDaemonEvent } from '../lib/ipc';
   import { app } from '../lib/state.svelte';
   import type { Monitor } from '../lib/types';
+  import Button from '../components/ui/Button.svelte';
+  import KeycapInput from '../components/ui/KeycapInput.svelte';
+  import Select from '../components/ui/Select.svelte';
 
   let step = $state(1);
   let monitors = $state<Monitor[]>([]);
@@ -89,19 +92,19 @@
 
 <div class="wizard">
   <h1>Set up Trix</h1>
-  <p class="step">Step {step} of 3</p>
+  <p class="step tnum">Step {step} of 3</p>
 
   {#if step === 1}
     <h2>Which screen do you play on?</h2>
-    <div class="choices">
-      {#each monitors as monitor (monitor.index)}
-        <button class:chosen={monitorIndex === monitor.index} onclick={() => (monitorIndex = monitor.index)}>
-          <strong>{monitor.name}</strong>
-          <span>{monitor.width}x{monitor.height} - {monitor.adapter}</span>
-        </button>
-      {/each}
-    </div>
-    <button class="next" onclick={() => (step = 2)}>Next</button>
+    <Select
+      value={String(monitorIndex)}
+      options={monitors.map((m) => ({
+        value: String(m.index),
+        label: `${m.name} - ${m.width}x${m.height} (${m.adapter})`,
+      }))}
+      label="Monitor"
+      onchange={(v) => (monitorIndex = Number(v))} />
+    <Button variant="primary" onclick={() => (step = 2)}>Next</Button>
   {:else if step === 2}
     <h2>Confirm your clip hotkey</h2>
     <!--
@@ -114,40 +117,43 @@
       way to change the hotkey; that is Settings' job, after setup.
     -->
     <p class="hint">Press it now. Some overlays quietly take a hotkey inside games, so this checks Trix really gets it.</p>
-    <input readonly value={hotkey} />
+    <KeycapInput combo={hotkey} capturing={false} label="Clip hotkey" oncapture={() => {}} onstart={() => {}} />
     <p class="hint" class:ok={heard}>{heard ? 'Trix received it.' : 'Waiting for a press...'}</p>
-    <button class="next" onclick={() => (step = 3)}>Next</button>
+    <Button variant="primary" onclick={() => (step = 3)}>Next</Button>
   {:else}
     <h2>Where should clips go?</h2>
-    <!-- Readonly for the same reason the Settings row is: the daemon owns the
-         picker, and a typed path that does not exist is a refusal the user has
-         to decode. There is no Reset button here because the box already shows
-         the default -- nothing has been changed away from yet. -->
+    <!-- Read-only for the same reason the Settings row is: the daemon owns
+         the picker, and a typed path that does not exist is a refusal the
+         user has to decode. There is no Reset here because the box already
+         shows the default -- nothing has been changed away from yet. -->
     <div class="pathrow">
-      <input readonly value={clipDir} />
-      <button onclick={pickFolder}>Choose...</button>
+      <span class="path">{clipDir}</span>
+      <Button onclick={pickFolder}>Choose...</Button>
     </div>
     <p class="hint">You can change this any time in Settings, or from the Trix tray icon.</p>
-    <button class="next" onclick={finish}>Finish and arm</button>
+    <Button variant="primary" onclick={finish}>Finish and arm</Button>
   {/if}
 </div>
 
 <style>
-  .wizard { max-width: 560px; margin: 8vh auto; display: grid; gap: 10px; }
-  h1 { font-size: 22px; margin: 0; }
-  h2 { font-size: 16px; margin: 14px 0 4px; }
-  .step { color: var(--dim); margin: 0; font-size: 12px; }
-  .choices { display: grid; gap: 8px; }
-  .choices button { display: grid; gap: 2px; text-align: left; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font: inherit; cursor: pointer; }
-  .choices button.chosen { border-color: var(--accent); }
-  .choices span { color: var(--dim); font-size: 12px; }
-  .hint { color: var(--dim); font-size: 12px; margin: 2px 0; }
-  .hint.ok { color: var(--accent); }
-  input { padding: 8px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--dim); font: inherit; }
-  /* Same shape as Field.svelte's `.control`, so the picker row reads the same
-     here as it does in Settings. `min-width: 0` lets the path box shrink
-     inside the flex row rather than pushing the button off the card. */
-  .pathrow { display: flex; align-items: center; gap: 8px; }
-  .pathrow input { flex: 1; min-width: 0; }
-  .next { justify-self: start; margin-top: 12px; padding: 9px 20px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: #06121f; font: inherit; font-weight: 600; cursor: pointer; }
+  .wizard { width: min(560px, 100%); margin: 8vh auto; padding: 0 24px; display: grid; gap: 10px; justify-items: start; }
+  h1 { font-size: 21px; font-weight: 650; margin: 0; }
+  h2 { font-size: 15px; font-weight: 650; margin: 14px 0 4px; }
+  .step { color: var(--faint); margin: 0; font-size: 11px; }
+  .hint { color: var(--dim); font-size: 11.5px; margin: 2px 0; }
+  .hint.ok { color: var(--live); }
+  .pathrow { display: flex; align-items: center; gap: 8px; width: 100%; }
+  .path {
+    flex: 1;
+    min-width: 0;
+    padding: 7px 10px;
+    background: var(--bg);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r);
+    color: var(--dim);
+    font-size: 12px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
 </style>
