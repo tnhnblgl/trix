@@ -23,15 +23,16 @@ const TYPING_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT']);
  * function entirely -- but the rule stays for the next native range, checkbox
  * or radio this app grows.
  *
- * The deliberate trade, chosen rather than inherited: `ArrowLeft`/`ArrowRight`
- * now belong to the page (prev/next clip) instead of nudging the focused
- * slider, so the sliders lose keyboard adjustment. That is the right way round
- * here — `step="1"` is one millisecond, so an arrow key moved the trim point
- * by an amount too small to see while silently eating the shortcut the user
- * meant, and `i`/`o` set both points from the playhead anyway, which is the
- * documented way to place them precisely. If a control ever needs its arrows
- * back, give it a bigger step and an exception, not a return to matching on
- * the tag.
+ * The trade this note used to describe has since been taken back, on purpose.
+ * When the handles were `<input type="range">` with `step="1"`, an arrow moved
+ * the trim point by one millisecond — too small to see, while silently eating
+ * the prev/next shortcut the user meant — so the arrows went to the page and
+ * the handles lost keyboard adjustment. `Timeline` then did exactly what this
+ * note said to do if a control ever needed them back: gave them a step worth
+ * pressing (keyframes for In, 100ms for Out, 5s for the playhead) and an
+ * exception rather than a return to matching on the tag — `ClipPage` returns
+ * early when the focused element has `role="slider"`. A focused handle or
+ * playhead owns its arrows again; everywhere else they still step clips.
  */
 const NON_TYPING_INPUT_TYPES = new Set(['range', 'checkbox', 'radio', 'button']);
 

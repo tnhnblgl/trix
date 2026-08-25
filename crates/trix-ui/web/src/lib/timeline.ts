@@ -4,7 +4,7 @@ import { clamp } from './ui';
  * Geometry and snapping for the unified seek-and-trim band.
  *
  * Pulled out of the component so it can be tested without a DOM. `snapStart`
- * is a move of `TrimBar.svelte`'s `snap()`, unchanged in behaviour -- it is
+ * is a move of the deleted `TrimBar.svelte`'s `snap()`, unchanged in behaviour -- it is
  * the same rule the daemon applies in `trix-core/src/export.rs`'s
  * `snap_start`, so the handle sits where the export will actually cut.
  */
