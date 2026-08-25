@@ -170,3 +170,19 @@ export function moveSelection(
   const next = current + delta;
   return next < 0 || next >= count ? current : next;
 }
+
+/**
+ * The attribute marking a control that lives inside a clip card but owns its
+ * own Space and Enter -- the overflow button, and the rename box.
+ *
+ * Deliberately an attribute rather than a class. `Grid` has to recognise these
+ * elements from the outside, and every class on a card is a *styling* name: a
+ * later restyle that renames `.dots` would silently take Enter away from the
+ * overflow menu and make it keyboard-unreachable, with nothing failing. This
+ * name exists only for this contract, so a restyle has no reason to touch it,
+ * and `keys.test.ts` fails if the card stops carrying it.
+ */
+export const CARD_CONTROL_ATTR = 'data-card-control';
+
+/** `CARD_CONTROL_ATTR` as a selector, for `closest()`. */
+export const CARD_CONTROL_SELECTOR = `[${CARD_CONTROL_ATTR}]`;

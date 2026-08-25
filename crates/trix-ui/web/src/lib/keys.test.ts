@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { shouldHandleKey, isActivatableTarget, isTypingTarget, moveSelection } from './keys';
+// Read through Vite's `?raw`, not `node:fs`: the filesystem would mean adding
+// @types/node, and this project takes no new dependency, dev ones included.
+import clipCardSource from '../components/ClipCard.svelte?raw';
+import gridSource from '../views/Grid.svelte?raw';
+import {
+  shouldHandleKey,
+  isActivatableTarget,
+  isTypingTarget,
+  moveSelection,
+  CARD_CONTROL_ATTR,
+} from './keys';
 
 /** An event target, as much of one as a DOM-less suite needs. */
 const target = (props: Record<string, unknown>) => props as unknown as EventTarget;
@@ -152,22 +162,6 @@ describe('shouldHandleKey', () => {
     expect(shouldHandleKey(target({}), ' ', false)).toBe(true);
     expect(shouldHandleKey(null, 'Enter', false)).toBe(true);
   });
-
-  it('leaves Space and Enter with a card control even inside the grid', () => {
-    // `Grid.svelte` computes `ownsActivation` false for the overflow button
-    // and the rename box, so the grid must not claim their activation keys.
-    const dots = target({ tagName: 'BUTTON' });
-    expect(shouldHandleKey(dots, 'Enter', false)).toBe(false);
-    expect(shouldHandleKey(dots, ' ', false)).toBe(false);
-    // Arrows are never part of what a button owns.
-    expect(shouldHandleKey(dots, 'ArrowRight', false)).toBe(true);
-  });
-
-  it('still claims Space and Enter for a card the grid owns', () => {
-    const card = target({ tagName: 'BUTTON' });
-    expect(shouldHandleKey(card, 'Enter', true)).toBe(true);
-    expect(shouldHandleKey(card, ' ', true)).toBe(true);
-  });
 });
 
 describe('moveSelection', () => {
@@ -191,5 +185,34 @@ describe('moveSelection', () => {
 
   it('cannot select anything in an empty library', () => {
     expect(moveSelection(0, 'ArrowRight', 0, 4)).toBe(0);
+  });
+});
+
+/**
+ * The one part of the card/grid keyboard contract that lives in markup rather
+ * than in this file.
+ *
+ * `Grid` recognises the card's own controls from the outside, by attribute. If
+ * the card stops carrying the marker, `ownedByCardControl` silently goes false,
+ * the grid claims Enter on a focused overflow button, and its menu becomes
+ * keyboard-unreachable -- with `npm run check`, `vitest` and `npm run build`
+ * all green, because `closest()` takes a string and no type stands behind it.
+ * Nothing else on this branch can catch that, so it is caught here.
+ */
+describe('the card/grid control marker', () => {
+  it('is carried by both of the card controls the grid must not claim', () => {
+    const marks = clipCardSource.split(CARD_CONTROL_ATTR).length - 1;
+    // The overflow button and the rename box. If a third control is ever added
+    // to a card, this number is a decision to make deliberately -- does the
+    // grid have to withhold Space and Enter from it too? -- not a nuisance to
+    // bump past.
+    expect(marks).toBe(2);
+  });
+
+  it('is what the grid actually searches for', () => {
+    // Guards against someone re-inlining a literal selector here. The shared
+    // constant would go unused, and this project sets no `noUnusedLocals`, so
+    // nothing else would say a word.
+    expect(gridSource).toContain('CARD_CONTROL_SELECTOR');
   });
 });

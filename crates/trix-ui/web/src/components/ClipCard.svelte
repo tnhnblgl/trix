@@ -58,6 +58,7 @@
         <!-- svelte-ignore a11y_autofocus -->
         <input
           class="rn"
+          data-card-control
           bind:value={draft}
           autofocus
           onblur={commit}
@@ -71,7 +72,7 @@
           }} />
       {:else}
         <span class="title">{clip.title}</span>
-        <span class="dots">
+        <span class="dots" data-card-control>
           <IconButton icon="dots" label="More actions for {clip.title}" size={14}
             onclick={() => (menuOpen = !menuOpen)} />
           {#if menuOpen}

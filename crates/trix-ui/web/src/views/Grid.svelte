@@ -1,7 +1,7 @@
 <script lang="ts">
   import ClipCard from '../components/ClipCard.svelte';
   import { app } from '../lib/state.svelte';
-  import { shouldHandleKey, moveSelection } from '../lib/keys';
+  import { shouldHandleKey, moveSelection, CARD_CONTROL_SELECTOR } from '../lib/keys';
   import { clipUrl, formatBytes } from '../lib/clips';
 
   /** Kept in sync with the CSS grid below so ArrowDown moves one visual row. */
@@ -30,7 +30,7 @@
     // button and, while a card is being renamed, its text box. Without this,
     // Enter on a focused `⋯` would open the clip instead of its menu.
     const target = e.target instanceof Element ? e.target : null;
-    const ownedByCardControl = !!target?.closest('.dots, .rn');
+    const ownedByCardControl = !!target?.closest(CARD_CONTROL_SELECTOR);
     const insideGrid =
       !ownedByCardControl && !!gridEl && e.target instanceof Node && gridEl.contains(e.target);
     if (!shouldHandleKey(e.target, e.key, insideGrid)) return;
