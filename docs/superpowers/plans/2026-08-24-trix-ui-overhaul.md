@@ -2579,7 +2579,7 @@ is navigation only and narrows from 200px to 150px.
 - [ ] **Step 7: Verify the gates**
 
 Run: `npm run check && npx vitest run && npm run build`
-Expected: check 0 errors / 0 warnings; vitest 113 passing; build succeeds.
+Expected: check 0 errors / 0 warnings; vitest 119 passing; build succeeds.
 
 - [ ] **Step 8: Hand-check the window (no script covers this)**
 
@@ -2946,7 +2946,7 @@ Add to `crates/trix-ui/web/src/lib/keys.test.ts`, inside the existing
 - [ ] **Step 5: Verify the gates**
 
 Run: `npm run check && npx vitest run && npm run build`
-Expected: check 0 errors / 0 warnings; vitest 115 passing; build succeeds.
+Expected: check 0 errors / 0 warnings; vitest 121 passing; build succeeds.
 
 - [ ] **Step 6: Commit**
 
@@ -3489,7 +3489,7 @@ expected and Task 11 fixes it — **this task's gate is the unit tests only.**
 - [ ] **Step 8: Verify the unit gate**
 
 Run: `npx vitest run`
-Expected: 127 passing (115 + 12 new).
+Expected: 133 passing (121 + 12 new).
 
 - [ ] **Step 9: Commit**
 
@@ -3734,7 +3734,7 @@ Everything from `{#if clip}` to the end of the file:
 - [ ] **Step 5: Verify the gates**
 
 Run: `npm run check && npx vitest run && npm run build`
-Expected: check 0 errors / 0 warnings; vitest 127 passing; build succeeds.
+Expected: check 0 errors / 0 warnings; vitest 133 passing; build succeeds.
 
 The `TrimBar.svelte` import error from Task 10 is resolved by this task.
 
@@ -3930,7 +3930,7 @@ From `crates/trix-ui/web`:
 npm run check && npx vitest run && npm run build
 ```
 
-Expected: check 0 errors / 0 warnings; vitest 127 passing; build succeeds.
+Expected: check 0 errors / 0 warnings; vitest 133 passing; build succeeds.
 
 From the repo root:
 
