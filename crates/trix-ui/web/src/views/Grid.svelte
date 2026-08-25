@@ -2,7 +2,7 @@
   import ClipCard from '../components/ClipCard.svelte';
   import { app } from '../lib/state.svelte';
   import { shouldHandleKey, moveSelection } from '../lib/keys';
-  import { clipUrl } from '../lib/clips';
+  import { clipUrl, formatBytes } from '../lib/clips';
 
   /** Kept in sync with the CSS grid below so ArrowDown moves one visual row. */
   let columns = $state(4);
@@ -25,7 +25,14 @@
     // are ours is `shouldHandleKey`'s decision — and it needs to know whether
     // the target is one of our own cards, because those are `<button>`s that
     // WebView2 focuses on click yet whose Space and Enter belong to the grid.
-    const insideGrid = !!gridEl && e.target instanceof Node && gridEl.contains(e.target);
+    // The grid claims Space and Enter for its cards, but not for the two
+    // controls inside a card that own those keys themselves: the overflow
+    // button and, while a card is being renamed, its text box. Without this,
+    // Enter on a focused `⋯` would open the clip instead of its menu.
+    const target = e.target instanceof Element ? e.target : null;
+    const ownedByCardControl = !!target?.closest('.dots, .rn');
+    const insideGrid =
+      !ownedByCardControl && !!gridEl && e.target instanceof Node && gridEl.contains(e.target);
     if (!shouldHandleKey(e.target, e.key, insideGrid)) return;
 
     if (e.key === 'Enter') {
@@ -56,14 +63,35 @@
       previewing = null;
     }
   }
+
+  /**
+   * The library's byte total, but only when the whole library is loaded.
+   *
+   * `library.list` is fetched with `limit: 200`, so on a bigger library
+   * `app.clips` is a page and summing it would understate the total by
+   * however much did not fit. A count is always true; a size is only true
+   * when there is nothing else to count.
+   */
+  const librarySize = $derived(
+    app.clips.length === app.total
+      ? formatBytes(app.clips.reduce((sum, c) => sum + c.bytes, 0))
+      : null,
+  );
 </script>
 
 <svelte:window {onkeydown} />
 
+<header class="head">
+  <h1>Clips</h1>
+  <span class="cnt tnum">
+    {app.total} {app.total === 1 ? 'clip' : 'clips'}{#if librarySize} &middot; {librarySize}{/if}
+  </span>
+</header>
+
 {#if app.clips.length === 0}
   <div class="empty">
-    <p>No clips yet.</p>
-    <p class="hint">Arm Trix, then press your clip hotkey while you play.</p>
+    <p class="big">No clips yet.</p>
+    <p>Arm Trix, then press <kbd>{app.hotkey}</kbd> while you play.</p>
   </div>
 {:else}
   <div class="grid" bind:this={gridEl}>
@@ -77,19 +105,33 @@
           clipDir={app.clipDir}
           selected={i === app.selected}
           onselect={() => (app.selected = i)}
-          onopen={() => {
-            app.selected = i;
-            app.view = 'clip';
-          }}
-        />
+          onopen={() => { app.selected = i; app.view = 'clip'; }}
+          onfavorite={() => app.setFavorite(clip.id, !clip.favorite)}
+          onrename={(title) => app.rename(clip.id, title)}
+          ondelete={() => { app.selected = i; void app.remove(clip.id); }} />
       {/if}
     {/each}
   </div>
 {/if}
 
 <style>
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 16px; }
-  .preview { width: 100%; aspect-ratio: 16 / 10; border-radius: 8px; background: #000; object-fit: cover; }
-  .empty { display: grid; place-content: center; height: 60vh; text-align: center; gap: 6px; }
-  .hint { color: var(--dim); }
+  .head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px; }
+  .head h1 { margin: 0; font-size: 15px; font-weight: 650; }
+  .cnt { font-size: 11px; color: var(--faint); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; }
+  .preview { width: 100%; aspect-ratio: 16 / 10; border-radius: var(--r-md); background: var(--video-bg); object-fit: cover; }
+  .empty { display: grid; place-content: center; height: 60vh; text-align: center; gap: 6px; color: var(--dim); }
+  .empty .big { font-size: 15px; color: var(--text); margin: 0; }
+  .empty p { margin: 0; font-size: 12.5px; }
+  kbd {
+    padding: 2px 7px;
+    border-radius: var(--r-sm);
+    background: var(--raised);
+    border: 1px solid var(--line-strong);
+    border-bottom-width: 2px;
+    font: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text);
+  }
 </style>

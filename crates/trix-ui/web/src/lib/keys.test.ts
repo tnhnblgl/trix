@@ -152,6 +152,22 @@ describe('shouldHandleKey', () => {
     expect(shouldHandleKey(target({}), ' ', false)).toBe(true);
     expect(shouldHandleKey(null, 'Enter', false)).toBe(true);
   });
+
+  it('leaves Space and Enter with a card control even inside the grid', () => {
+    // `Grid.svelte` computes `ownsActivation` false for the overflow button
+    // and the rename box, so the grid must not claim their activation keys.
+    const dots = target({ tagName: 'BUTTON' });
+    expect(shouldHandleKey(dots, 'Enter', false)).toBe(false);
+    expect(shouldHandleKey(dots, ' ', false)).toBe(false);
+    // Arrows are never part of what a button owns.
+    expect(shouldHandleKey(dots, 'ArrowRight', false)).toBe(true);
+  });
+
+  it('still claims Space and Enter for a card the grid owns', () => {
+    const card = target({ tagName: 'BUTTON' });
+    expect(shouldHandleKey(card, 'Enter', true)).toBe(true);
+    expect(shouldHandleKey(card, ' ', true)).toBe(true);
+  });
 });
 
 describe('moveSelection', () => {
