@@ -19,6 +19,15 @@
   } = $props();
 
   let panel = $state<HTMLDivElement | null>(null);
+  /**
+   * Whether the press that is about to become a click started on the backdrop.
+   * A click fires on the nearest common ancestor of press and release, so a
+   * text selection dragged out of the panel and released over the scrim
+   * arrives here looking exactly like a backdrop click. The dialog body is one
+   * sentence with the clip's name bolded in the middle of it -- the sentence a
+   * user is most likely to select before deciding.
+   */
+  let pressedScrim = false;
   /** Whatever had focus before the dialog opened, so it can be given back. */
   let opener: Element | null = null;
   /** Instance-unique, so `aria-labelledby` names this dialog's own heading. */
@@ -93,7 +102,11 @@
 
   `e.target === e.currentTarget` is what keeps it to the backdrop: the panel
   is a child of this element, so every click inside the dialog bubbles here
-  too and only the ones that landed on the scrim itself count.
+  too and only the ones that landed on the scrim itself count. The press has
+  to have landed there as well -- see `pressedScrim` above -- because a click
+  fires on the common ancestor of press and release, and a dialog whose body
+  is a single selectable sentence should not close because a selection was
+  dragged past its edge.
 
   The ignore is for a pointer-only shortcut to an action that already has a
   key. Escape on the panel closes the dialog, and the effect above focuses
@@ -105,7 +118,8 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="scrim"
-  onclick={(e) => { if (e.target === e.currentTarget) onclose(); }}>
+  onpointerdown={(e) => { pressedScrim = e.target === e.currentTarget; }}
+  onclick={(e) => { if (pressedScrim && e.target === e.currentTarget) onclose(); }}>
   <div
     bind:this={panel}
     class="panel"
