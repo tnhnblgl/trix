@@ -34,8 +34,10 @@
   // `library::scan` adopts a bare .mp4 with `duration_ms: 0` -- which is what a
   // clip whose sidecar write failed looks like, and what any file dropped into
   // the clips folder by hand looks like. It plays, and the bar would even draw,
-  // but `clamp_range` refuses it ("this clip has no duration to trim"). Better
-  // not to offer the control at all than to hand back a refusal.
+  // but `clamp_range` refuses it ("this clip has no duration to trim"). So the
+  // trim chrome is withheld and the band is not: the player reads a real
+  // duration off the file, which is enough to seek against, while In, Out and
+  // Export would only earn that refusal.
   const canTrim = $derived(clipDurationMs > 0);
 
   // Why the current range cannot be exported, or null when it can. Nothing
