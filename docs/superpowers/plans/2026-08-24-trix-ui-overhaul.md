@@ -2211,8 +2211,8 @@ git commit -m "feat(ui): panelled settings with drawn controls"
 - Modify: `crates/trix-ui/tauri.conf.json`
 - Modify: `crates/trix-ui/capabilities/default.json`
 - Create: `crates/trix-ui/web/src/components/TitleBar.svelte`
-- Modify: `crates/trix-ui/web/src/App.svelte` (rewrite, 78 lines)
-- Modify: `crates/trix-ui/web/src/views/Rail.svelte` (rewrite, 71 lines)
+- Modify: `crates/trix-ui/web/src/App.svelte` (rewrite, 92 lines)
+- Modify: `crates/trix-ui/web/src/views/Rail.svelte` (rewrite, 45 lines)
 - Modify: `crates/trix-ui/web/src/lib/state.svelte.ts` (add `hotkey`, ~6 lines)
 
 **Interfaces:**
@@ -2296,7 +2296,6 @@ block and add:
 <script lang="ts">
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { app } from '../lib/state.svelte';
-  import Icon from './ui/Icon.svelte';
   import IconButton from './ui/IconButton.svelte';
 
   const win = getCurrentWindow();
