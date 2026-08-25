@@ -34,9 +34,12 @@
      * handles that cannot produce an export would be an offer the daemon does
      * not honour. Seeking has nothing to do with the daemon, so it stays.
      *
-     * `onchange` cannot fire while this is false, because the only two things
-     * that call it -- a drag on a handle and a key press on one -- are bound
-     * to elements that are not on the page.
+     * `onchange` cannot fire while this is false. Two of its three callers --
+     * a key press on a handle, and the handle's own grab -- are bound to
+     * elements that are not rendered. The third is `move`, which is bound to
+     * the band and so stays mounted; it drops a trim drag itself. `drag` is
+     * component state rather than the handle's, so without that it would
+     * survive the handles unmounting under it.
      */
     trimmable?: boolean;
     onchange: (inMs: number, outMs: number) => void;
@@ -65,6 +68,13 @@
 
   function move(e: PointerEvent) {
     if (!drag) return;
+    // A trim drag cannot outlive `trimmable`. Holding a handle and pressing an
+    // arrow steps to the next clip -- `grab` preventDefault()s, so focus never
+    // reaches the handle and the arrow belongs to the page -- and if that clip
+    // is one the daemon will not trim, the handles unmount mid-drag while
+    // `drag` still says `in`. Seeking is unaffected: it is the one drag this
+    // band keeps either way.
+    if (!trimmable && drag !== 'seek') { drag = null; return; }
     const ms = msAt(e.clientX);
     if (drag === 'seek') onseek(ms);
     // Snapped here, at the moment of the drag, for the same reason the old
