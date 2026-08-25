@@ -1,7 +1,6 @@
 <script lang="ts">
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { app } from '../lib/state.svelte';
-  import Icon from './ui/Icon.svelte';
   import IconButton from './ui/IconButton.svelte';
 
   const win = getCurrentWindow();
