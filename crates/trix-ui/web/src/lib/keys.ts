@@ -10,14 +10,18 @@ const TYPING_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT']);
  * the rule above. `INPUT` is a tag that means several unrelated controls, and
  * only some of them are a place a person types.
  *
- * This exists because of the trim bar. `TrimBar.svelte`'s In and Out handles
- * are `<input type="range">`, WebView2 focuses an input the moment it is
+ * This exists because of the trim bar. Its In and Out handles were
+ * `<input type="range">`, WebView2 focuses an input the moment it is
  * clicked, and a guard keyed on the tag alone therefore went dead for the rest
  * of the visit the first time anyone touched a handle: `o` no longer marked
  * the out point, Space no longer played, Escape no longer went back, Delete no
  * longer opened the confirm strip. Only Ctrl+E survived, because `ClipPage`
  * deliberately tests it above `shouldHandleKey`. Same shape of bug as the
  * `<button>` one that `ACTIVATABLE_TAGS` below exists for, on a different tag.
+ * The bar itself is gone -- rebuilt as `Timeline`'s handles, which are
+ * `role="slider"` elements rather than `<input>`s and so sit outside this
+ * function entirely -- but the rule stays for the next native range, checkbox
+ * or radio this app grows.
  *
  * The deliberate trade, chosen rather than inherited: `ArrowLeft`/`ArrowRight`
  * now belong to the page (prev/next clip) instead of nudging the focused

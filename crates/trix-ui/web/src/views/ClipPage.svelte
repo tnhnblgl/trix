@@ -1,10 +1,16 @@
 <script lang="ts">
   import { app, trimRangeError } from '../lib/state.svelte';
   import { clipUrl, counterLabel, formatBytes, formatDuration } from '../lib/clips';
+  import { formatClock } from '../lib/timeline';
   import { shouldHandleKey } from '../lib/keys';
-  import TrimBar from '../components/TrimBar.svelte';
+  import Timeline from '../components/Timeline.svelte';
+  import VideoPlayer from '../components/VideoPlayer.svelte';
+  import Button from '../components/ui/Button.svelte';
+  import IconButton from '../components/ui/IconButton.svelte';
+  import Icon from '../components/ui/Icon.svelte';
+  import Modal from '../components/ui/Modal.svelte';
 
-  let video = $state<HTMLVideoElement | null>(null);
+  let player = $state<VideoPlayer | null>(null);
   let renaming = $state(false);
   let draftTitle = $state('');
   let confirmingDelete = $state(false);
@@ -76,9 +82,7 @@
   });
 
   function playPause() {
-    if (!video) return;
-    if (video.paused) void video.play();
-    else video.pause();
+    player?.toggle();
   }
 
   async function exportTrim() {
@@ -110,20 +114,14 @@
       if (e.key === 'Escape') renaming = false;
       return;
     }
-    // Deleting is unrecoverable, so this is a safety gate: every button
-    // outside the strip (back, both steppers, Rename, Favorite, Show in
-    // Explorer, and the action-row Delete) carries disabled={confirmingDelete}
-    // in the markup below, so clicking or keyboard-activating any of them is
-    // already inert at the DOM level while the strip is open — a disabled
-    // button can't be focused or receive a click, native or synthetic.
-    // Escape has no button of its own, so this branch still owns it; every
-    // other key is dropped here too, since the app-level shortcuts below
-    // (arrows, space, delete) must not act on a different clip while the
-    // dialog is up.
-    if (confirmingDelete) {
-      if (e.key === 'Escape') confirmingDelete = false;
-      return;
-    }
+    // Every key is dropped here so the app-level shortcuts below (arrows,
+    // space, delete) cannot act on a different clip while the dialog is up.
+    // Escape is deliberately not handled: `Modal` closes itself, from a
+    // handler bound to its own panel, and stops the event there -- so a
+    // press inside the dialog never reaches this handler at all. This branch
+    // is the guard for a key press that arrives from somewhere else entirely
+    // while the dialog happens to be open.
+    if (confirmingDelete) return;
     // Ahead of the switch because it carries a modifier, which the switch's
     // plain `e.key` cases cannot express, and ahead of `shouldHandleKey` so
     // that the one shortcut with no button to fall back on cannot be taken
@@ -148,6 +146,17 @@
     if (e.key === 'e' && e.ctrlKey && !e.altKey) {
       e.preventDefault();
       void exportTrim();
+      return;
+    }
+    // A focused trim handle owns Left and Right -- In steps by keyframes,
+    // Out by a tenth of a second. `Timeline` stops those events itself, so
+    // this is belt and braces for the case where focus is on a handle but
+    // the event was retargeted; everywhere else the arrows still step clips.
+    if (
+      (e.key === 'ArrowLeft' || e.key === 'ArrowRight') &&
+      e.target instanceof Element &&
+      e.target.getAttribute('role') === 'slider'
+    ) {
       return;
     }
     // Every button on this page owns its own Space and Enter (WebView2
@@ -201,99 +210,134 @@
 
 {#if clip}
   <header class="head">
-    <button class="back" onclick={() => (app.view = 'grid')} disabled={confirmingDelete}>&lsaquo; Clips</button>
-    <span class="counter">{counterLabel(app.selected, app.clips.length)}</span>
+    <Button variant="ghost" size="sm" icon="chevron-left" onclick={() => (app.view = 'grid')}>
+      Clips
+    </Button>
+    <span class="spacer"></span>
+    <span class="counter tnum">{counterLabel(app.selected, app.clips.length)}</span>
+    <IconButton icon="chevron-left" label="Previous clip"
+      disabled={app.selected === 0} onclick={() => app.step(-1)} />
+    <IconButton icon="chevron-right" label="Next clip"
+      disabled={app.selected >= app.clips.length - 1} onclick={() => app.step(1)} />
   </header>
 
-  <div class="stage">
-    <button class="step" onclick={() => app.step(-1)} disabled={confirmingDelete || app.selected === 0}>&lsaquo;</button>
-    <!-- svelte-ignore a11y_media_has_caption -->
-    <video bind:this={video} src={clipUrl(app.clipDir, clip.id)} controls autoplay
-      ontimeupdate={() => { if (video) playheadMs = video.currentTime * 1000; }}></video>
-    <button class="step" onclick={() => app.step(1)} disabled={confirmingDelete || app.selected >= app.clips.length - 1}>&rsaquo;</button>
-  </div>
+  <VideoPlayer
+    bind:this={player}
+    src={clipUrl(app.clipDir, clip.id)}
+    ontime={(ms) => (playheadMs = ms)}>
+    {#snippet timeline()}
+      <!-- Hidden for a clip with no duration, which is the one case the
+           daemon will refuse: `library::scan` adopts a bare .mp4 with
+           `duration_ms: 0`, and `clamp_range` refuses it. Better not to offer
+           the control than to hand back a refusal. -->
+      {#if canTrim}
+        <Timeline
+          durationMs={clip.duration_ms}
+          {playheadMs}
+          {keyframes}
+          {inMs}
+          {outMs}
+          onchange={(i, o) => { inMs = i; outMs = o; }}
+          onseek={(ms) => player?.seekTo(ms)} />
+      {/if}
+    {/snippet}
+  </VideoPlayer>
 
-  <!--
-    Spec §6.2's slot, full width between the player and the metadata. A plain
-    bar with keyframe ticks rather than the filmstrip the spec sketches --
-    thumbnails would need a decode path the daemon does not have. Hidden for a
-    clip with no duration, which is the one case the daemon will refuse.
-  -->
   {#if canTrim}
-    <TrimBar
-      durationMs={clip.duration_ms}
-      {playheadMs}
-      {keyframes}
-      {inMs}
-      {outMs}
-      {rangeError}
-      onchange={(i, o) => { inMs = i; outMs = o; }}
-      onseek={(ms) => { if (video) video.currentTime = ms / 1000; }} />
+    <div class="trimrow">
+      <span class="txt tnum" class:bad={rangeError !== null}>
+        In <b>{formatClock(inMs)}</b> &middot; Out <b>{formatClock(outMs)}</b>
+        &middot; <b>{formatClock(Math.max(0, outMs - inMs))}</b> selected{#if rangeError}
+          &middot; {rangeError}{/if}
+      </span>
+      <span class="spacer"></span>
+      <!-- `title` carries the reason a disabled button is disabled, and the
+           readout to its left is the other half of the answer. Same rule as
+           `exportTrim`'s refusal, from the same function, so the greyed
+           button and Ctrl+E can never disagree about what is exportable. -->
+      <Button
+        variant="primary"
+        icon="scissors"
+        disabled={exporting || rangeError !== null}
+        title={rangeError ?? ''}
+        onclick={exportTrim}>
+        {exporting ? 'Exporting…' : 'Export trimmed'}
+      </Button>
+    </div>
   {/if}
 
-  <p class="meta">
+  <p class="meta tnum">
     {clip.width}x{clip.height} &middot; {clip.fps} fps &middot; {formatDuration(clip.duration_ms)} &middot;
     {formatBytes(clip.bytes)} &middot; {clip.encoder}{clip.has_audio ? ' + audio' : ''}
   </p>
 
   <div class="actions">
     {#if renaming}
-      <input bind:value={draftTitle} onkeydown={(e) => e.key === 'Enter' && commitRename()} />
-      <button onclick={commitRename}>Save</button>
-      <button onclick={() => (renaming = false)}>Cancel</button>
+      <input class="rn" bind:value={draftTitle}
+        onkeydown={(e) => e.key === 'Enter' && commitRename()} />
+      <Button variant="primary" size="sm" onclick={commitRename}>Save</Button>
+      <Button variant="ghost" size="sm" onclick={() => (renaming = false)}>Cancel</Button>
     {:else}
-      <span class="title">{clip.title}</span>
-      <button onclick={startRename} disabled={confirmingDelete}>Rename</button>
-      {#if canTrim}
-        <!-- `title` carries the reason: a disabled button with no explanation
-             is its own puzzle, and the readout under the bar is the other
-             half of the answer. -->
-        <button
-          onclick={exportTrim}
-          disabled={confirmingDelete || exporting || rangeError !== null}
-          title={rangeError ?? ''}>
-          {exporting ? 'Exporting…' : 'Export trimmed'}
-        </button>
-      {/if}
-      <button onclick={() => app.setFavorite(clip.id, !clip.favorite)} disabled={confirmingDelete}>
-        {clip.favorite ? 'Unfavorite' : 'Favorite'}
-      </button>
-      <button onclick={() => app.reveal(clip.id)} disabled={confirmingDelete}>Show in Explorer</button>
-      <button class="danger" onclick={() => (confirmingDelete = true)} disabled={confirmingDelete}>Delete</button>
+      <!-- Star and title in one box: two siblings each carrying
+           `margin-right: auto` would both claim the free space and push
+           twice. -->
+      <span class="titlebox">
+        {#if clip.favorite}<span class="star"><Icon name="star-filled" size={14} /></span>{/if}
+        <span class="title">{clip.title}</span>
+      </span>
+      <IconButton
+        icon={clip.favorite ? 'star-filled' : 'star'}
+        label={clip.favorite ? 'Unfavourite' : 'Favourite'}
+        active={clip.favorite}
+        onclick={() => app.setFavorite(clip.id, !clip.favorite)} />
+      <IconButton icon="pencil" label="Rename" onclick={startRename} />
+      <IconButton icon="folder" label="Show in Explorer" onclick={() => app.reveal(clip.id)} />
+      <span class="sep"></span>
+      <Button variant="danger" size="sm" icon="trash"
+        onclick={() => (confirmingDelete = true)}>Delete</Button>
     {/if}
   </div>
 
   {#if confirmingDelete}
-    <div class="confirm">
-      <p>Delete <strong>{clip.title}</strong>? The mp4, its metadata, and its thumbnail all go.</p>
-      <button
-        class="danger"
-        onclick={async () => {
-          confirmingDelete = false;
-          await app.remove(clip.id);
-        }}>Delete</button
-      >
-      <button onclick={() => (confirmingDelete = false)}>Keep</button>
-    </div>
+    <Modal title="Delete this clip?" onclose={() => (confirmingDelete = false)}>
+      {#snippet children()}
+        <p>Deleting <strong>{clip.title}</strong> removes the mp4, its metadata and its thumbnail. This cannot be undone.</p>
+      {/snippet}
+      {#snippet actions()}
+        <Button variant="ghost" size="sm" onclick={() => (confirmingDelete = false)}>Keep</Button>
+        <Button variant="danger" size="sm" icon="trash"
+          onclick={async () => { confirmingDelete = false; await app.remove(clip.id); }}>Delete</Button>
+      {/snippet}
+    </Modal>
   {/if}
 {/if}
 
 <style>
-  .head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
-  .back { background: none; border: 0; color: var(--dim); font: inherit; cursor: pointer; padding: 0; }
-  .back:disabled { opacity: 0.35; cursor: default; }
-  .counter { color: var(--dim); font-size: 13px; }
-  .stage { display: flex; align-items: center; gap: 10px; }
-  .stage video { flex: 1; width: 100%; max-height: 62vh; background: #000; border-radius: 10px; }
-  .step { background: none; border: 0; color: var(--text); font-size: 26px; cursor: pointer; padding: 0 6px; }
-  .step:disabled { opacity: 0.25; cursor: default; }
-  .meta { color: var(--dim); font-size: 12px; margin: 12px 0; }
-  .actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .actions .title { margin-right: auto; font-weight: 600; }
-  .actions button, .confirm button { padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font: inherit; cursor: pointer; }
-  .actions button:disabled { opacity: 0.4; cursor: default; }
-  .danger { border-color: var(--danger) !important; color: var(--danger) !important; }
-  .confirm { margin-top: 14px; padding: 12px 14px; border: 1px solid var(--danger); border-radius: 8px; display: flex; align-items: center; gap: 10px; }
-  .confirm p { margin: 0 auto 0 0; }
-  input { padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; }
+  .head { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; }
+  .spacer { margin-left: auto; }
+  .counter { color: var(--faint); font-size: 11px; margin-right: 4px; }
+
+  .trimrow { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+  .trimrow .txt { font-size: 11.5px; color: var(--dim); }
+  .trimrow .txt b { color: var(--text); font-weight: 600; }
+  /* An unexportable range reads as a sliver on the band and "0:00.0
+     selected" in the numbers, neither of which says what is wrong. This does. */
+  .trimrow .txt.bad, .trimrow .txt.bad b { color: var(--danger); }
+
+  .meta { color: var(--faint); font-size: 11px; margin: 14px 0 12px; }
+
+  .actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .titlebox { display: flex; align-items: center; gap: 6px; margin-right: auto; min-width: 0; }
+  .actions .title { font-weight: 650; font-size: 13.5px; }
+  .actions .star { color: var(--fav); display: flex; }
+  .sep { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
+  .rn {
+    flex: 1;
+    padding: 6px 10px;
+    border-radius: var(--r);
+    border: 1px solid var(--accent);
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+  }
 </style>
