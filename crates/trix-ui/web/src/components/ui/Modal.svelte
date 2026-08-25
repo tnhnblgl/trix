@@ -82,7 +82,30 @@
   `Menu` binds to its own element too. Focus is trapped inside the panel, so
   there is no keydown outside it to miss.
 -->
-<div class="scrim">
+<!--
+  A click on the backdrop closes the dialog: the near-universal dismiss
+  gesture, and without it the click was worse than inert. It moved focus off
+  the panel to `<body>`, and from there Escape no longer reached the
+  panel-bound handler above while `ClipPage` swallowed it with
+  `if (confirmingDelete) return;`, and Tab walked out of the dialog into the
+  page behind -- where Enter on "Next clip" retargeted the open delete dialog
+  at a different clip.
+
+  `e.target === e.currentTarget` is what keeps it to the backdrop: the panel
+  is a child of this element, so every click inside the dialog bubbles here
+  too and only the ones that landed on the scrim itself count.
+
+  The ignore is for a pointer-only shortcut to an action that already has a
+  key. Escape on the panel closes the dialog, and the effect above focuses
+  the panel when the dialog opens -- so the keyboard reaches this action
+  without the backdrop, and the backdrop needs neither a key handler nor a
+  role of its own.
+-->
+<!-- svelte-ignore a11y_click_events_have_key_events -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div
+  class="scrim"
+  onclick={(e) => { if (e.target === e.currentTarget) onclose(); }}>
   <div
     bind:this={panel}
     class="panel"
