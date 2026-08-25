@@ -107,12 +107,22 @@
     transition: color var(--t) var(--ease), background var(--t) var(--ease), border-color var(--t) var(--ease);
   }
   .arm .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); transition: background var(--t) var(--ease); }
+  /* The pill is the most-pressed control in the app, so it answers the
+     pointer in both of its states. Scoped off `.on` because the armed rule
+     below is only (0,2,0) specificity and a bare `.arm:hover` would outrank
+     it -- washing the green out from under the cursor. */
+  .arm:hover:not(:disabled):not(.on) {
+    background: var(--hover);
+    border-color: var(--line-hi);
+    color: var(--text);
+  }
   .arm.on {
     background: color-mix(in srgb, var(--live) 13%, transparent);
     border-color: color-mix(in srgb, var(--live) 50%, transparent);
     color: var(--live);
   }
   .arm.on .dot { background: var(--live); box-shadow: 0 0 0 3px color-mix(in srgb, var(--live) 20%, transparent); }
+  .arm.on:hover:not(:disabled) { background: color-mix(in srgb, var(--live) 20%, transparent); }
   .arm:disabled { opacity: 0.4; cursor: default; }
   .meter { width: 44px; height: 3px; border-radius: 2px; background: var(--line-strong); overflow: hidden; }
   .meter i { display: block; height: 100%; background: var(--live); transition: width 200ms linear; }
