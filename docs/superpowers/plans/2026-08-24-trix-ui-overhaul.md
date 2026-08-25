@@ -2245,12 +2245,13 @@ window object, leaving every other key as it is:
 
 - [ ] **Step 2: Grant the window-control permissions**
 
-`core:default` covers dragging but not the window buttons. Replace the
+`core:default` covers neither dragging nor the window buttons. Replace the
 `permissions` array in `crates/trix-ui/capabilities/default.json`:
 
 ```json
   "permissions": [
     "core:default",
+    "core:window:allow-start-dragging",
     "core:window:allow-minimize",
     "core:window:allow-maximize",
     "core:window:allow-unmaximize",
@@ -2263,6 +2264,21 @@ window object, leaving every other key as it is:
 **A missing window permission fails at runtime, not at compile time.** Both
 `npm run check` and `cargo build` will pass with a title bar whose buttons do
 nothing, so this is confirmed by clicking them in Step 8.
+
+`allow-start-dragging` is the one this plan originally got wrong, and it is
+worth understanding why rather than just copying the line. `core:window:default`
+grants 28 permissions; its list includes `allow-internal-toggle-maximize` and
+omits `allow-start-dragging`. So with `core:default` alone,
+`data-tauri-drag-region` still maximizes on double-click while dragging the
+same element does nothing at all -- two behaviours of one attribute, split by
+a table nothing in the API surface reveals. `data-tauri-drag-region` is not a
+webview-level behaviour that sidesteps permissions; it is sugar over
+`startDragging()`, an IPC call gated like any other.
+
+This is now covered by `src/lib/capabilities.test.ts`, which reads the shipped
+`TitleBar.svelte` and the shipped capability file and fails when a window call
+has no permission behind it. Extend `WINDOW_CALLS` in `src/lib/capabilities.ts`
+when a task starts calling a window API this table does not list yet.
 
 - [ ] **Step 3: Add the hotkey to app state**
 
@@ -2593,7 +2609,7 @@ is navigation only and narrows from 200px to 150px.
 - [ ] **Step 7: Verify the gates**
 
 Run: `npm run check && npx vitest run && npm run build`
-Expected: check 0 errors / 0 warnings; vitest 119 passing; build succeeds.
+Expected: check 0 errors / 0 warnings; vitest 131 passing (119 + 12 from the drag-permission gate); build succeeds.
 
 - [ ] **Step 8: Hand-check the window (no script covers this)**
 
@@ -2960,7 +2976,7 @@ Add to `crates/trix-ui/web/src/lib/keys.test.ts`, inside the existing
 - [ ] **Step 5: Verify the gates**
 
 Run: `npm run check && npx vitest run && npm run build`
-Expected: check 0 errors / 0 warnings; vitest 121 passing; build succeeds.
+Expected: check 0 errors / 0 warnings; vitest 133 passing; build succeeds.
 
 - [ ] **Step 6: Commit**
 
@@ -3503,7 +3519,7 @@ expected and Task 11 fixes it — **this task's gate is the unit tests only.**
 - [ ] **Step 8: Verify the unit gate**
 
 Run: `npx vitest run`
-Expected: 133 passing (121 + 12 new).
+Expected: 145 passing (133 + 12 new).
 
 - [ ] **Step 9: Commit**
 
@@ -3748,7 +3764,7 @@ Everything from `{#if clip}` to the end of the file:
 - [ ] **Step 5: Verify the gates**
 
 Run: `npm run check && npx vitest run && npm run build`
-Expected: check 0 errors / 0 warnings; vitest 133 passing; build succeeds.
+Expected: check 0 errors / 0 warnings; vitest 145 passing; build succeeds.
 
 The `TrimBar.svelte` import error from Task 10 is resolved by this task.
 
@@ -3944,7 +3960,7 @@ From `crates/trix-ui/web`:
 npm run check && npx vitest run && npm run build
 ```
 
-Expected: check 0 errors / 0 warnings; vitest 133 passing; build succeeds.
+Expected: check 0 errors / 0 warnings; vitest 145 passing; build succeeds.
 
 From the repo root:
 
