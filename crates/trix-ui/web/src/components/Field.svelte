@@ -149,6 +149,7 @@
       <KeycapInput
         combo={capture ?? String(config[field.key] ?? '')}
         capturing={capture !== null}
+        label="Clip hotkey"
         oncapture={oncapture}
         onstart={onstartcapture} />
       {#if capture && capture !== config[field.key]}

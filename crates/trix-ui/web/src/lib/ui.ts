@@ -76,6 +76,21 @@ export function resolveStepperInput(raw: string, current: number, min: number, m
 }
 
 /**
+ * `combo` (e.g. `alt+f10`) split into the keycaps a `KeycapInput` shows.
+ *
+ * Empty segments -- from an empty string, a leading `+`, a trailing `+`, or a
+ * doubled `+` -- are dropped rather than rendered as a blank keycap. Single
+ * characters are upper-cased (`e` -> `E`); everything else is title-cased
+ * (`f10` -> `F10`, `ctrl` -> `Ctrl`).
+ */
+export function formatCombo(combo: string): string[] {
+  return combo
+    .split('+')
+    .filter((p) => p.length > 0)
+    .map((p) => (p.length === 1 ? p.toUpperCase() : p[0].toUpperCase() + p.slice(1)));
+}
+
+/**
  * The next index in a list of `count`, clamped rather than wrapped.
  *
  * Same rule as `moveSelection` in `keys.ts`, and for a related reason: a menu

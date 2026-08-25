@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clamp, nextIndex, ratioToValue, resolveStepperInput, snapToStep, stepBy, valueToRatio } from './ui';
+import { clamp, formatCombo, nextIndex, ratioToValue, resolveStepperInput, snapToStep, stepBy, valueToRatio } from './ui';
 
 describe('clamp', () => {
   it('passes a value already inside the range through', () => {
@@ -100,6 +100,32 @@ describe('resolveStepperInput', () => {
 
   it('clamps a number below min up to min', () => {
     expect(resolveStepperInput('-10', 42, 0, 100)).toBe(0);
+  });
+});
+
+describe('formatCombo', () => {
+  it('title-cases each named key in a normal combo', () => {
+    expect(formatCombo('ctrl+shift+f10')).toEqual(['Ctrl', 'Shift', 'F10']);
+  });
+
+  it('upper-cases a single character', () => {
+    expect(formatCombo('e')).toEqual(['E']);
+  });
+
+  it('returns an empty list for an empty string', () => {
+    expect(formatCombo('')).toEqual([]);
+  });
+
+  it('drops the empty segment left by a trailing +', () => {
+    expect(formatCombo('ctrl+')).toEqual(['Ctrl']);
+  });
+
+  it('drops empty segments from a doubled + in the middle', () => {
+    expect(formatCombo('ctrl++shift')).toEqual(['Ctrl', 'Shift']);
+  });
+
+  it('drops the empty segment left by a leading +', () => {
+    expect(formatCombo('+shift')).toEqual(['Shift']);
   });
 });
 

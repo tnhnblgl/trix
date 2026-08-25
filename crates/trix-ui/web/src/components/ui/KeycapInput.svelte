@@ -1,32 +1,29 @@
 <script lang="ts">
+  import { formatCombo } from '../../lib/ui';
+
   let {
     combo,
     capturing,
+    label,
     oncapture,
     onstart,
   }: {
     /** The combination to show, e.g. `alt+f10`. */
     combo: string;
     capturing: boolean;
+    label: string;
     oncapture: (e: KeyboardEvent) => void;
     onstart: () => void;
   } = $props();
 
-  // `alt+f10` -> ['Alt', 'F10']. Single characters upper-case ('e' -> 'E');
-  // named keys title-case ('f10' -> 'F10', 'ctrl' -> 'Ctrl').
-  const caps = $derived(
-    combo
-      .split('+')
-      .filter((p) => p.length > 0)
-      .map((p) => (p.length === 1 ? p.toUpperCase() : p[0].toUpperCase() + p.slice(1))),
-  );
+  const caps = $derived(formatCombo(combo));
 </script>
 
 <button
   type="button"
   class="hk"
   class:capturing
-  aria-label="Clip hotkey"
+  aria-label={label}
   onclick={onstart}
   onkeydown={(e) => { if (capturing) oncapture(e); }}>
   {#if caps.length === 0}
