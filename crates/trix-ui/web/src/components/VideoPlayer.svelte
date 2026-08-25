@@ -60,7 +60,14 @@
     autoplay
     onplay={() => (playing = true)}
     onpause={() => (playing = false)}
-    onloadedmetadata={() => { if (video) durationMs = video.duration * 1000; }}
+    onloadedmetadata={() => {
+      // Guarded, not just truthy-checked: an unfinalized or fragmented mp4
+      // reports `Infinity`, which sails past every `durationMs <= 0` guard in
+      // timeline.ts and lands in `video.currentTime`, whose WebIDL setter
+      // rejects a non-finite double. That file is exactly the `duration_ms: 0`
+      // clip the seek-only band exists for.
+      if (video && Number.isFinite(video.duration)) durationMs = video.duration * 1000;
+    }}
     ontimeupdate={() => {
       if (!video) return;
       positionMs = video.currentTime * 1000;
