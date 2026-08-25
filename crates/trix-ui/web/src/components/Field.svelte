@@ -184,5 +184,9 @@
   }
   .path.off { opacity: 0.45; }
   .hint { font-size: 11.5px; color: var(--dim); }
-  .hint.ok { color: var(--live); }
+  /* --accent, not --live. Confirming the hotkey reached Trix past an overlay
+     is not Trix being live; the contract keeps --live to the arm control, its
+     dot, the buffer meter and the re-arm notice. FirstRun.svelte carries the
+     same line for the same sentence. */
+  .hint.ok { color: var(--accent); }
 </style>

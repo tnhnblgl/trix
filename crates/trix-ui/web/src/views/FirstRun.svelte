@@ -141,7 +141,11 @@
   h2 { font-size: 15px; font-weight: 650; margin: 14px 0 4px; }
   .step { color: var(--faint); margin: 0; font-size: 11px; }
   .hint { color: var(--dim); font-size: 11.5px; margin: 2px 0; }
-  .hint.ok { color: var(--live); }
+  /* --accent, not --live. This confirms the hotkey reached Trix past any
+     overlay, which is not Trix being live -- and the contract keeps --live
+     to the arm control, its dot, the buffer meter and the re-arm notice, so
+     that green means one thing wherever it appears. */
+  .hint.ok { color: var(--accent); }
   .pathrow { display: flex; align-items: center; gap: 8px; width: 100%; }
   .path {
     flex: 1;
