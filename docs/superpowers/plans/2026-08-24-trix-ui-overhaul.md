@@ -2945,33 +2945,45 @@ In `Grid.svelte`'s `onkeydown`, replace the `insideGrid` line with:
     // button and, while a card is being renamed, its text box. Without this,
     // Enter on a focused `⋯` would open the clip instead of its menu.
     const target = e.target instanceof Element ? e.target : null;
-    const ownedByCardControl = !!target?.closest('.dots, .rn');
+    const ownedByCardControl = !!target?.closest(CARD_CONTROL_SELECTOR);
     const insideGrid =
       !ownedByCardControl && !!gridEl && e.target instanceof Node && gridEl.contains(e.target);
 ```
 
 - [ ] **Step 4: Extend `keys.test.ts`**
 
-Add to `crates/trix-ui/web/src/lib/keys.test.ts`, inside the existing
-`describe('shouldHandleKey', ...)` block:
+**Do not test `shouldHandleKey` again here.** Both obvious cases -- a
+`BUTTON` with `ownsActivation` false, and one with it true -- are already
+pinned by the existing `card` and `arm` fixtures, which use the same
+`target({ tagName: 'BUTTON' })` input. A test written against them restates
+passing behaviour and cannot fail.
+
+The part that can actually break is the marker, because it lives in markup
+and `closest()` takes a string with no type behind it. Add to
+`crates/trix-ui/web/src/lib/keys.test.ts`, at the end of the file:
 
 ```ts
-  it('leaves Space and Enter with a card control even inside the grid', () => {
-    // `Grid.svelte` computes `ownsActivation` false for the overflow button
-    // and the rename box, so the grid must not claim their activation keys.
-    const dots = target({ tagName: 'BUTTON' });
-    expect(shouldHandleKey(dots, 'Enter', false)).toBe(false);
-    expect(shouldHandleKey(dots, ' ', false)).toBe(false);
-    // Arrows are never part of what a button owns.
-    expect(shouldHandleKey(dots, 'ArrowRight', false)).toBe(true);
+describe('the card/grid control marker', () => {
+  it('is carried by both of the card controls the grid must not claim', () => {
+    const marks = clipCardSource.split(CARD_CONTROL_ATTR).length - 1;
+    // The overflow button and the rename box. If a third control is ever added
+    // to a card, this number is a decision to make deliberately -- does the
+    // grid have to withhold Space and Enter from it too? -- not a nuisance to
+    // bump past.
+    expect(marks).toBe(2);
   });
 
-  it('still claims Space and Enter for a card the grid owns', () => {
-    const card = target({ tagName: 'BUTTON' });
-    expect(shouldHandleKey(card, 'Enter', true)).toBe(true);
-    expect(shouldHandleKey(card, ' ', true)).toBe(true);
+  it('is what the grid actually searches for', () => {
+    // Guards against someone re-inlining a literal selector here. The shared
+    // constant would go unused, and this project sets no `noUnusedLocals`, so
+    // nothing else would say a word.
+    expect(gridSource).toContain('CARD_CONTROL_SELECTOR');
   });
+});
 ```
+
+with `clipCardSource` and `gridSource` imported through Vite's `?raw` at the
+top of the file -- not `node:fs`, which would need `@types/node`.
 
 - [ ] **Step 5: Verify the gates**
 
