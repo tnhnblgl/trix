@@ -72,3 +72,36 @@ export function formatClock(ms: number): string {
   const seconds = totalSeconds % 60;
   return `${minutes}:${String(seconds).padStart(2, '0')}.${tenths}`;
 }
+
+/**
+ * How far an arrow key moves the playhead, and the finer grain Shift asks for.
+ *
+ * Five seconds is what Chromium's own control bar stepped by, and that bar is
+ * exactly what this timeline replaces -- a keyboard user who knew the old
+ * player should find the new one moves the same distance.
+ */
+export const SEEK_STEP_MS = 5000;
+export const SEEK_STEP_FINE_MS = 1000;
+
+/**
+ * Where the playhead lands for `key` pressed on the seek control, or `null`
+ * for a key the control does not own.
+ *
+ * `null` rather than `ms` so the caller can tell "nothing to do" from "stay
+ * where you are": the band must let an unclaimed key reach `ClipPage`, which
+ * steps between clips on the arrows and plays on Space. Returning the current
+ * position for every unrecognised key would swallow them all.
+ */
+export function seekKeyTarget(
+  ms: number,
+  durationMs: number,
+  key: string,
+  shift: boolean,
+): number | null {
+  const step = shift ? SEEK_STEP_FINE_MS : SEEK_STEP_MS;
+  if (key === 'ArrowRight') return clamp(ms + step, 0, durationMs);
+  if (key === 'ArrowLeft') return clamp(ms - step, 0, durationMs);
+  if (key === 'Home') return 0;
+  if (key === 'End') return durationMs;
+  return null;
+}

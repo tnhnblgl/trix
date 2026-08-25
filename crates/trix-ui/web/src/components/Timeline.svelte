@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { keyframeStep, msFromRatio, ratioFromMs, snapStart } from '../lib/timeline';
+  import { formatClock, keyframeStep, msFromRatio, ratioFromMs, seekKeyTarget, snapStart } from '../lib/timeline';
   import { clamp } from '../lib/ui';
 
   /**
@@ -92,13 +92,37 @@
     if (which === 'in') onchange(clamp(next, 0, durationMs), outMs);
     else onchange(inMs, clamp(next, 0, durationMs));
   }
+
+  /**
+   * Arrow keys on the focused playhead.
+   *
+   * Stopped as well as prevented, for the same reason `onHandleKey` does it:
+   * `ClipPage` listens on `<svelte:window>` and would otherwise also step to
+   * the next clip. Keys the playhead does not own come back null and are left
+   * completely alone, so Space still plays and Escape still leaves the page.
+   */
+  function onSeekKey(e: KeyboardEvent) {
+    const next = seekKeyTarget(playheadMs, durationMs, e.key, e.shiftKey);
+    if (next === null) return;
+    e.preventDefault();
+    e.stopPropagation();
+    onseek(next);
+  }
 </script>
 
-<!-- The band is a seek surface, not a control in its own right: it has no
-     state of its own to operate by keyboard, and every position it can reach
-     is reachable from the two handles below. Same call TrimBar.svelte made
-     for its track, and for the same reason -- a <button> here would take
-     Space and Enter away from play/pause the moment someone seeks. -->
+<!-- The band itself is a pointer convenience: press or drag anywhere along it
+     to seek. Everything it can reach is also reachable from the playhead
+     inside it, which is a real focusable slider, so the suppression below
+     costs a keyboard user nothing.
+
+     An earlier draft justified this by pointing at the two trim handles. That
+     was wrong -- they move `inMs` and `outMs` through `onchange` and never
+     touch the playhead. It came from TrimBar.svelte, whose version of the
+     claim ended "and the video's own controls": the clause that made it true,
+     and the one thing this design removes.
+
+     The band cannot take the slider role itself. `slider` is a leaf role and
+     this element contains three of them. -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   bind:this={band}
@@ -113,7 +137,17 @@
   <span class="scrim" style="left: 0; width: {pct(inMs)}"></span>
   <span class="scrim" style="left: {pct(outMs)}; right: 0"></span>
   <span class="range" style="left: {pct(inMs)}; width: {ratioFromMs(Math.max(0, outMs - inMs), durationMs) * 100}%"></span>
-  <span class="playhead" style="left: {pct(playheadMs)}"></span>
+  <span
+    class="playhead"
+    style="left: {pct(playheadMs)}"
+    role="slider"
+    tabindex="0"
+    aria-label="Playhead"
+    aria-valuemin={0}
+    aria-valuemax={durationMs}
+    aria-valuenow={playheadMs}
+    aria-valuetext={formatClock(playheadMs)}
+    onkeydown={onSeekKey}></span>
 
   <span
     class="handle"

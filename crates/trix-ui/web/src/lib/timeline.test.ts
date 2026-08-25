@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatClock, keyframeStep, msFromRatio, ratioFromMs, snapStart } from './timeline';
+import { SEEK_STEP_FINE_MS, SEEK_STEP_MS, formatClock, keyframeStep, msFromRatio, ratioFromMs, seekKeyTarget, snapStart } from './timeline';
 
 describe('snapStart', () => {
   it('moves back to the latest keyframe at or before the point', () => {
@@ -74,5 +74,49 @@ describe('formatClock', () => {
 
   it('never shows a negative time', () => {
     expect(formatClock(-20)).toBe('0:00.0');
+  });
+});
+
+describe('seekKeyTarget', () => {
+  it('moves the playhead by a whole step on the arrows', () => {
+    expect(seekKeyTarget(10_000, 60_000, 'ArrowRight', false)).toBe(10_000 + SEEK_STEP_MS);
+    expect(seekKeyTarget(10_000, 60_000, 'ArrowLeft', false)).toBe(10_000 - SEEK_STEP_MS);
+  });
+
+  it('takes a finer grain with Shift', () => {
+    expect(seekKeyTarget(10_000, 60_000, 'ArrowRight', true)).toBe(10_000 + SEEK_STEP_FINE_MS);
+    expect(seekKeyTarget(10_000, 60_000, 'ArrowLeft', true)).toBe(10_000 - SEEK_STEP_FINE_MS);
+  });
+
+  it('jumps to either end', () => {
+    expect(seekKeyTarget(10_000, 60_000, 'Home', false)).toBe(0);
+    expect(seekKeyTarget(10_000, 60_000, 'End', false)).toBe(60_000);
+  });
+
+  it('stops at the ends rather than running past them', () => {
+    expect(seekKeyTarget(1_000, 60_000, 'ArrowLeft', false)).toBe(0);
+    expect(seekKeyTarget(59_000, 60_000, 'ArrowRight', false)).toBe(60_000);
+  });
+
+  it('returns null for a key the band does not own, so the page still gets it', () => {
+    // ClipPage steps between clips on these. If this returned a number the
+    // band would swallow them and the page would lose its prev/next.
+    expect(seekKeyTarget(10_000, 60_000, 'ArrowUp', false)).toBeNull();
+    expect(seekKeyTarget(10_000, 60_000, ' ', false)).toBeNull();
+    expect(seekKeyTarget(10_000, 60_000, 'Escape', false)).toBeNull();
+  });
+
+  it('cannot move a clip with no duration off zero', () => {
+    expect(seekKeyTarget(0, 0, 'ArrowRight', false)).toBe(0);
+    expect(seekKeyTarget(0, 0, 'End', false)).toBe(0);
+  });
+});
+
+describe('ratioFromMs past the end', () => {
+  it('does not report more than the whole clip for a playhead past the end', () => {
+    // The mirror of msFromRatio's ratio > 1 case. A stale playhead arriving
+    // after a shorter clip loads would otherwise position the marker outside
+    // the band.
+    expect(ratioFromMs(90_000, 60_000)).toBe(1);
   });
 });
