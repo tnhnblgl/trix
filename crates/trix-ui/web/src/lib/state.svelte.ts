@@ -53,6 +53,12 @@ class AppState {
   /** Live ring seconds while armed, from `stats`; falls back to `status`. */
   ringUsed = $state(0);
   /**
+   * The saved clip hotkey, for the empty grid's "press X while you play".
+   * Free to keep: `onDaemonUp` already fetches the whole config to answer the
+   * first-run question, so this is one more field off a call already made.
+   */
+  hotkey = $state('alt+f10');
+  /**
    * Config keys accepted while armed whose new value only takes effect at
    * the next arm -- the "Re-arm to apply" banner's contents. Lives on `app`
    * rather than as component-local state in Settings.svelte: that page is
@@ -313,6 +319,7 @@ async function onDaemonUp() {
     // wizard mounts is still possible -- this narrows that window, it does
     // not close it.
     const config = await call<Record<string, unknown>>('config.get');
+    app.hotkey = String(config['clip_hotkey'] ?? 'alt+f10');
     if (config['config_file_exists'] === false) app.view = 'firstrun';
     // Reached only once config.get has actually resolved, which is what
     // makes "skip the automatic check when config.get fails" automatic --
@@ -363,6 +370,9 @@ export function wireDaemon() {
 
   onDaemonEvent((event) => {
     const data = event.data as Record<string, unknown>;
+    if (event.event === 'config_changed' && typeof event.data['clip_hotkey'] === 'string') {
+      app.hotkey = event.data['clip_hotkey'];
+    }
     switch (event.event) {
       case 'armed':
       case 'disarmed':

@@ -3,5 +3,13 @@
   "identifier": "default",
   "description": "Trix's main window. Everything it can do to the machine, it does through the control socket; these are only the core APIs the shell itself needs.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-minimize",
+    "core:window:allow-maximize",
+    "core:window:allow-unmaximize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-is-maximized",
+    "core:window:allow-close"
+  ]
 }

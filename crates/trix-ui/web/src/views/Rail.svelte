@@ -1,71 +1,45 @@
 <script lang="ts">
   import { app } from '../lib/state.svelte';
-
-  const pct = $derived(
-    app.status && app.status.ring_seconds_total > 0
-      ? Math.min(100, (app.ringUsed / app.status.ring_seconds_total) * 100)
-      : 0,
-  );
+  import Icon from '../components/ui/Icon.svelte';
 </script>
 
 <nav class="rail">
-  <div class="brand">Trix</div>
-
-  <button class="arm" class:armed={app.armed} disabled={!app.connected} onclick={() => app.toggleArm()}>
-    {app.armed ? 'Armed' : 'Arm'}
+  <button class="nav" class:on={app.view === 'grid'} onclick={() => (app.view = 'grid')}>
+    <Icon name="clips" size={15} />Clips
   </button>
-
-  <div class="ring" title="Replay buffer">
-    <div class="bar"><div class="fill" style="width: {pct}%"></div></div>
-    <span>{app.ringUsed.toFixed(0)}s / {app.status?.ring_seconds_total.toFixed(0) ?? '0'}s</span>
-  </div>
-
-  <div class="nav">
-    <button class:active={app.view === 'grid'} onclick={() => (app.view = 'grid')}>Clips</button>
-    <button class:active={app.view === 'settings'} onclick={() => (app.view = 'settings')}>Settings</button>
-  </div>
-
-  <div class="version">{app.status?.version ?? ''}</div>
+  <button class="nav" class:on={app.view === 'settings'} onclick={() => (app.view = 'settings')}>
+    <Icon name="settings" size={15} />Settings
+  </button>
+  <div class="ver tnum">{app.status?.version ?? ''}</div>
 </nav>
 
 <style>
   .rail {
-    width: 200px;
-    flex: 0 0 200px;
-    height: 100vh;
-    padding: 18px 14px;
-    background: var(--panel);
-    border-right: 1px solid var(--line);
+    width: 150px;
+    flex: 0 0 150px;
+    padding: 12px 10px;
     display: flex;
     flex-direction: column;
-    gap: 18px;
+    gap: 4px;
+    background: var(--surface);
+    border-right: 1px solid var(--line);
   }
-  .brand { font-weight: 600; letter-spacing: 0.04em; }
-  .arm {
-    padding: 10px;
-    border-radius: 8px;
-    border: 1px solid var(--line);
-    background: transparent;
-    color: var(--text);
-    font: inherit;
-    cursor: pointer;
-  }
-  .arm.armed { background: var(--accent); border-color: var(--accent); color: #06121f; font-weight: 600; }
-  .arm:disabled { opacity: 0.4; cursor: default; }
-  .ring { display: grid; gap: 6px; font-size: 12px; color: var(--dim); }
-  .bar { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
-  .fill { height: 100%; background: var(--accent); transition: width 200ms linear; }
-  .nav { display: grid; gap: 4px; }
-  .nav button {
-    text-align: left;
+  .nav {
+    display: flex;
+    align-items: center;
+    gap: 9px;
     padding: 8px 10px;
     border: 0;
-    border-radius: 6px;
+    border-radius: var(--r);
     background: transparent;
     color: var(--dim);
     font: inherit;
+    font-size: 12.5px;
+    text-align: left;
     cursor: pointer;
+    transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
   }
-  .nav button.active { background: var(--line); color: var(--text); }
-  .version { margin-top: auto; font-size: 11px; color: var(--dim); }
+  .nav:hover { background: var(--hover); color: var(--text); }
+  .nav.on { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--text); font-weight: 600; }
+  .ver { margin-top: auto; font-size: 10px; color: var(--faint); padding: 0 10px; }
 </style>
