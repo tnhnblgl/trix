@@ -125,12 +125,13 @@
     // Ahead of the switch because it carries a modifier, which the switch's
     // plain `e.key` cases cannot express, and ahead of `shouldHandleKey` so
     // that the one shortcut with no button to fall back on cannot be taken
-    // away by whatever happens to hold focus. It used to be load-bearing:
-    // `shouldHandleKey` dropped every key aimed at an <input>, the trim
-    // sliders included, so this was the only shortcut that survived a click on
-    // a handle. `keys.ts` now excludes non-typing input types, so the sliders
-    // no longer swallow anything and the rest of the switch works after a
-    // drag too — this stays above out of belt-and-braces, not necessity.
+    // away by whatever happens to hold focus. Nothing on the page takes it
+    // away today: the trim controls are `Timeline`'s `role="slider"` spans
+    // rather than `<input>`s, so `shouldHandleKey` has no reason to drop
+    // anything aimed at them, and a button only ever claims Space and Enter.
+    // So the position is insurance against a control this page grows later,
+    // not a live workaround — but it is the one shortcut that would have no
+    // way back if it were ever wrong, which is why it keeps the insurance.
     // The only other input on this page is the rename field, and the
     // `renaming` branch above has already returned by the time we get here.
     // `!e.altKey` is not defensive tidiness: Windows reports AltGr as
@@ -148,10 +149,12 @@
       void exportTrim();
       return;
     }
-    // A focused trim handle owns Left and Right -- In steps by keyframes,
-    // Out by a tenth of a second. `Timeline` stops those events itself, so
-    // this is belt and braces for the case where focus is on a handle but
-    // the event was retargeted; everywhere else the arrows still step clips.
+    // A focused slider owns Left and Right, and every control on `Timeline`
+    // that can hold focus is one: In steps by keyframes, Out by a tenth of a
+    // second, the playhead by five seconds -- one with Shift. `Timeline`
+    // stops those events itself, so this is belt and braces for the case
+    // where focus is on one of them but the event was retargeted; everywhere
+    // else the arrows still step clips.
     if (sliderOwnsKey(e.target, e.key)) return;
     // Every button on this page owns its own Space and Enter (WebView2
     // focuses a button when it is clicked, and a button's native activation

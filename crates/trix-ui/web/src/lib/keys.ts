@@ -19,9 +19,10 @@ const TYPING_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT']);
  * deliberately tests it above `shouldHandleKey`. Same shape of bug as the
  * `<button>` one that `ACTIVATABLE_TAGS` below exists for, on a different tag.
  * The bar itself is gone -- rebuilt as `Timeline`'s handles, which are
- * `role="slider"` elements rather than `<input>`s and so sit outside this
- * function entirely -- but the rule stays for the next native range, checkbox
- * or radio this app grows.
+ * `role="slider"` elements rather than `<input>`s, so this set never sees
+ * them: `inputType` reports null for anything that is not an INPUT, and
+ * `isTypingTarget` never reaches the lookup. The rule stays for the next
+ * native range, checkbox or radio this app grows.
  *
  * The trade this note used to describe has since been taken back, on purpose.
  * When the handles were `<input type="range">` with `step="1"`, an arrow moved
@@ -30,8 +31,13 @@ const TYPING_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT']);
  * the handles lost keyboard adjustment. `Timeline` then did exactly what this
  * note said to do if a control ever needed them back: gave them a step worth
  * pressing (keyframes for In, 100ms for Out, 5s for the playhead) and an
- * exception rather than a return to matching on the tag — `ClipPage` returns
- * early when the focused element has `role="slider"`. A focused handle or
+ * exception rather than a return to matching on the tag.
+ *
+ * The exception is `e.stopPropagation()`, called by `Timeline`'s own
+ * `onHandleKey` and `onSeekKey`. The focused control answers the arrow itself
+ * and the event never reaches the window, so `ClipPage`'s listener never sees
+ * it. `sliderOwnsKey` below is the backstop for one that arrives anyway,
+ * retargeted -- which is what `ClipPage` says of it too. A focused handle or
  * playhead owns its arrows again; everywhere else they still step clips.
  */
 const NON_TYPING_INPUT_TYPES = new Set(['range', 'checkbox', 'radio', 'button']);
