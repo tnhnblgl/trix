@@ -23,9 +23,15 @@ Every task's requirements implicitly include all of these.
   are expected, and are not a breach of this rule.
 - **No new, removed or renamed config key. No new daemon command.** Every `call(...)` used already exists.
 - **No user-facing sentence changes** except units moving out of help text onto a control (Task 7) and the empty-state hotkey (Task 9). Adding a sentence where there was none is not a *change*: new help text on a row this overhaul restructures is allowed, and Task 7's Settings lede ("Changes take effect on the next clip...") and the Version row's help line ship as written. Rewriting or deleting a sentence that already ships is still forbidden,
-  with one ruled exception: the arm control's label (`Armed` -> `ARMED`) and
+  with two ruled exceptions. The first is the arm control's label
+  (`Armed` -> `ARMED`) and
   its buffer readout (`12s / 60s` -> `12/60s`), reworded in Task 8 when the
-  control moved from the rail into the much narrower title bar. Both carve-outs
+  control moved from the rail into the much narrower title bar. The second is
+  the delete confirmation in Task 11, which the brief rewrote from "Delete
+  **{title}**? The mp4, its metadata, and its thumbnail all go." to "Deleting
+  **{title}** removes the mp4, its metadata and its thumbnail. This cannot be
+  undone." -- kept for the irreversibility warning a destructive confirm is
+  there to give. All the carve-outs
   above are the project owner's rulings, made on 2026-08-25 after review found
   the brief mandating copy that this line, as first written, forbade.
 - **Testing rule, deliberate:** this project has **zero component tests** and no DOM test library, and adding one would break the dependency rule. All 90 existing vitest cases test `lib/*.ts`. Therefore: **logic goes in `lib/`, and is tested there; `.svelte` files carry markup and styling only.** A reviewer must not treat "no test for this component" as a defect — they must treat "testable logic left inside a component" as one.
@@ -3867,6 +3873,45 @@ in between.
 git add crates/trix-ui/web/src/views/ClipPage.svelte
 git commit -m "feat(ui): clip page on the unified player"
 ```
+
+### Post-review amendments (2026-08-25)
+
+Task 11 shipped as written above and passed review with all eight
+preserve-verbatim items intact. Four things in the prescribed code were then
+found wrong, and the shipped code differs from the blocks above accordingly.
+Read these before treating any block above as current.
+
+1. **`<Timeline>` is no longer wrapped in `{#if canTrim}`.** The prescribed
+   gate was written when the band was trim-only; it is now also the seek bar,
+   and the page it replaced used `<video controls>`, so a clip with
+   `duration_ms: 0` lost scrubbing entirely. `VideoPlayer`'s `timeline` prop
+   is now `Snippet<[number]>` and passes the duration it reads from the file;
+   `Timeline` gained a `trimmable` prop that hides the handles and the range
+   fill. The `{#if canTrim}` around the `.trimrow` stays -- such a clip still
+   cannot be exported. Owner's ruling.
+
+2. **The `role="slider"` guard moved into `lib/keys.ts` as `sliderOwnsKey`.**
+   Prescribed inline, it was testable logic inside a `.svelte` file, which
+   this plan's own testing rule names as the defect a reviewer must flag. It
+   is also duck-typed rather than `instanceof Element`: the suite runs on
+   node, where `Element` is not defined, so the prescribed form type-checks
+   and then throws. `isTypingTarget` already had the precedent.
+
+3. **`Modal`'s `.scrim` closes the dialog on a backdrop click.** Left inert,
+   clicking it blurred the panel to `<body>`, after which Escape was swallowed
+   by `ClipPage`'s `confirmingDelete` guard and Tab walked into the page
+   behind, letting an open delete dialog silently retarget at another clip.
+   Owner's ruling. Note that a space-separated `svelte-ignore` with two codes
+   suppresses only the first, silently -- it needs two comments.
+
+4. **Five comments were corrected** (four in the fix pass, one after):
+   `keys.ts` credited `ClipPage`'s early return where the load-bearing
+   mechanism is `Timeline`'s `stopPropagation`; `keys.ts`'s "outside this
+   function" had no antecedent; `ClipPage`'s Ctrl+E note described `<input>`
+   sliders this page no longer has; its slider guard said "trim handle" where
+   the guard also matches the playhead; and `canTrim`'s note still said the
+   control is not offered at all. The AltGr/Turkish-Q paragraph and the Ctrl+E
+   condition were not touched.
 
 ---
 
