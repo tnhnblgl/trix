@@ -3902,7 +3902,10 @@ Read these before treating any block above as current.
    by `ClipPage`'s `confirmingDelete` guard and Tab walked into the page
    behind, letting an open delete dialog silently retarget at another clip.
    Owner's ruling. Note that a space-separated `svelte-ignore` with two codes
-   suppresses only the first, silently -- it needs two comments.
+   suppresses only the first, silently. Svelte parses the list with
+   `matchAll(/([\w$-]+)(,)?/gm)` and stops at the first item with no trailing
+   comma, so either two comments or one comma-separated comment works; a space
+   is the only separator that does not.
 
 4. **Five comments were corrected** (four in the fix pass, one after):
    `keys.ts` credited `ClipPage`'s early return where the load-bearing
