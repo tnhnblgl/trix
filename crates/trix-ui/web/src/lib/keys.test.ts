@@ -5,6 +5,7 @@ import clipCardSource from '../components/ClipCard.svelte?raw';
 import gridSource from '../views/Grid.svelte?raw';
 import {
   shouldHandleKey,
+  sliderOwnsKey,
   isActivatableTarget,
   isTypingTarget,
   moveSelection,
@@ -13,6 +14,14 @@ import {
 
 /** An event target, as much of one as a DOM-less suite needs. */
 const target = (props: Record<string, unknown>) => props as unknown as EventTarget;
+
+/**
+ * The same, for the one predicate that reads an attribute rather than a tag:
+ * an element whose `role` is whatever is asked for, and whose every other
+ * attribute is absent, exactly as `getAttribute` reports one.
+ */
+const roled = (role: string | null) =>
+  target({ getAttribute: (name: string) => (name === 'role' ? role : null) });
 
 describe('isTypingTarget', () => {
   it('keeps every key for text entry, arrows included', () => {
@@ -161,6 +170,41 @@ describe('shouldHandleKey', () => {
     // every window-level shortcut actually runs in.
     expect(shouldHandleKey(target({}), ' ', false)).toBe(true);
     expect(shouldHandleKey(null, 'Enter', false)).toBe(true);
+  });
+});
+
+describe('sliderOwnsKey', () => {
+  it('leaves Left and Right to a focused slider', () => {
+    // `Timeline`'s handles and its playhead are all `role="slider"`, and each
+    // steps by a unit worth pressing. `Timeline` stops those events itself, so
+    // this is the backstop for one that was retargeted on its way to the page.
+    expect(sliderOwnsKey(roled('slider'), 'ArrowLeft')).toBe(true);
+    expect(sliderOwnsKey(roled('slider'), 'ArrowRight')).toBe(true);
+  });
+
+  it('claims nothing from a target that is not a slider', () => {
+    // Every button on the clip page carries no role at all, and the arrows
+    // there still have to step to the next clip.
+    expect(sliderOwnsKey(roled('button'), 'ArrowLeft')).toBe(false);
+    expect(sliderOwnsKey(roled(null), 'ArrowRight')).toBe(false);
+    expect(sliderOwnsKey(target({ tagName: 'DIV' }), 'ArrowLeft')).toBe(false);
+  });
+
+  it('owns those two arrows and no other key', () => {
+    // Home and End are deliberately absent: `Timeline` handles them on a
+    // focused handle and stops them there, and the clip page's switch has no
+    // case for either, so widening this would take a key from nobody and give
+    // it to nobody.
+    for (const key of ['Home', 'End', 'ArrowUp', 'ArrowDown', ' ', 'Escape', 'Delete', 'i', 'o']) {
+      expect(sliderOwnsKey(roled('slider'), key)).toBe(false);
+    }
+  });
+
+  it('handles the no-target case', () => {
+    // `window` is the target when nothing is focused -- the case every clip
+    // page shortcut actually runs in.
+    expect(sliderOwnsKey(null, 'ArrowLeft')).toBe(false);
+    expect(sliderOwnsKey(target({}), 'ArrowRight')).toBe(false);
   });
 });
 

@@ -113,6 +113,34 @@ export function isActivatableTarget(target: EventTarget | null): boolean {
 }
 
 /**
+ * Whether a focused slider owns this key press, so a window-level handler must
+ * leave it alone.
+ *
+ * `Timeline`'s In handle, its Out handle and its playhead are all
+ * `role="slider"` elements, and each answers Left and Right with a step worth
+ * pressing -- keyframes for In, 100ms for Out, 5s for the playhead. `Timeline`
+ * calls `stopPropagation` on those presses, so this is not what normally keeps
+ * them off the page; it is the backstop for an event that reached the window
+ * anyway, retargeted.
+ *
+ * Left and Right only. Home and End move a handle too, but `Timeline` stops
+ * those the same way and no window-level handler in this app has a case for
+ * either, so widening the set would take a key from nobody.
+ *
+ * Duck-typed rather than `instanceof Element`, for the reason `isTypingTarget`
+ * gives: the suite runs on node, where `Element` is not defined at all, so that
+ * test would throw instead of returning false. `getAttribute` belongs to
+ * `Element` and to nothing else an event can be targeted at, so in the browser
+ * the two pick out the same objects.
+ */
+export function sliderOwnsKey(target: EventTarget | null, key: string): boolean {
+  if (key !== 'ArrowLeft' && key !== 'ArrowRight') return false;
+  if (!target) return false;
+  const el = target as { getAttribute?: (name: string) => string | null };
+  return typeof el.getAttribute === 'function' && el.getAttribute('role') === 'slider';
+}
+
+/**
  * Whether a window-level keydown handler should act on this key press,
  * rather than leaving it to the control the event landed on.
  *

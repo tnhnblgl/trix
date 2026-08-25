@@ -2,7 +2,7 @@
   import { app, trimRangeError } from '../lib/state.svelte';
   import { clipUrl, counterLabel, formatBytes, formatDuration } from '../lib/clips';
   import { formatClock } from '../lib/timeline';
-  import { shouldHandleKey } from '../lib/keys';
+  import { shouldHandleKey, sliderOwnsKey } from '../lib/keys';
   import Timeline from '../components/Timeline.svelte';
   import VideoPlayer from '../components/VideoPlayer.svelte';
   import Button from '../components/ui/Button.svelte';
@@ -152,13 +152,7 @@
     // Out by a tenth of a second. `Timeline` stops those events itself, so
     // this is belt and braces for the case where focus is on a handle but
     // the event was retargeted; everywhere else the arrows still step clips.
-    if (
-      (e.key === 'ArrowLeft' || e.key === 'ArrowRight') &&
-      e.target instanceof Element &&
-      e.target.getAttribute('role') === 'slider'
-    ) {
-      return;
-    }
+    if (sliderOwnsKey(e.target, e.key)) return;
     // Every button on this page owns its own Space and Enter (WebView2
     // focuses a button when it is clicked, and a button's native activation
     // must not be stolen by a window-level shortcut) — arrows are never part
