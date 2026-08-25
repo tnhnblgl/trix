@@ -3006,7 +3006,6 @@ git commit -m "feat(ui): clip cards with an overflow menu and a legible favourit
 - Create: `crates/trix-ui/web/src/lib/timeline.test.ts`
 - Create: `crates/trix-ui/web/src/components/Timeline.svelte`
 - Create: `crates/trix-ui/web/src/components/VideoPlayer.svelte`
-- Delete: `crates/trix-ui/web/src/components/TrimBar.svelte`
 
 **Interfaces:**
 - Consumes: `clamp` from `lib/ui.ts`, `IconButton`, `Icon`.
@@ -3519,19 +3518,22 @@ Expected: PASS — 4 suites, 12 tests.
 </style>
 ```
 
-- [ ] **Step 7: Delete the old trim bar**
+- [ ] **Step 7: Leave the old trim bar alone**
 
-```bash
-git rm crates/trix-ui/web/src/components/TrimBar.svelte
-```
+`TrimBar.svelte` stays exactly where it is, still imported and still working.
+It is deleted in Task 11, in the same commit that stops importing it.
 
-`npm run check` will now fail on `ClipPage.svelte`'s import of it. That is
-expected and Task 11 fixes it — **this task's gate is the unit tests only.**
+An earlier draft of this plan deleted it here and accepted a branch that did
+not compile until Task 11 landed — which contradicts this plan's own global
+constraint that every task ends green. Deferring the delete costs nothing but
+one task's worth of a dead file, and keeps every commit on the branch
+buildable and runnable. Ruled by the project owner on 2026-08-25.
 
-- [ ] **Step 8: Verify the unit gate**
+- [ ] **Step 8: Verify the gates**
 
-Run: `npx vitest run`
-Expected: 145 passing (133 + 12 new).
+Run: `npm run check && npx vitest run && npm run build`
+Expected: check 0 errors / 0 warnings; vitest 145 passing (133 + 12 new);
+build succeeds.
 
 - [ ] **Step 9: Commit**
 
@@ -3546,6 +3548,7 @@ git commit -m "feat(ui): one timeline for seeking and trimming"
 
 **Files:**
 - Modify: `crates/trix-ui/web/src/views/ClipPage.svelte` (markup and styles; most of the `<script>` is preserved)
+- Delete: `crates/trix-ui/web/src/components/TrimBar.svelte` (`git rm`, in the same commit that stops importing it — see Task 10 Step 7)
 
 **Interfaces:**
 - Consumes: `Timeline`, `VideoPlayer`, `Modal`, `Button`, `IconButton`, `Icon`, `formatClock`.
