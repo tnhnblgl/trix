@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 // dependency -- dev ones included.
 import capabilitiesJson from '../../../capabilities/default.json?raw';
 import titleBarSource from '../components/TitleBar.svelte?raw';
-import { calledWindowMethods, missingWindowPermissions } from './capabilities';
+import { calledWindowMethods, grantedButUncalled, missingWindowPermissions } from './capabilities';
 
 describe('calledWindowMethods', () => {
   it('finds calls made through a `win` binding', () => {
@@ -61,6 +61,18 @@ describe('missingWindowPermissions', () => {
   });
 });
 
+describe('grantedButUncalled', () => {
+  it('reports a window permission nothing calls', () => {
+    expect(grantedButUncalled('win.minimize()', ['core:window:allow-close'])).toEqual([
+      'core:window:allow-close',
+    ]);
+  });
+
+  it('ignores grants outside the window table, core:default among them', () => {
+    expect(grantedButUncalled('win.minimize()', ['core:default', 'shell:allow-open'])).toEqual([]);
+  });
+});
+
 /**
  * The gate itself, over the real files. `npm run check`, `npm run build` and
  * `cargo build` all pass with an ungranted window call in place -- it fails
@@ -79,5 +91,18 @@ describe('the shipped title bar against the shipped capabilities', () => {
 
   it('grants every window call the title bar makes', () => {
     expect(missingWindowPermissions(source, granted)).toEqual([]);
+  });
+
+  it('names every window permission granted that nothing calls', () => {
+    // Pinned, not asserted empty. These two are real excess: the maximize
+    // button calls `toggleMaximize` and neither `maximize` nor `unmaximize`
+    // is called anywhere. Naming them is what makes a third one a test
+    // failure instead of another line nobody reads -- an over-granted
+    // capability file breaks no build and no hand-check, it only widens what
+    // the shell can be asked to do.
+    expect(grantedButUncalled(source, granted)).toEqual([
+      'core:window:allow-maximize',
+      'core:window:allow-unmaximize',
+    ]);
   });
 });

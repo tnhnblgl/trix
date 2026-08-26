@@ -94,3 +94,22 @@ export function missingWindowPermissions(source: string, granted: string[]): str
     .map((call) => call.permission)
     .sort();
 }
+
+/**
+ * Window permissions `granted` carries that nothing in `source` calls.
+ *
+ * The other direction of the same check, and the one nothing else in the
+ * toolchain will ever mention: a control that is removed or rewritten leaves
+ * its grant behind, and an over-granted capability file fails no build, no
+ * test and no hand-check. It simply widens what a compromised webview could
+ * ask the shell to do, quietly, forever.
+ *
+ * Only permissions `WINDOW_CALLS` knows about are considered. `core:default`
+ * and any non-window grant are somebody else's business and are not reported
+ * as excess.
+ */
+export function grantedButUncalled(source: string, granted: string[]): string[] {
+  const needed = new Set(calledWindowMethods(source).map((name) => WINDOW_CALLS[name].permission));
+  const known = new Set(Object.values(WINDOW_CALLS).map((call) => call.permission));
+  return granted.filter((p) => known.has(p) && !needed.has(p)).sort();
+}
