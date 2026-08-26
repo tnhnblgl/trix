@@ -5,9 +5,11 @@
   --raised: #161a21;
   --overlay: #151920;
 
-  /* Lines. Two weights: `--line` edges a panel against the page,
-     `--line-soft` separates rows inside one panel and must not compete
-     with it. */
+  /* Lines. Two weights, quiet and quieter. `--line` edges a panel against the
+     page. `--line-soft` is for an edge that must not compete with what it
+     encloses: the row separators inside a panel (`.row + .row` below), and the
+     clip thumbnail's resting ring, which lies under a picture and brightens to
+     --line-strong the moment the card is hovered. */
   --line: rgba(255, 255, 255, 0.07);
   --line-soft: rgba(255, 255, 255, 0.05);
   --line-strong: rgba(255, 255, 255, 0.11);

@@ -64,8 +64,12 @@ function inputType(el: { tagName?: unknown; type?: unknown }): string | null {
  * Tags that answer Space and Enter themselves, and only those two.
  *
  * `BUTTON` is the one that actually bit, and the reason this is a second,
- * narrower set rather than folded into `TYPING_TAGS`. The rail's Arm control
- * is a real `<button>` and `Grid.svelte` listens on `<svelte:window>`, so
+ * narrower set rather than folded into `TYPING_TAGS`. The title bar's Arm
+ * control is a real `<button>` -- it sat in the rail when this bug was found
+ * and moved up in the UI overhaul, which only strengthens the reason: the
+ * title bar is outside `App.svelte`'s view switch entirely, so it is mounted
+ * alongside every screen there is -- and `Grid.svelte` listens on
+ * `<svelte:window>`, so
  * while the grid was mounted every key press in the app reached it: Space hit
  * the grid's `preventDefault` before the browser could activate the focused
  * button, which left a keyboard user unable to arm or disarm at all, and
@@ -105,10 +109,11 @@ export function isTypingTarget(target: EventTarget | null): boolean {
  * The input types are here for the same reason they are excluded from
  * `isTypingTarget`: once a checkbox stops being treated as text entry it stops
  * getting the free pass that kept Space with it, and Space is the one key a
- * checkbox genuinely owns. Nothing in the app hits that today (`Field.svelte`
- * holds the only checkbox and lives on the settings view, which mounts no
- * window-level key handler) — it is here so the next control that does is
- * right by default.
+ * checkbox genuinely owns. Nothing in the app hits that today — there is no
+ * native checkbox left anywhere in `src`. `Field.svelte`'s boolean rows render
+ * `Toggle`, which is a `<button role="switch">` and is therefore covered by
+ * `ACTIVATABLE_TAGS` instead. The rule is here so the next control that does
+ * use one is right by default.
  */
 export function isActivatableTarget(target: EventTarget | null): boolean {
   if (!target) return false;
@@ -188,9 +193,13 @@ export function shouldHandleKey(
 /**
  * Where the selection lands after an arrow key in a grid `columns` wide.
  *
- * Clamps rather than wraps, on purpose. The grid is newest-first and `Del` acts
- * on the selection, so wrapping from the newest clip to the oldest puts the
- * clip you care least about under a destructive key.
+ * Clamps rather than wraps, on purpose. The grid is newest-first, and the
+ * selection it moves is the same one the clip page then acts on -- Enter opens
+ * it and `ClipPage`'s `Delete` deletes it. (The grid itself has never handled
+ * Delete, at any point in this project's history; only `ClipPage` does.) So
+ * wrapping from the newest clip to the oldest would leave the clip you care
+ * least about selected after one arrow key too many, and one screen away from
+ * a destructive one.
  */
 export function moveSelection(
   current: number,

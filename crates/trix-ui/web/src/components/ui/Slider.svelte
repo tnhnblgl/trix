@@ -38,8 +38,9 @@
   function onpointerdown(e: PointerEvent) {
     if (disabled) return;
     // Capture on the track, so a drag that leaves the element -- which is
-    // most of them, the control is 4px tall -- keeps delivering moves here
-    // instead of to whatever is underneath the pointer.
+    // most of them, the hit area is 18px tall and the line the eye follows is
+    // the 4px `.track` inside it -- keeps delivering moves here instead of to
+    // whatever is underneath the pointer.
     e.preventDefault();
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     dragging = true;
