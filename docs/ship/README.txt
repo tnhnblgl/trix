@@ -1,4 +1,4 @@
-Trix 0.7.0
+Trix 0.8.0
 ==========
 
 A clip recorder for Windows, for people whose PC cannot spare the frames.
@@ -6,6 +6,41 @@ Trix keeps the last few seconds of your screen in memory and writes them to
 a file when you press a key. Capture and encoding run on the GPU, so the
 cost to your game is close to nothing, and the app itself stays out of the
 way while you play.
+
+
+NEW IN 0.8.0
+------------
+
+Trix has been redrawn. Every control in the app -- the switches, the
+sliders, the dropdowns, the boxes you type numbers into -- used to be
+whatever the browser engine inside Trix decided to draw, and none of
+them answered the pointer. They are Trix's own now: they light up as
+the pointer crosses them, press down when you click, and show a ring
+when you reach them from the keyboard.
+
+The grey Windows title bar is gone. Trix draws its own, and the Start
+control sits in it, so whether Trix is recording is on screen no
+matter which page you are looking at.
+
+Settings is grouped into panels instead of sixteen rows in one long
+scroll, and the unit of a setting -- seconds, fps, kbps -- now sits on
+the box you type into rather than in a line of help text underneath.
+
+Clips look like clips. A card shows the picture, how long it runs,
+what it is called, and its size, resolution and frame rate; a star
+marks the ones you keep. Favourite, Rename and Delete have moved into
+a small menu on the card, so renaming a clip no longer means opening
+it first.
+
+The clip page has one timeline instead of two. The scrubber you drag
+to watch and the In and Out handles you drag to trim are now the same
+track, so the point you are looking at and the point you are cutting
+at are the same point. I and O still set the two trim points, and the
+arrow keys still move the playhead.
+
+Nothing about recording changed, and nothing about your clips or your
+settings did. Same hotkey, same files, same folders -- this release
+changes what Trix looks like, not what it does.
 
 
 NEW IN 0.7.0
@@ -56,7 +91,7 @@ at all. Both are fixed, and links in the app now open in your browser.
 
 PLEASE NOTE: this is a version you have to install by hand, once. Every
 release up to and including 0.5.2 carries the broken updater inside it, so
-none of them can fetch this one -- that is the bug. Download 0.7.0 from the
+none of them can fetch this one -- that is the bug. Download 0.8.0 from the
 releases page and unzip it over your old folder. Your settings and your
 clips live elsewhere and are not touched. From 0.5.3 onward the in-app
 updater works normally again.
@@ -82,7 +117,7 @@ component that was never included in the build, and that ended the app on the
 spot. It is included now.
 
 If you are on 0.4.0 or 0.5.0, Trix cannot update itself out of this, because
-the update check is the thing that closed it. Download 0.7.0 by hand from the
+the update check is the thing that closed it. Download 0.8.0 by hand from the
 releases page and unzip it over your old folder. Your settings and your clips
 are somewhere else and are not touched.
 
@@ -226,6 +261,11 @@ KNOWN LIMITS IN THIS RELEASE
     app is what starts it. If you would rather have it ready at login
     without opening the app, turn on "Start with Windows" in Settings --
     that starts the tray recorder, not the window.
+
+  * Messages from Trix -- a clip saved, an export finished, something
+    that went wrong -- are not drawn over a video playing fullscreen.
+    They clear themselves after a few seconds, so one raised while you
+    are fullscreen is missed rather than delayed.
 
 
 LICENSE
