@@ -190,6 +190,7 @@
       aria-valuemin={0}
       aria-valuemax={durationMs}
       aria-valuenow={inMs}
+      aria-valuetext={formatClock(inMs)}
       onpointerdown={(e) => grab('in', e)}
       onpointermove={move}
       onpointerup={drop}
@@ -205,6 +206,7 @@
       aria-valuemin={0}
       aria-valuemax={durationMs}
       aria-valuenow={outMs}
+      aria-valuetext={formatClock(outMs)}
       onpointerdown={(e) => grab('out', e)}
       onpointermove={move}
       onpointerup={drop}

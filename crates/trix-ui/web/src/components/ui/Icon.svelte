@@ -2,8 +2,11 @@
   import { ICONS, type IconName } from '../../lib/icons';
 
   /**
-   * Every icon in this app is decorative: it sits beside a text label, or
-   * inside a control that carries its own `aria-label`. So this is
+   * Every icon in this app is decorative: something outside it always carries
+   * the name. Either it sits beside a text label, or it sits inside an
+   * element that is named itself -- a control with an `aria-label`, or the
+   * `role="img"` span `ClipCard` wraps its favourite marker in, which is the
+   * one place an icon is the whole of the information. So this is
    * `aria-hidden` unconditionally and takes no title -- an icon that
    * announced itself would double up every button in the app.
    */

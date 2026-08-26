@@ -40,7 +40,11 @@
 </script>
 
 <div class="card" class:selected class:menuOpen>
-  <button class="thumb" onclick={onselect} ondblclick={onopen}>
+  <!-- `aria-label`, because nothing inside this button can name it: the
+       thumbnail is `alt=""` (it is the clip, not a description of it) and the
+       only other child is the duration badge, so without this the card
+       announced itself as "0:12, button". -->
+  <button class="thumb" aria-label={clip.title} onclick={onselect} ondblclick={onopen}>
     <img src={thumbUrl(clipDir, clip.id)} alt="" loading="lazy" />
     <span class="len tnum">{formatDuration(clip.duration_ms)}</span>
   </button>
@@ -49,9 +53,14 @@
     <div class="line">
       <!-- The star lives here, not on the thumbnail. Over a bright frame a
            bare glyph is invisible; on the app's own surface it never is. It
-           also sits on the same line as the menu item that toggles it. -->
+           also sits on the same line as the menu item that toggles it.
+
+           `role="img"` with a name, because this is the only place kept state
+           is expressed on a card -- the overflow menu that toggles it is not
+           read until it is opened, so a colour was the whole of it. The Icon
+           inside stays `aria-hidden`; the span is what carries the name. -->
       {#if clip.favorite}
-        <span class="star"><Icon name="star-filled" size={13} /></span>
+        <span class="star" role="img" aria-label="Favourited"><Icon name="star-filled" size={13} /></span>
       {/if}
 
       {#if renaming}
