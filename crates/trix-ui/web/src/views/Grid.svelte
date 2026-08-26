@@ -3,6 +3,15 @@
   import { app } from '../lib/state.svelte';
   import { shouldHandleKey, moveSelection, CARD_CONTROL_SELECTOR } from '../lib/keys';
   import { clipUrl, formatBytes } from '../lib/clips';
+  import { formatCombo } from '../lib/ui';
+
+  /**
+   * The saved hotkey as keycaps, through the same `formatCombo` `KeycapInput`
+   * uses. The empty state printed the raw config string, so this page said
+   * `alt+f10` while the Settings row two clicks away said `Alt` + `F10` for
+   * the same setting.
+   */
+  const hotkeyCaps = $derived(formatCombo(app.hotkey));
 
   /** Kept in sync with the CSS grid below so ArrowDown moves one visual row. */
   let columns = $state(4);
@@ -91,7 +100,22 @@
 {#if app.clips.length === 0}
   <div class="empty">
     <p class="big">No clips yet.</p>
-    <p>Arm Trix, then press <kbd>{app.hotkey}</kbd> while you play.</p>
+    <p>
+      Arm Trix, then press
+      {#if hotkeyCaps.length > 0}
+        <span class="combo">
+          {#each hotkeyCaps as cap, i (i)}
+            {#if i > 0}<span class="plus">+</span>{/if}
+            <kbd>{cap}</kbd>
+          {/each}
+        </span>
+      {:else}
+        <!-- A combo that formats to nothing would leave a hole in the middle
+             of the sentence. The words the base shipped go there instead. -->
+        your clip hotkey
+      {/if}
+      while you play.
+    </p>
   </div>
 {:else}
   <div class="grid" bind:this={gridEl}>
@@ -123,6 +147,10 @@
   .empty { display: grid; place-content: center; height: 60vh; text-align: center; gap: 6px; color: var(--dim); }
   .empty .big { font-size: 15px; color: var(--text); margin: 0; }
   .empty p { margin: 0; font-size: 12.5px; }
+  /* Same 5px gap and same faint `+` KeycapInput uses, so the two renderings
+     of one hotkey read as one thing. */
+  .combo { display: inline-flex; align-items: center; gap: 5px; vertical-align: middle; }
+  .plus { color: var(--faint); font-size: 11px; }
   kbd {
     padding: 2px 7px;
     border-radius: var(--r-sm);
