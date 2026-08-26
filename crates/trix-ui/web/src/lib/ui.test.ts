@@ -19,7 +19,9 @@ describe('snapToStep', () => {
     expect(snapToStep(44, 20, 15)).toBe(50);
   });
 
-  it('leaves a value alone when the step is 0 or 1', () => {
+  it('keeps a whole number whole at step 1, and passes anything through at step 0', () => {
+    // Step 1 is a real grid -- the whole numbers -- so 37 comes back because
+    // it is already on it, not because the function declined to snap.
     expect(snapToStep(37, 0, 1)).toBe(37);
     expect(snapToStep(37, 0, 0)).toBe(37);
   });
@@ -40,6 +42,15 @@ describe('ratioToValue', () => {
   it('clamps a pointer dragged outside the track', () => {
     expect(ratioToValue(-0.4, 0, 100, 1)).toBe(0);
     expect(ratioToValue(1.8, 0, 100, 1)).toBe(100);
+  });
+
+  it('returns a whole number at the default step of 1', () => {
+    // Both volume sliders run 0..100 at the default step, and the value goes
+    // straight into a 44px readout and then to `config.set`. A pointer 40px
+    // along a 186px track used to come back as 21.50537634408602.
+    const v = ratioToValue(40 / 186, 0, 100, 1);
+    expect(Number.isInteger(v)).toBe(true);
+    expect(v).toBe(22);
   });
 });
 

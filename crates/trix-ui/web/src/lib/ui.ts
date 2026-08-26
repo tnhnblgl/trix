@@ -19,9 +19,16 @@ export function clamp(value: number, min: number, max: number): number {
  * Measured from `min` rather than from zero: a control running 20..80 in
  * fifteens can sit on 20, 35, 50, 65 and 80, and rounding from zero would
  * offer 30, 45 and 60 instead -- positions the control cannot actually hold.
+ *
+ * Only a step of zero or less is a no-op, matching `stepBy` below. A step of
+ * 1 is a real grid -- the whole numbers -- and is the default both `Slider`
+ * and `Stepper` take. Treating it as "no grid" is what let a pointer 40px
+ * along a 186px volume track report 21.50537634408602: into a 44px readout,
+ * and on release into `config.set` for a key the daemon has always been given
+ * as an integer.
  */
 export function snapToStep(value: number, min: number, step: number): number {
-  if (step <= 1) return value;
+  if (step <= 0) return value;
   return min + Math.round((value - min) / step) * step;
 }
 
