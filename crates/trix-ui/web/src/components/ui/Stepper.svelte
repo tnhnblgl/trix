@@ -106,6 +106,11 @@
     text-align: center;
   }
   .v:focus-visible { outline: none; }
-  .st:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+  /* `:has(:focus-visible)`, not `:focus-within`: the latter is `:focus`-based,
+     so pressing + or - left the whole box ringed until focus went somewhere
+     else -- the exact thing app.css's focus rule exists to avoid ("so clicking
+     a control does not leave a ring"). The text box still rings on click,
+     because a text field always matches `:focus-visible` when focused. */
+  .st:has(:focus-visible) { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
   .u { color: var(--faint); font-size: 11px; padding-right: 8px; }
 </style>
