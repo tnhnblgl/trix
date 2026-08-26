@@ -1,10 +1,34 @@
-# Discord Rich Presence — feasibility note
+# Discord Rich Presence — feasibility note, and what was built from it
 
-**Status: not decided, not started.** This is an assessment written 2026-08-22
-in answer to "how hard is it to add Discord RPC like Medal does?". It is
-deliberately **not** in `docs/superpowers/specs/` — nothing here has been
-brainstormed or approved, and a plan must not be generated from it as though
-it were a spec. Two open decisions at the bottom have to be settled first.
+**Status: decided and built, 2026-08-26. One human-only step outstanding.**
+The body below is the original assessment of 2026-08-22, kept as written
+because its protocol notes and its costing are what the build was made
+against. What changed is at the top and the bottom: [Decided](#decided) states
+the calls, and [What was built](#what-was-built) states what exists and what
+still has to be done by hand in Discord's developer portal.
+
+## Decided
+
+Both open decisions at the bottom of this note were settled by the project
+owner on 2026-08-26:
+
+1. **Static, not game-aware.** No foreground-process detection. The card says
+   the same thing whatever is running.
+2. **Yes, the application is being registered.** The id is the outstanding
+   step.
+
+Two further calls, which this note had not asked but the build needed:
+
+3. **Live whenever the daemon is running**, not only while armed. The timer is
+   therefore "how long Trix has been up", not "how long capture has been
+   armed".
+4. **On by default** (`discord_presence = true`), against this note's own
+   recommendation. The reasoning that overrode it: a presence is visible the
+   instant it happens and reversible in two clicks, so its mistake is nothing
+   like the library ceiling's silent, permanent one. `crates/trix-core/src/config.rs`
+   carries that argument beside the field.
+
+The original assessment follows unchanged.
 
 ## What the feature is
 
@@ -131,3 +155,61 @@ visibility is Medal's business model; it is not ours.
   arm / disarm / clip transitions)
 - Modify: `crates/trix-ui/web/src/views/Settings.svelte` (toggle row)
 - Game-aware version only: foreground detection, probably its own module
+
+---
+
+## What was built
+
+Built 2026-08-26 on `feat/discord-presence`.
+
+### The card
+
+```
+Playing                            <- Discord's own label
+Clipping with Trix                 <- the application's name in the portal
+Without thinking FPS and Memory    <- activity `details`
+[logo] 3:48                        <- `assets.large_image` + `timestamps.start`
+[ Get Trix ]                       <- `buttons[0]`, to /releases/latest
+```
+
+**This corrects §2 above.** That section assumed the header would read
+"Playing Trix" with "Clipping with Trix" underneath as `details`. The bold line
+is the *application's* name, and Discord ignores a `name` sent in the activity
+— so the requested wording is obtained by **naming the application "Clipping
+with Trix"**, and `details` carries the tagline instead. There is no `state`
+line; the card is two lines, art, clock and one button.
+
+### Files
+
+- **Created** `crates/trix-daemon/src/presence.rs` — framing, handshake,
+  `SET_ACTIVITY`, the reconnect loop, and 10 tests. Hand-rolled as recommended;
+  no new dependency. `Session` is a trait so the state machine is testable
+  without a running Discord.
+- **Modified** `crates/trix-daemon/src/lib.rs` — `pub mod presence;`
+- **Modified** `crates/trix-core/src/config.rs` — `discord_presence: bool`,
+  `#[serde(default = "default_true")]`
+- **Modified** `crates/trix-daemon/src/state.rs` — `Daemon::discord_presence_enabled`
+- **Modified** `crates/trix-daemon/src/main.rs` — spawns the thread beside the
+  stats thread
+- **Modified** `crates/trix-ui/web/src/lib/settings.ts` (+ its test) — the
+  toggle row, Settings → Trix. `Settings.svelte` needed no change: it iterates
+  `FIELDS`, and `bool` was already a kind it renders.
+
+`state.rs`'s arm/disarm transitions are **not** used, contrary to the plan in
+"Files a build would touch". Presence follows "the daemon is up", so there is
+no transition to hang it off; the thread polls `discord_presence` every 250 ms
+and that poll is the entire wiring between the settings toggle and the card.
+
+### Still to do by hand — nobody else can
+
+`presence::CLIENT_ID` is `""`, and while it is empty the thread is never
+spawned at all (logged once at startup). To finish:
+
+1. Create an application at <https://discord.com/developers/applications>.
+2. **Name it exactly `Clipping with Trix`** — this is the bold line of the
+   card, and it is the only way to set it.
+3. Rich Presence → Art Assets → upload `assets/logo.png` **under the key
+   `logo`**. Set it as the application icon too, as a fallback.
+4. Copy the Application ID into `presence::CLIENT_ID`.
+
+Nothing else is outstanding. Rebuilding after step 4 is the whole deployment.

@@ -60,6 +60,7 @@ export const FIELDS: Field[] = [
   { key: 'clip_sound', label: 'Clip sound', kind: 'bool', section: 'Trix', help: 'Plays a sound when a clip is saved, even when the Trix window is closed.' },
   { key: 'clip_sound_path', label: 'Sound file', kind: 'sound', section: 'Trix', help: 'Your own sound, or Trix\'s built-in one. mp3, wav, m4a and anything else Windows can play. Only the first 10 seconds are used.' },
   { key: 'autostart', label: 'Start with Windows', kind: 'bool', section: 'Trix', help: 'Off by default. Writes the registry Run entry, which is the source of truth.' },
+  { key: 'discord_presence', label: 'Discord presence', kind: 'bool', section: 'Trix', help: 'Shows "Clipping with Trix" on your Discord profile, with a button your friends can use to get it, for as long as Trix is running. Talks only to the Discord app on this PC and sends nothing about you.' },
   { key: 'stats_seconds', label: 'Stats interval', kind: 'number', section: 'Trix', ...span('stats_seconds'), help: 'Seconds between performance reports. 0 turns them off.' },
 
   { key: 'check_for_updates', label: 'Check for updates', kind: 'bool', section: 'Updates', help: 'Asks github.com once per launch whether a newer Trix exists. Sends nothing about you. Updates are never installed without you clicking.' },

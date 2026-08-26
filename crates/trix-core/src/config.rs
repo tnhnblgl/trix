@@ -109,6 +109,24 @@ pub struct Config {
     /// converted once when it is chosen and the converted copy is what plays.
     /// This value exists to be shown in settings and to be reconverted from.
     pub clip_sound_path: String,
+    /// Whether the daemon publishes a Discord Rich Presence while it runs.
+    ///
+    /// On whenever the daemon is up rather than only while armed: the card
+    /// says Trix is what the user clips with, and that is true from the moment
+    /// Trix is running.
+    ///
+    /// Defaulted `true`, unlike `max_library_gb`, and the asymmetry is
+    /// deliberate. A presence is visible the instant it happens — it is a card
+    /// on the user's own profile — reversible from Settings in two clicks, and
+    /// it costs nothing if they never notice it. The library ceiling was
+    /// opt-in because *its* mistake was silent and permanent.
+    ///
+    /// Not telemetry, and it does not become telemetry by being on: presence is
+    /// local IPC to the user's own Discord client (see
+    /// `trix-daemon/src/presence.rs`), so nothing about them leaves the
+    /// machine, and with Discord shut it does nothing at all.
+    #[serde(default = "default_true")]
+    pub discord_presence: bool,
 }
 
 impl Default for Config {
@@ -131,6 +149,7 @@ impl Default for Config {
             check_for_updates: true,
             clip_sound: true,
             clip_sound_path: String::new(),
+            discord_presence: true,
         }
     }
 }

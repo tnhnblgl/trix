@@ -17,7 +17,7 @@ use std::sync::{Arc, OnceLock};
 use trix_core::config::Config;
 use trix_core::control;
 use trix_daemon::stats::{STATS_POLL, spawn_stats_thread};
-use trix_daemon::{pipe, state::Daemon, window};
+use trix_daemon::{pipe, presence, state::Daemon, window};
 
 /// Mirrors `trix-cli`'s `tracing_subscriber` setup (`crates/trix-cli/src/main.rs`):
 /// `trix=info` by default, `trix=debug` under `-v`/`--verbose`, `RUST_LOG`
@@ -201,6 +201,15 @@ fn main() -> anyhow::Result<()> {
     // the library half (`stats.rs`) so it can be tested at a millisecond poll;
     // the production interval is passed here and nowhere else.
     spawn_stats_thread(Arc::clone(&daemon), STATS_POLL)?;
+
+    // Beside the stats thread because it is the same shape — a `Weak<Daemon>`,
+    // a poll, and a setting it re-reads every tick — and for the same reason it
+    // is started before the socket: presence follows "the daemon is up", so
+    // waiting for a client to connect would delay it for the one user who never
+    // opens the window. It returns without spawning anything when no Discord
+    // application id is compiled in, and never fails for a Discord that is not
+    // running.
+    presence::spawn_presence_thread(Arc::clone(&daemon))?;
 
     // The window is the daemon's only message pump: it owns the clip hotkey
     // now and the tray icon next. It is deliberately kept off `Daemon` — the

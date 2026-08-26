@@ -1148,6 +1148,40 @@ mod tests {
         );
     }
 
+    /// The presence thread re-reads this key every poll, so `config.set` is the
+    /// entire wiring between the settings toggle and the card on Discord —
+    /// there is no `presence.*` command and nothing to broadcast. What this
+    /// guards is that the key survives the round trip at all: a bool that
+    /// failed to persist would look exactly like a toggle that does nothing.
+    #[test]
+    fn discord_presence_defaults_on_round_trips_and_needs_no_rearm() {
+        let (daemon, _config_path, _clip_dir) = with_scratch_config("discord_presence");
+
+        let initial = daemon.dispatch(1, &request(1, "config.get"));
+        let data = initial.data.expect("config.get answers with data");
+        assert_eq!(
+            data.get("discord_presence").and_then(Value::as_bool),
+            Some(true),
+            "presence ships on; a fresh install shows the card"
+        );
+
+        let response = daemon.dispatch(
+            1,
+            &request_with(2, "config.set", &[("discord_presence", Value::Bool(false))]),
+        );
+        let data = response.data.expect("config.set answers with data");
+        assert_eq!(
+            data["accepted"].get("discord_presence").and_then(Value::as_bool),
+            Some(false),
+            "the value is read back out of the saved config, not echoed"
+        );
+        assert_eq!(
+            data["requires_rearm"].as_array().map(Vec::len),
+            Some(0),
+            "the card on a Discord profile has nothing to do with the capture session"
+        );
+    }
+
     /// The settings dropdowns' data source, over the wire. Named-array shape
     /// (`{"monitors":[…]}`) so a client never has to tell a bare array from an
     /// object, and `index` really is a `config.monitor_index` value.

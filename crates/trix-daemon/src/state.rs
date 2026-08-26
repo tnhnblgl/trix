@@ -783,6 +783,16 @@ impl Daemon {
         self.lock_config().clip_hotkey.clone()
     }
 
+    /// Whether Discord presence should be up right now.
+    ///
+    /// Read live on every poll rather than captured once at startup, which is
+    /// the whole reason `presence.rs` is a loop: this is how a `config.set`
+    /// toggle reaches the presence thread, and there is no other wiring
+    /// between them.
+    pub fn discord_presence_enabled(&self) -> bool {
+        self.lock_config().discord_presence
+    }
+
     /// The converted sound cache to play, if there is one.
     ///
     /// `None` covers two different situations a caller does not need to tell

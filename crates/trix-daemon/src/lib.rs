@@ -24,6 +24,7 @@ pub mod com;
 pub mod dispatch;
 pub mod folder;
 pub mod pipe;
+pub mod presence;
 pub mod reveal;
 pub mod sound;
 pub mod state;
