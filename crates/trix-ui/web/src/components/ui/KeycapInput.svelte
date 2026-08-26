@@ -3,38 +3,60 @@
 
   let {
     combo,
-    capturing,
+    capturing = false,
     label,
-    oncapture,
-    onstart,
+    readonly = false,
+    oncapture = () => {},
+    onstart = () => {},
   }: {
     /** The combination to show, e.g. `alt+f10`. */
     combo: string;
-    capturing: boolean;
+    capturing?: boolean;
     label: string;
-    oncapture: (e: KeyboardEvent) => void;
-    onstart: () => void;
+    /**
+     * Show the combination without offering to change it: a plain box, not a
+     * `<button>`.
+     *
+     * `FirstRun`'s confirm step is the caller. The wizard has no way to
+     * rebind -- that is Settings' job, after setup -- so as a button it took
+     * focus, lit up on hover, announced itself as "Clip hotkey, button" and
+     * did nothing at all when pressed. The capture props are unused in this
+     * mode, which is why they have defaults.
+     */
+    readonly?: boolean;
+    oncapture?: (e: KeyboardEvent) => void;
+    onstart?: () => void;
   } = $props();
 
   const caps = $derived(formatCombo(combo));
 </script>
 
-<button
-  type="button"
-  class="hk"
-  class:capturing
-  aria-label={label}
-  onclick={onstart}
-  onkeydown={(e) => { if (capturing) oncapture(e); }}>
+<!-- One rendering of the keycaps for both shells, so a readonly box and the
+     capture button can never drift apart. -->
+{#snippet keycaps()}
   {#if caps.length === 0}
-    <span class="ask">click, then press a combination</span>
+    <span class="ask">{readonly ? 'none set' : 'click, then press a combination'}</span>
   {:else}
     {#each caps as cap, i (i)}
       {#if i > 0}<span class="plus">+</span>{/if}
       <kbd>{cap}</kbd>
     {/each}
   {/if}
-</button>
+{/snippet}
+
+{#if readonly}
+  <!-- `role="group"` with the label, because the caps read as bare letters
+       otherwise and there is no control here to carry the name. -->
+  <div class="hk ro" role="group" aria-label={label}>{@render keycaps()}</div>
+{:else}
+  <button
+    type="button"
+    class="hk"
+    class:capturing
+    aria-label={label}
+    onclick={onstart}
+    onkeydown={(e) => { if (capturing) oncapture(e); }}>{@render keycaps()}</button>
+{/if}
 
 <style>
   .hk {
@@ -51,6 +73,8 @@
     cursor: pointer;
   }
   .hk.capturing { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+  /* Nothing to press, so nothing that says press me. */
+  .hk.ro { cursor: default; }
   kbd {
     padding: 2px 7px;
     border-radius: var(--r-sm);

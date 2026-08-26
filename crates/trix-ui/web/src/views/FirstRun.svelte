@@ -117,7 +117,7 @@
       way to change the hotkey; that is Settings' job, after setup.
     -->
     <p class="hint">Press it now. Some overlays quietly take a hotkey inside games, so this checks Trix really gets it.</p>
-    <KeycapInput combo={hotkey} capturing={false} label="Clip hotkey" oncapture={() => {}} onstart={() => {}} />
+    <KeycapInput combo={hotkey} label="Clip hotkey" readonly />
     <p class="hint" class:ok={heard}>{heard ? 'Trix received it.' : 'Waiting for a press...'}</p>
     <Button variant="primary" onclick={() => (step = 3)}>Next</Button>
   {:else}
