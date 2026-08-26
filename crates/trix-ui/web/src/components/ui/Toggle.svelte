@@ -49,5 +49,17 @@
   }
   .tg.on { background: var(--accent); border-color: var(--accent); }
   .tg.on .knob { left: 20px; background: var(--text); }
+  /* Every other interactive control in this folder answers the pointer; this
+     one did not, against app.css's own argument that a control which does not
+     move under the cursor reads as decoration. Off brightens to --line-hi,
+     which is exactly what that token is for; on brightens to --accent-hi, the
+     same step `Button.primary` and the play button take.
+
+     Scoped with `:not(.on)` rather than relying on source order: `.tg:hover`
+     would otherwise outrank `.tg.on` on specificity and wash the accent out
+     from under the pointer -- the same trap `.arm` in TitleBar documents. */
+  .tg:hover:not(:disabled):not(.on) { background: var(--line-hi); border-color: var(--line-hi); }
+  .tg:hover:not(:disabled):not(.on) .knob { background: var(--text); }
+  .tg.on:hover:not(:disabled) { background: var(--accent-hi); border-color: var(--accent-hi); }
   .tg:disabled { opacity: 0.4; cursor: default; }
 </style>

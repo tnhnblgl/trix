@@ -34,6 +34,7 @@
   <span class="name">TRIX</span>
 
   <button
+    type="button"
     class="arm"
     class:on={app.armed}
     disabled={!app.connected}

@@ -44,7 +44,7 @@
        thumbnail is `alt=""` (it is the clip, not a description of it) and the
        only other child is the duration badge, so without this the card
        announced itself as "0:12, button". -->
-  <button class="thumb" aria-label={clip.title} onclick={onselect} ondblclick={onopen}>
+  <button type="button" class="thumb" aria-label={clip.title} onclick={onselect} ondblclick={onopen}>
     <img src={thumbUrl(clipDir, clip.id)} alt="" loading="lazy" />
     <span class="len tnum">{formatDuration(clip.duration_ms)}</span>
   </button>

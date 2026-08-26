@@ -89,7 +89,7 @@
     onclick={toggle}></video>
 
   <div class="transport">
-    <button class="play" aria-label={playing ? 'Pause' : 'Play'} onclick={toggle}>
+    <button type="button" class="play" aria-label={playing ? 'Pause' : 'Play'} onclick={toggle}>
       <Icon name={playing ? 'pause' : 'play'} size={13} />
     </button>
 

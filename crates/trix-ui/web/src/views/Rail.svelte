@@ -4,10 +4,10 @@
 </script>
 
 <nav class="rail">
-  <button class="nav" class:on={app.view === 'grid'} onclick={() => (app.view = 'grid')}>
+  <button type="button" class="nav" class:on={app.view === 'grid'} onclick={() => (app.view = 'grid')}>
     <Icon name="clips" size={15} />Clips
   </button>
-  <button class="nav" class:on={app.view === 'settings'} onclick={() => (app.view = 'settings')}>
+  <button type="button" class="nav" class:on={app.view === 'settings'} onclick={() => (app.view = 'settings')}>
     <Icon name="settings" size={15} />Settings
   </button>
   <div class="ver tnum">{app.status?.version ?? ''}</div>
