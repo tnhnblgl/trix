@@ -265,7 +265,7 @@
     <div class="trimrow">
       <span class="txt tnum" class:bad={rangeError !== null}>
         In <b>{formatClock(inMs)}</b> &middot; Out <b>{formatClock(outMs)}</b>
-        &middot; <b>{formatClock(Math.max(0, outMs - inMs))}</b> selected{#if rangeError}
+        &middot; <b>{formatClock(outMs - inMs)}</b> selected{#if rangeError}
           &middot; {rangeError}{/if}
       </span>
       <span class="spacer"></span>
