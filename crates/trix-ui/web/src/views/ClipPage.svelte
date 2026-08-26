@@ -86,6 +86,22 @@
     player?.toggle();
   }
 
+  /**
+   * The only way this page opens a `Modal`, and it leaves fullscreen first.
+   *
+   * `VideoPlayer`'s `.stage:fullscreen` is the fullscreen element, and
+   * `Modal`'s scrim and panel are mounted outside `.stage` -- so the browser
+   * paints the stage over both. The dialog still mounts, still takes focus and
+   * still traps Tab, all off screen: Escape is the only way back and nothing
+   * says so. Refusing `Delete` while fullscreen would be worse -- a key that
+   * silently does nothing -- so the video comes out of fullscreen and the
+   * question is asked where it can be read.
+   */
+  function askToDelete() {
+    if (document.fullscreenElement) void document.exitFullscreen();
+    confirmingDelete = true;
+  }
+
   async function exportTrim() {
     // `exporting` is the double-fire guard. The data-loss reason it was added
     // is gone -- clip ids come from the wall clock (YYYYMMDD_HHMMSS) and the
@@ -187,7 +203,7 @@
         outMs = playheadMs;
         break;
       case 'Delete':
-        confirmingDelete = true;
+        askToDelete();
         break;
     }
   }
@@ -297,7 +313,7 @@
       <IconButton icon="folder" label="Show in Explorer" onclick={() => app.reveal(clip.id)} />
       <span class="sep"></span>
       <Button variant="danger" size="sm" icon="trash"
-        onclick={() => (confirmingDelete = true)}>Delete</Button>
+        onclick={askToDelete}>Delete</Button>
     {/if}
   </div>
 
