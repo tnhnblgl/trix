@@ -101,7 +101,27 @@ use at `TrimBar.svelte:129` and therefore proven on this project's WebView2.
 --r-full: 999px;  /* the arm pill, toggle tracks */
 ```
 
-Spacing steps: 4, 6, 8, 10, 12, 14, 16, 20, 24 px. No other values.
+**Spacing — amended 2026-08-26.** This section originally read "Spacing steps: 4, 6,
+8, 10, 12, 14, 16, 20, 24 px. No other values." It was never built that way, and the
+spec is amended to the scale that was rather than the code churned to a table it
+never followed. The implementation plan prescribed exact paddings verbatim in five
+places — `7px 9px`, `5px 11px`, `10px 13px`, `2px 15px`, `18px 20px 16px` — so every
+odd value in the list below was written down before it was typed, and the whole-branch
+review found the result coherent. The values here are read off the built stylesheet
+(`crates/trix-ui/web/dist/assets/index-*.css`), not off intent.
+
+The scale in use is every whole pixel from 1 to 16, plus 18, 20, 24 and 40. It sorts
+into four bands by what the space is doing:
+
+| Band | Values | Where they land |
+|---|---|---|
+| Inside text and badges | 1, 2, 3, 4 | the duration badge (`1px 6px`), a card's meta gap and a popover's item gap (`1px`), the inline rename box (`3px 7px`), a keycap (`2px 7px`), the help line under a settings label (`margin-top: 2px`), the rail's item gap and the menu separator's margin (`4px`) |
+| Control padding | 5, 6, 7, 8, 9, 10, 11, 12, 13, 15 | `Button` sm/md (`5px 10px` / `7px 12px`), the arm pill (`5px 11px`), `KeycapInput` (`6px 10px`), menu and select items (`7px 9px`), select trigger and path boxes (`7px 10px`), rail nav items (`8px 10px`), a toast (`10px 14px`), a settings panel (`10px 13px`), a settings row (`13px 0`), a section header (`2px 15px`), popover padding (`5px`) |
+| Layout gaps | 6, 7, 8, 9, 10, 11, 12, 13, 14, 20 | action rows 6, arm pill internals 7, card and toast stacks 8, rail item 9, trim row 10, settings panel 11, title bar and video stage 12, transport 13, the clip grid 14, and 20 between a settings row's label and its control |
+| Page level | 16, 18, 20, 24, 40 | the content pane (`18px 20px`), a modal (`18px 20px 16px`, actions `margin-top: 18px`), section margins (18 and 20), the update banner (`8px 16px`), the fullscreen stage (`0 24px 24px`), the wizard column (`0 24px`), and the daemon-down page (`40px`) |
+
+New work should reach for a value already in the band it is working in before adding
+one. The bands are the rule now; the old nine-value list is not.
 
 Elevation is carried by surface lightness, not by shadow, with two exceptions that
 float above the page: menus and modals get `0 14px 34px rgba(0,0,0,0.6)`. There is no
