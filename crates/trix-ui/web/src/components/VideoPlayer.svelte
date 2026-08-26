@@ -30,6 +30,19 @@
   let positionMs = $state(0);
   let durationMs = $state(0);
 
+  // Cleared when the source changes, because nothing else does it. `ClipPage`
+  // repoints `src` on the same instance rather than re-keying the component,
+  // and `onloadedmetadata` below deliberately skips the assignment for a
+  // non-finite duration -- so an unfinalized or fragmented mp4 stepped to from
+  // a 60s clip kept reading `/ 1:00.0` and scaled the seek band to 60000ms.
+  // Zero is the honest value: it is what the `duration_ms: 0` clip this guard
+  // exists for reports, and `Timeline` already draws a band at that duration.
+  $effect(() => {
+    void src;
+    durationMs = 0;
+    positionMs = 0;
+  });
+
   export function toggle() {
     if (!video) return;
     if (video.paused) void video.play();
