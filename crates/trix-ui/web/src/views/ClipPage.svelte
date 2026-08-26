@@ -7,7 +7,6 @@
   import VideoPlayer from '../components/VideoPlayer.svelte';
   import Button from '../components/ui/Button.svelte';
   import IconButton from '../components/ui/IconButton.svelte';
-  import Icon from '../components/ui/Icon.svelte';
   import Modal from '../components/ui/Modal.svelte';
 
   let player = $state<VideoPlayer | null>(null);
@@ -281,13 +280,14 @@
       <Button variant="primary" size="sm" onclick={commitRename}>Save</Button>
       <Button variant="ghost" size="sm" onclick={() => (renaming = false)}>Cancel</Button>
     {:else}
-      <!-- Star and title in one box: two siblings each carrying
-           `margin-right: auto` would both claim the free space and push
-           twice. -->
-      <span class="titlebox">
-        {#if clip.favorite}<span class="star"><Icon name="star-filled" size={14} /></span>{/if}
-        <span class="title">{clip.title}</span>
-      </span>
+      <!-- One star on this page, and it is the toggle. A second, non-clickable
+           star beside the title said the same thing in a second colour -- amber
+           against the toggle's accent tint -- two controls apart, against spec
+           4.1's "one glyph, one colour, one meaning". The toggle is the one
+           that has to be here (spec 8.4's action row), it already carries the
+           state in its `active` tint and in its Favourite/Unfavourite name, and
+           a788e20 had no star here at all. -->
+      <span class="title">{clip.title}</span>
       <IconButton
         icon={clip.favorite ? 'star-filled' : 'star'}
         label={clip.favorite ? 'Unfavourite' : 'Favourite'}
@@ -330,9 +330,7 @@
   .meta { color: var(--faint); font-size: 11px; margin: 14px 0 12px; }
 
   .actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-  .titlebox { display: flex; align-items: center; gap: 6px; margin-right: auto; min-width: 0; }
-  .actions .title { font-weight: 650; font-size: 13.5px; }
-  .actions .star { color: var(--fav); display: flex; }
+  .actions .title { margin-right: auto; min-width: 0; font-weight: 650; font-size: 13.5px; }
   .sep { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
   .rn {
     flex: 1;
