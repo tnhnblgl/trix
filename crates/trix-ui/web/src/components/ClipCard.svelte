@@ -110,6 +110,19 @@
   .card { display: grid; gap: 8px; transition: transform var(--t-fast) var(--ease); }
   .card:hover { transform: translateY(-2px); }
 
+  /* The open menu is what needs this, not the card.
+     `Menu` is `z-index: 30`, but a z-index only ranks an element inside its
+     own stacking context -- and `:hover`'s `transform` above makes the card
+     one. So the moment the pointer is on the card the menu stops competing
+     with the rest of the grid and can only stack against its own siblings.
+     The next card down then paints over it: cards are z-index-0 grid items
+     drawn in DOM order, and its `.thumb` is `position: relative` for the
+     duration badge, which puts it in the same layer as the transformed card
+     above it. Hence a menu that reads correctly until you hover.
+     Ranking the whole card is the fix -- the menu's own z-index never could,
+     from inside. Grid items take `z-index` with no `position`. */
+  .card.menuOpen { z-index: 1; }
+
   .thumb {
     position: relative;
     aspect-ratio: 16 / 10;
