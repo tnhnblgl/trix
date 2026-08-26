@@ -60,19 +60,24 @@ use crate::state::Daemon;
 
 /// The Discord application this presence belongs to.
 ///
-/// **Empty until the application is registered**, and empty is not a bug: an
-/// application has to be created by hand in Discord's developer portal by
-/// somebody holding the account, and no agent, script or build step can do it.
-/// [`spawn_presence_thread`] refuses to start the loop while this is empty, so
-/// an unconfigured build costs nothing at all rather than reconnecting to a
-/// handshake Discord will always refuse.
+/// **This id is also where the card's bold line comes from.** Discord renders
+/// the registered application's *name* there and ignores any `name` in the
+/// activity, so "Clipping with Trix" is a property of the application behind
+/// this id, not of anything sent from here. Renaming that application renames
+/// every shipped copy's card at once — and nothing in this repository would
+/// change, or could stop it.
 ///
 /// Public by design, not a secret — every shipped copy of Trix carries the same
 /// id, and Discord's own documentation treats it as public. The consequence to
 /// accept is that the id is permanent: delete the application in the portal and
 /// every installed Trix shows nothing, with no way to point it somewhere else
 /// short of a new release.
-pub const CLIENT_ID: &str = "";
+///
+/// [`spawn_presence_thread`] refuses to start the loop while this is empty, and
+/// the guard stays now that it is filled: it is what keeps a fork, or a build
+/// that has deliberately cleared the id, from reconnecting every fifteen
+/// seconds to a handshake Discord will always refuse.
+pub const CLIENT_ID: &str = "1542159704090746921";
 
 /// The line under the application name. The user-facing promise of the product,
 /// not a status — there is deliberately nothing dynamic in this card.

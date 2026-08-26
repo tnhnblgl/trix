@@ -200,16 +200,53 @@ line; the card is two lines, art, clock and one button.
 no transition to hang it off; the thread polls `discord_presence` every 250 ms
 and that poll is the entire wiring between the settings toggle and the card.
 
-### Still to do by hand — nobody else can
+### The application — registered, and live
 
-`presence::CLIENT_ID` is `""`, and while it is empty the thread is never
-spawned at all (logged once at startup). To finish:
+Application `1542159704090746921`, registered by the owner on 2026-08-26 and
+baked into `presence::CLIENT_ID`. Named **`Clipping with Trix`**, which is
+where the card's bold line comes from; `assets/logo.png` is uploaded under the
+art-asset key `logo`.
 
-1. Create an application at <https://discord.com/developers/applications>.
-2. **Name it exactly `Clipping with Trix`** — this is the bold line of the
-   card, and it is the only way to set it.
-3. Rich Presence → Art Assets → upload `assets/logo.png` **under the key
-   `logo`**. Set it as the application icon too, as a fallback.
-4. Copy the Application ID into `presence::CLIENT_ID`.
+Renaming that application renames every shipped copy's card at once, and
+nothing in this repository would change or could stop it. Deleting it makes
+every installed Trix show nothing. Both are portal-side facts with no code
+remedy short of a new release.
 
-Nothing else is outstanding. Rebuilding after step 4 is the whole deployment.
+### Verified against the live application
+
+Hand-run on 2026-08-26 over `\\.\pipe\discord-ipc-0`, sending byte-for-byte
+what `presence.rs` sends. Discord's `SET_ACTIVITY` reply:
+
+```json
+{"details":"Without thinking FPS and Memory",
+ "timestamps":{"start":1787750127000},
+ "assets":{"large_image":"1542159890179690627","large_text":"Trix"},
+ "buttons":["Get Trix"],
+ "name":"Clipping with Trix",
+ "application_id":"1542159704090746921",
+ "platform":"desktop","type":0,
+ "metadata":{"button_urls":["https://github.com/tnhnblgl/trix/releases/latest"]}}
+```
+
+What each line settles:
+
+- `"name"` — the portal name reaches the card. This is the confirmation that
+  the bold line cannot be set from code and does not need to be.
+- `"large_image"` resolved from `logo` to an asset id, so the art is uploaded
+  and found. A missing key comes back as the literal string instead.
+- `"type":0` is Discord's "Playing" category, which is what was asked for and
+  is not something the payload selects.
+- **`"start"` came back as `1787750127000` for a `1787750127` we sent.**
+  Discord normalises seconds to milliseconds itself, which is the proof that
+  `unix_now()` returning **seconds** is the correct unit for RPC. Sending
+  milliseconds would have been silently multiplied again and dated the card to
+  the year 58,000.
+
+One trap worth recording, hit while writing the probe: PowerShell's
+`Get-Date -UFormat %s` returns a **comma** decimal under this machine's tr-TR
+locale, and casting that to `int64` silently drops the separator and multiplies
+by 100,000. Rust's `SystemTime` has no locale to get wrong, so this was only
+ever a probe bug — but any future hand-verification script in PowerShell should
+use `[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()`.
+
+Nothing is outstanding.
