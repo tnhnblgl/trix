@@ -242,7 +242,24 @@ What each line settles:
   milliseconds would have been silently multiplied again and dated the card to
   the year 58,000.
 
-One trap worth recording, hit while writing the probe: PowerShell's
+### The button is invisible to you and only to you
+
+Confirmed 2026-08-26: the card renders as designed and friends see and can
+click **Get Trix** — but **Discord does not draw activity buttons on your own
+profile**, including the "Current activity" card in User Settings. Looking at
+your own presence and concluding the button failed is the obvious wrong
+inference, and it was made here before a second pair of eyes settled it.
+
+The reply above is the evidence to trust instead of the self-view: Discord
+echoed `"buttons":["Get Trix"]` *and* the matching
+`metadata.button_urls`. A malformed button is dropped from that echo
+altogether rather than acknowledged with both halves, so an echo carrying the
+label and the URL means the button is registered.
+
+Verifying it needs another account, or somebody else opening your profile.
+There is no way to see it from the machine publishing it.
+
+One more trap worth recording, hit while writing the probe: PowerShell's
 `Get-Date -UFormat %s` returns a **comma** decimal under this machine's tr-TR
 locale, and casting that to `int64` silently drops the separator and multiplies
 by 100,000. Rust's `SystemTime` has no locale to get wrong, so this was only
