@@ -262,9 +262,10 @@ fn crosses_zero(key: &str, before: Option<&Value>, after: Option<&Value>) -> boo
 /// - `stats_seconds` 0..=86_400 — 0 stays legal because it is the documented
 ///   "no periodic log line", and is the default; a day is the outer bound.
 /// - `max_library_gb` 0..=10_000 — 0 stays legal because it is the documented
-///   "no ceiling"; 10 TB is past any drive this is likely to run on, and the
-///   ceiling only ever *deletes*, so an absurdly large value is inert while an
-///   absurdly small one is already handled (favorites are never pruned).
+///   "no ceiling", and is the default; 10 TB is past any drive this is likely
+///   to run on, and the ceiling only ever *deletes*, so an absurdly large
+///   value is inert while an absurdly small one is already handled (favorites
+///   are never pruned).
 /// - `system_volume` 0..=100 — a percentage, where 100 is unity and the
 ///   maximum: Trix attenuates but never amplifies, so there is no legal value
 ///   above it. 0 stays legal and means the loopback stream is never opened.

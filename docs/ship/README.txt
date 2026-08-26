@@ -38,9 +38,15 @@ track, so the point you are looking at and the point you are cutting
 at are the same point. I and O still set the two trim points, and the
 arrow keys still move the playhead.
 
-Nothing about recording changed, and nothing about your clips or your
-settings did. Same hotkey, same files, same folders -- this release
-changes what Trix looks like, not what it does.
+One thing that is not a matter of looks: Trix no longer deletes old
+clips to keep your library under a size limit. The limit shipped at
+20 GB and now ships off, so a fresh install keeps every clip until you
+say otherwise. If you have run Trix before your setting is whatever it
+already was -- Settings -> Clips -> Library limit, where 0 means never
+delete.
+
+Nothing else changed. Same hotkey, same clips, same folders; the rest
+of this release is what Trix looks like, not what it does.
 
 
 NEW IN 0.7.0
@@ -189,7 +195,7 @@ DEFAULTS
   Bitrate           8000 kbps, variable
   Hotkey            Alt+F10
   Clips folder      %USERPROFILE%\Videos\Trix
-  Library cap       20 GB, oldest clips deleted first
+  Library cap       off -- Trix never deletes a clip to save space
   GPU priority      low -- your game gets the GPU first
   PC sound          100
   Microphone        100

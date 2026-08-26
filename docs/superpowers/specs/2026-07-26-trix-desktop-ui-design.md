@@ -259,9 +259,14 @@ so it does not read as an accident.
 
 ### 5.4 Disk ceiling
 
-A `max_library_gb` key (default 20). When exceeded, the daemon deletes the oldest clips not marked
-`favorite`. Clip recorders are notorious for silently eating a drive; this is a few dozen lines that
-prevents the most common complaint about the category.
+**Default amended 2026-08-26.** This section originally read "A `max_library_gb` key (default
+20)". The key, its bounds and its behaviour are unchanged; only the default moved, to `0`.
+
+A `max_library_gb` key (default `0`, meaning no ceiling). When it is set and the library exceeds
+it, the daemon deletes the oldest clips not marked `favorite`. Clip recorders are notorious for
+silently eating a drive, so the mechanism is here and one number in Settings arms it — but it is
+opt-in, because a clip deleted to stay under a ceiling the user never chose is silent and
+permanent, while a drive filling up is visible and theirs to act on.
 
 ## 6. The application
 

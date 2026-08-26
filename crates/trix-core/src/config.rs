@@ -51,11 +51,15 @@ pub struct Config {
     pub clip_dir: String,
     /// Disk ceiling for the clip library, in GB (spec §5.4). When the library
     /// exceeds it the daemon deletes the oldest clips that are **not** marked
-    /// `favorite`. `0` disables the ceiling entirely.
+    /// `favorite`. `0` disables the ceiling entirely, and is the default.
     ///
-    /// Clip recorders are notorious for silently eating a drive; this is the
-    /// few dozen lines that prevent the most common complaint about the
-    /// category.
+    /// Opt-in, because the two failure modes are not symmetric. A drive
+    /// filling up is visible, gradual, and the user's own to act on; a clip
+    /// deleted to stay under a ceiling nobody chose is silent and permanent,
+    /// and a clip is the thing this product exists to keep. Clip recorders
+    /// are notorious for quietly eating a drive, so the mechanism is here and
+    /// one number in Settings arms it -- Trix just will not delete anything it
+    /// was not asked to.
     pub max_library_gb: u32,
     /// How loud the PC's own sound is in saved clips, 0–100.
     ///
@@ -120,7 +124,7 @@ impl Default for Config {
             gpu_priority: "low".into(),
             stats_seconds: 0,
             clip_dir: String::new(),
-            max_library_gb: 20,
+            max_library_gb: 0,
             system_volume: 100,
             mic_volume: 100,
             autostart: false,
@@ -313,12 +317,12 @@ mod tests {
     #[test]
     fn the_stage_three_keys_default_and_an_older_config_still_loads() {
         let config = Config::default();
-        assert_eq!(config.max_library_gb, 20, "spec §5.4 default");
+        assert_eq!(config.max_library_gb, 0, "spec §5.4: the ceiling is opt-in");
         assert!(!config.autostart, "spec §7.3: opt-in, off by default");
 
         let older: Config = toml::from_str("fps = 30\nreplay_seconds = 20\n").unwrap();
         assert_eq!(older.fps, 30, "the user's real settings must survive");
-        assert_eq!(older.max_library_gb, 20);
+        assert_eq!(older.max_library_gb, 0);
         assert!(!older.autostart);
     }
 
