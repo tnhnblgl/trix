@@ -96,10 +96,18 @@ So screenshots have **no metadata file**, and therefore no metadata that can
 drift out of sync with the image, no half-written sidecar to repair, and no
 second file to delete.
 
-`created` is derived from the id at scan time, using the same local-offset
-formatting `library.rs` already does for clips. Dimensions are read from the
-JPEG's `SOF` marker — about twenty lines, and a pure function that tests
-directly.
+`created` is derived from the id at scan time by reusing `library.rs`'s
+existing `created_from_id`, which yields `2026-08-27T14:30:12` and **claims no
+UTC offset**. That is the honest answer for a stamp recovered from a filename:
+the offset in force when the shot was taken is not recoverable at scan time,
+and stamping today's offset onto a screenshot taken the other side of a DST
+change would be wrong twice a year. `library.rs` already made this exact call
+for adopted clips, and reusing its function keeps one derivation rather than
+two. `Date` in the front end parses an offsetless stamp as local time, which is
+the correct reading for a file this machine wrote.
+
+Dimensions are read from the JPEG's `SOF` marker — about twenty lines, and a
+pure function that tests directly.
 
 ### Why a thumbnail file exists
 
@@ -181,7 +189,7 @@ because two call sites each had to remember to emit one.
 ```rust
 pub struct ShotMeta {
     pub id: String,
-    pub created: String,   // RFC 3339, local offset, like ClipMeta
+    pub created: String,   // "2026-08-27T14:30:12", no offset claimed
     pub bytes: u64,
     pub width: u32,
     pub height: u32,
