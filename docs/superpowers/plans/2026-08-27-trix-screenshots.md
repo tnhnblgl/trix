@@ -755,11 +755,16 @@ Create `crates/trix-core/src/clipboard.rs` with the test module first:
 mod tests {
     use super::*;
 
+    /// Byte written into the driver's row padding. Distinctive and non-zero
+    /// on purpose: padding filled with zeros would be indistinguishable from
+    /// correctly-dropped padding in the output.
+    const PAD: u8 = 0xAB;
+
     /// Two rows of two pixels, with a stride deliberately wider than the
     /// pixels — which is what a staged D3D texture actually looks like.
     fn sample() -> (Vec<u8>, u32, u32, usize) {
         let stride = 12; // 2px * 4 bytes = 8, plus 4 bytes of driver padding
-        let mut bgra = vec![0u8; stride * 2];
+        let mut bgra = vec![PAD; stride * 2];
         bgra[0..8].copy_from_slice(&[255, 0, 0, 255, 0, 255, 0, 255]);
         bgra[stride..stride + 8].copy_from_slice(&[0, 0, 255, 255, 255, 255, 255, 255]);
         (bgra, 2, 2, stride)
@@ -802,9 +807,16 @@ mod tests {
     fn the_driver_padding_is_dropped_rather_than_copied() {
         let (bgra, w, h, stride) = sample();
         let dib = dibv5(&bgra, w, h, stride).expect("dib");
-        // Copying the stride verbatim would shear the image. Four bytes per
-        // row of padding would show up here as a longer pixel block.
-        assert_eq!(dib[BITMAPV5HEADER_BYTES..].len(), 16);
+        // Copying the stride verbatim would shear the image. The padding is a
+        // distinctive non-zero byte, so this asserts on its *absence* rather
+        // than on the output length -- a length check would only repeat what
+        // `the_dib_is_a_header_plus_exactly_the_pixels` already proves, and
+        // would pass just as happily if padding were copied and a real pixel
+        // dropped to compensate.
+        assert!(
+            !dib[BITMAPV5HEADER_BYTES..].contains(&PAD),
+            "a padding byte reached the clipboard: the row copy is using stride, not width"
+        );
     }
 
     #[test]
