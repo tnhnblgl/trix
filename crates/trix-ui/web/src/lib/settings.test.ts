@@ -8,6 +8,7 @@ describe('FIELDS', () => {
       'monitor_index', 'clip_hotkey', 'gpu_priority', 'stats_seconds', 'clip_dir',
       'max_library_gb', 'autostart', 'system_volume', 'mic_volume', 'check_for_updates',
       'clip_sound', 'clip_sound_path', 'discord_presence',
+      'screenshot_hotkey', 'screenshot_sound',
     ];
     const covered = FIELDS.map((f) => f.key);
     for (const key of shipped) expect(covered).toContain(key);
@@ -108,5 +109,28 @@ describe('the clip sound fields', () => {
     const help = FIELDS.find((f) => f.key === 'clip_sound_path')!.help;
     expect(help).toMatch(/mp3/i);
     expect(help).toMatch(/10 seconds/i);
+  });
+});
+
+describe('the screenshot fields', () => {
+  it('renders the hotkey with the keycap control, like the clip hotkey', () => {
+    // A `hotkey` field is the keycap recorder. A `text` one would make the
+    // user type "alt+f8" by hand and get the grammar wrong.
+    expect(FIELDS.find((f) => f.key === 'screenshot_hotkey')!.kind).toBe('hotkey');
+    expect(FIELDS.find((f) => f.key === 'screenshot_sound')!.kind).toBe('bool');
+  });
+
+  it('puts both rows in a section the page actually renders', () => {
+    // Settings.svelte iterates SECTIONS, not FIELDS: a field whose section is
+    // absent from SECTIONS is valid TypeScript that never reaches the screen.
+    for (const key of ['screenshot_hotkey', 'screenshot_sound']) {
+      expect(SECTIONS).toContain(FIELDS.find((f) => f.key === key)!.section);
+    }
+  });
+
+  it('says the screenshot needs Trix armed', () => {
+    // The likeliest support question, and the help text is the only place it
+    // can be answered before it is asked.
+    expect(FIELDS.find((f) => f.key === 'screenshot_hotkey')!.help).toMatch(/armed/i);
   });
 });

@@ -1230,7 +1230,16 @@ impl Daemon {
         // leave the running hotkey and the saved hotkey disagreeing, and
         // `config.set` is all-or-nothing everywhere else.
         if values.contains_key("clip_hotkey") {
-            crate::window::rebind_hotkey(&config.clip_hotkey);
+            crate::window::rebind_hotkey(crate::window::HotkeyKind::Clip, &config.clip_hotkey);
+        }
+        // Same reasoning, same ordering, for the screenshot key: this is what
+        // makes the `requires_rearm: []` computed above for `screenshot_hotkey`
+        // an honest answer instead of one that is only true after a restart.
+        if values.contains_key("screenshot_hotkey") {
+            crate::window::rebind_hotkey(
+                crate::window::HotkeyKind::Screenshot,
+                &config.screenshot_hotkey,
+            );
         }
 
         // Read under the same lock the write above just landed into, the same

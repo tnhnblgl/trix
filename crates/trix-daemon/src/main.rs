@@ -225,6 +225,7 @@ fn main() -> anyhow::Result<()> {
     let _ = window_slot.set(window::spawn(
         actions_tx,
         &daemon.clip_hotkey(),
+        &daemon.screenshot_hotkey(),
         Arc::clone(&daemon.clients),
     )?);
 

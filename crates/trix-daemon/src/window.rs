@@ -64,6 +64,9 @@ pub enum Action {
     /// clip" item of its own — see its match arms below for what it does map
     /// to — so this is never reached any other way.
     Clip,
+    /// The screenshot hotkey was pressed. Like [`Self::Clip`] this has no tray
+    /// menu item, so `WM_HOTKEY` is the only thing that produces it.
+    Screenshot,
     Arm,
     Disarm,
     /// Tray menu: toggle depending on current state.
@@ -87,6 +90,22 @@ pub enum Action {
         spec: String,
         registered: bool,
     },
+}
+
+/// Which combination a registration or a rebind refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotkeyKind {
+    Clip,
+    Screenshot,
+}
+
+impl HotkeyKind {
+    fn id(self) -> i32 {
+        match self {
+            Self::Clip => HOTKEY_ID,
+            Self::Screenshot => SHOT_HOTKEY_ID,
+        }
+    }
 }
 
 /// How many pending actions the pump may hold. Small on purpose: these are
@@ -124,18 +143,22 @@ pub(crate) const WM_TRIX_PICK_SOUND: u32 = WM_APP + 0x13;
 pub(crate) const WM_TRIX_PICK_FOLDER: u32 = WM_APP + 0x14;
 /// The hotkey id. Process-unique is enough — the window owns the only one.
 const HOTKEY_ID: i32 = 1;
+/// The screenshot hotkey's id. Process-unique is enough — the window owns
+/// both of them.
+const SHOT_HOTKEY_ID: i32 = 2;
 
-/// The spec a pending rebind wants, left here because `PostMessageW` carries
-/// two integers and a `String` is neither of them.
-static PENDING_HOTKEY: Mutex<Option<String>> = Mutex::new(None);
+/// The kind and spec a pending rebind wants, left here because `PostMessageW`
+/// carries two integers and neither a `HotkeyKind` nor a `String` is one of
+/// them.
+static PENDING_HOTKEY: Mutex<Option<(HotkeyKind, String)>> = Mutex::new(None);
 
-fn set_pending_hotkey(spec: &str) {
+fn set_pending_hotkey(kind: HotkeyKind, spec: &str) {
     if let Ok(mut pending) = PENDING_HOTKEY.lock() {
-        *pending = Some(spec.to_string());
+        *pending = Some((kind, spec.to_string()));
     }
 }
 
-fn take_pending_hotkey() -> Option<String> {
+fn take_pending_hotkey() -> Option<(HotkeyKind, String)> {
     PENDING_HOTKEY.lock().ok().and_then(|mut pending| pending.take())
 }
 
@@ -233,14 +256,14 @@ pub fn publish_armed(armed: bool) {
     }
 }
 
-/// Asks the pump to re-register the clip hotkey. Returns immediately; the
+/// Asks the pump to re-register a hotkey. Returns immediately; the
 /// outcome arrives as an `Action::HotkeyRebound`.
 ///
 /// A no-op when there is no pump — unit tests and the window of shutdown after
 /// the pump has gone. A hotkey that cannot be rebound because nothing is
 /// listening is not an error worth propagating into `config.set`, which has
 /// already saved the value the next startup will register.
-pub fn rebind_hotkey(spec: &str) {
+pub fn rebind_hotkey(kind: HotkeyKind, spec: &str) {
     // `WINDOW_HWND` is process-global (see its doc comment above), not
     // per-`Daemon`. `cargo test` runs every test in this crate's test binary
     // as concurrent threads, and `a_hotkey_that_cannot_be_registered_still_
@@ -269,7 +292,7 @@ pub fn rebind_hotkey(spec: &str) {
     if hwnd == 0 {
         return;
     }
-    set_pending_hotkey(spec);
+    set_pending_hotkey(kind, spec);
     unsafe {
         let _ = PostMessageW(
             Some(HWND(hwnd as *mut core::ffi::c_void)),
@@ -372,6 +395,19 @@ unsafe extern "system" fn wnd_proc(
             });
             LRESULT(0)
         }
+        WM_HOTKEY if wparam.0 as i32 == SHOT_HOTKEY_ID => {
+            // No `hotkey_pressed` broadcast here, deliberately. The settings
+            // page listens for that event to confirm the *clip* combination
+            // reached the daemon (spec §6.4); firing it for a screenshot
+            // would make that test pass for the wrong key, which is worse
+            // than it not passing at all.
+            ACTIONS.with(|a| {
+                if let Some(tx) = a.borrow().as_ref() {
+                    offer(tx, Action::Screenshot);
+                }
+            });
+            LRESULT(0)
+        }
         WM_TRIX_ARMED => {
             let armed = wparam.0 != 0;
             TRAY.with(|t| {
@@ -382,30 +418,37 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_TRIX_REHOTKEY => {
-            if let Some(spec) = take_pending_hotkey() {
+            if let Some((kind, spec)) = take_pending_hotkey() {
                 // Unregistered first and unconditionally: leaving the old
                 // binding alive would mean two live hotkeys, with the one the
-                // user just replaced still clipping.
+                // user just replaced still bound to the old combination.
                 unsafe {
-                    let _ = UnregisterHotKey(Some(hwnd), HOTKEY_ID);
+                    let _ = UnregisterHotKey(Some(hwnd), kind.id());
                 }
+                // Which config key this rebind is for, so one shared arm can
+                // log a rebind of either hotkey without pretending every
+                // rebind is the clip one.
+                let key = match kind {
+                    HotkeyKind::Clip => "clip_hotkey",
+                    HotkeyKind::Screenshot => "screenshot_hotkey",
+                };
                 // Same three outcomes, same severity, as the startup
                 // registration above: unparseable, taken, or ours. A hotkey
                 // that will not bind is a warning, never a failure — the
                 // daemon is still fully usable over the socket and the tray.
                 let registered = match Hotkey::parse(&spec) {
-                    Ok(hotkey) => match unsafe { hotkey.register(hwnd, HOTKEY_ID) } {
+                    Ok(hotkey) => match unsafe { hotkey.register(hwnd, kind.id()) } {
                         Ok(()) => {
-                            tracing::info!(hotkey = %hotkey, "clip hotkey re-registered");
+                            tracing::info!(hotkey = %hotkey, key, "hotkey re-registered");
                             true
                         }
                         Err(e) => {
-                            tracing::warn!(hotkey = %hotkey, error = %format!("{e:#}"), "the new clip hotkey is already taken");
+                            tracing::warn!(hotkey = %hotkey, key, error = %format!("{e:#}"), "the new hotkey is already taken");
                             false
                         }
                     },
                     Err(e) => {
-                        tracing::warn!(spec = %spec, error = %format!("{e:#}"), "the new clip_hotkey is not parseable");
+                        tracing::warn!(spec = %spec, key, error = %format!("{e:#}"), "the new hotkey is not parseable");
                         false
                     }
                 };
@@ -478,7 +521,8 @@ unsafe extern "system" fn wnd_proc(
     }
 }
 
-/// Starts the pump thread, creates the window, and registers `clip_hotkey`.
+/// Starts the pump thread, creates the window, and registers `clip_hotkey`
+/// and `screenshot_hotkey`.
 ///
 /// Returns once the window exists, so a caller can attach a tray icon to it
 /// immediately. A hotkey that fails to register is a **warning, not an
@@ -493,11 +537,14 @@ unsafe extern "system" fn wnd_proc(
 pub fn spawn(
     actions: SyncSender<Action>,
     hotkey_spec: &str,
+    shot_hotkey_spec: &str,
     clients: Arc<Clients>,
 ) -> Result<WindowHandle> {
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<isize>>();
     let hotkey = Hotkey::parse(hotkey_spec);
     let spec = hotkey_spec.to_string();
+    let shot_hotkey = Hotkey::parse(shot_hotkey_spec);
+    let shot_spec = shot_hotkey_spec.to_string();
     let finished = Arc::new(AtomicBool::new(false));
     let pump_finished = Arc::clone(&finished);
 
@@ -558,6 +605,20 @@ pub fn spawn(
                 }
             }
 
+            match &shot_hotkey {
+                Ok(hk) => match unsafe { hk.register(hwnd, SHOT_HOTKEY_ID) } {
+                    Ok(()) => {
+                        tracing::info!(hotkey = %hk, "screenshot hotkey registered");
+                    }
+                    Err(e) => {
+                        tracing::warn!(hotkey = %hk, error = %format!("{e:#}"), "screenshot hotkey unavailable — rebind screenshot_hotkey");
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(spec = %shot_spec, error = %format!("{e:#}"), "screenshot_hotkey is not parseable; no hotkey registered");
+                }
+            }
+
             let mut msg = MSG::default();
             while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
                 unsafe {
@@ -566,17 +627,18 @@ pub fn spawn(
                 }
             }
 
-            // Unregistered unconditionally, and the error ignored — same
-            // precedent as the `WM_TRIX_REHOTKEY` arm above. Whether a hotkey
-            // is actually held at this point depends on the startup result
-            // *and* on any `WM_TRIX_REHOTKEY` that ran since, and there is no
-            // cheap way to ask the OS "is HOTKEY_ID currently mine" short of
-            // just releasing it: `UnregisterHotKey` on an id that was never
+            // Both unregistered unconditionally, and the errors ignored — same
+            // precedent as the `WM_TRIX_REHOTKEY` arm above. Whether either
+            // hotkey is actually held at this point depends on the startup
+            // result *and* on any `WM_TRIX_REHOTKEY` that ran since, and there
+            // is no cheap way to ask the OS "is this id currently mine" short
+            // of just releasing it: `UnregisterHotKey` on an id that was never
             // registered simply fails, harmlessly. Windows would reclaim a
             // leaked registration at thread exit anyway, but leaving that to
-            // chance would mean this line no longer means what it says.
+            // chance would mean these lines no longer mean what they say.
             unsafe {
                 let _ = UnregisterHotKey(Some(hwnd), HOTKEY_ID);
+                let _ = UnregisterHotKey(Some(hwnd), SHOT_HOTKEY_ID);
             }
             // Before `DestroyWindow`, and on this thread: `Tray::drop` sends
             // `NIM_DELETE` to the shell for this window. An icon whose window
@@ -656,6 +718,24 @@ pub fn handle_action(daemon: &Arc<Daemon>, action: Action) {
                 // failure.
                 Ok(None) => tracing::warn!("nothing buffered yet — no clip saved"),
                 Err(e) => tracing::warn!(error = %format!("{e:#}"), "clip failed"),
+            }
+        }
+        Action::Screenshot => {
+            // `shot_saved` is not emitted here: `Daemon::screenshot` emits it
+            // itself (from `record_saved_shot`), the same way `Daemon::clip`
+            // emits `clip_saved` above -- so this path and the socket's
+            // `screenshot` command announce a saved shot identically, and a
+            // hotkey screenshot is never broadcast twice.
+            //
+            // A failure has no reply channel either, and stays a log line
+            // only, matching `Action::Clip`'s "clip failed" above: this pump
+            // never invents an `error` event for a hotkey action, since
+            // nothing here dispatches through `dispatch.rs`'s `fail` helper.
+            match daemon.screenshot() {
+                Ok(meta) => {
+                    tracing::info!(shot = %meta.id, "screenshot saved from the hotkey")
+                }
+                Err(e) => tracing::warn!(error = %format!("{e:#}"), "screenshot failed"),
             }
         }
         Action::HotkeyRebound { spec, registered } => {
@@ -961,8 +1041,11 @@ mod tests {
     /// where the pump can read it.
     #[test]
     fn a_rebind_leaves_the_new_spec_for_the_pump() {
-        set_pending_hotkey("ctrl+shift+f9");
-        assert_eq!(take_pending_hotkey().as_deref(), Some("ctrl+shift+f9"));
+        set_pending_hotkey(HotkeyKind::Screenshot, "ctrl+shift+f9");
+        assert_eq!(
+            take_pending_hotkey(),
+            Some((HotkeyKind::Screenshot, "ctrl+shift+f9".to_string()))
+        );
         assert_eq!(
             take_pending_hotkey(),
             None,
@@ -995,7 +1078,7 @@ mod tests {
         let (out_tx, out_rx) = sync_channel(crate::clients::OUTBOUND_QUEUE_DEPTH);
         clients.register(out_tx);
 
-        let mut window = spawn(tx, "not+a+hotkey", Arc::clone(&clients))
+        let mut window = spawn(tx, "not+a+hotkey", "not+a+hotkey", Arc::clone(&clients))
             .expect("an unusable hotkey must not fail the daemon");
 
         unsafe {
@@ -1026,7 +1109,7 @@ mod tests {
     #[test]
     fn a_hotkey_that_cannot_be_registered_still_leaves_a_live_window() {
         let (tx, _rx) = sync_channel::<Action>(ACTION_QUEUE_DEPTH);
-        let mut window = spawn(tx, "not+a+hotkey", Arc::new(Clients::default()))
+        let mut window = spawn(tx, "not+a+hotkey", "not+a+hotkey", Arc::new(Clients::default()))
             .expect("an unusable hotkey must not fail the daemon");
         assert!(!window.hwnd().0.is_null(), "the window must exist even with no hotkey");
         // Must return rather than hang: the pump is a live thread, and the
