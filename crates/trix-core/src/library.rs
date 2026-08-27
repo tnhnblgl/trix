@@ -110,12 +110,21 @@ pub fn ensure_writable(dir: &Path) -> Result<()> {
 pub fn allocate_clip_id(dir: &Path) -> Result<String> {
     std::fs::create_dir_all(dir)
         .with_context(|| format!("could not create clip directory {}", dir.display()))?;
+    next_free_id(dir, &now_id_stamp())
+}
+
+/// The `YYYYMMDD_HHMMSS` stamp every id starts from, in local time.
+///
+/// Extracted so screenshots start from the same stamp clips do. Two
+/// hand-written `format!`s would be two chances for the id grammars to drift,
+/// and `is_valid_id` — which guards every path built from an id — accepts only
+/// one of them.
+pub fn now_id_stamp() -> String {
     let now = unsafe { GetLocalTime() };
-    let stem = format!(
+    format!(
         "{:04}{:02}{:02}_{:02}{:02}{:02}",
         now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond
-    );
-    next_free_id(dir, &stem)
+    )
 }
 
 /// Two clips in the same second get `_2`, `_3`, … rather than one silently
@@ -263,7 +272,7 @@ fn adopt(dir: &Path, id: &str) -> ClipMeta {
 
 /// `20260726_143012` -> `2026-07-26T14:30:12` with no offset claimed, since
 /// an adopted file's original time zone is unknowable.
-fn created_from_id(id: &str) -> String {
+pub fn created_from_id(id: &str) -> String {
     let d = &id[..8];
     let t = &id[9..15];
     format!("{}-{}-{}T{}:{}:{}", &d[..4], &d[4..6], &d[6..8], &t[..2], &t[2..4], &t[4..6])

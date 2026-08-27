@@ -13,5 +13,6 @@ pub mod message;
 
 pub use command::{Command, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT};
 pub use message::{
-    ClipMeta, Event, MAX_LINE_BYTES, RESERVED_ID, Request, Response, decode_request, encode_line,
+    ClipMeta, Event, MAX_LINE_BYTES, RESERVED_ID, Request, Response, ShotMeta, decode_request,
+    encode_line,
 };

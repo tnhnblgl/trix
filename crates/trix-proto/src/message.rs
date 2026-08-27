@@ -83,6 +83,28 @@ pub struct ClipMeta {
     pub favorite: bool,
 }
 
+/// One screenshot's metadata: the payload of `shot_saved` and `shots.list`.
+///
+/// There is no sidecar on disk for a screenshot, unlike [`ClipMeta`]. Every
+/// field here is recovered from the file itself — the id from the filename,
+/// `created` from the id, `bytes` from the directory entry, and the dimensions
+/// from the JPEG's own header. Nothing can therefore drift out of sync with
+/// the image, because nothing is stored twice.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShotMeta {
+    pub id: String,
+    /// `2026-08-27T14:30:12` — **no UTC offset is claimed.** The offset in
+    /// force when the shot was taken is not recoverable from a filename, and
+    /// stamping today's offset onto a screenshot from the other side of a DST
+    /// change would be wrong twice a year. `library::created_from_id` already
+    /// made this call for adopted clips; this reuses it rather than inventing
+    /// a second derivation.
+    pub created: String,
+    pub bytes: u64,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// Serializes one message and appends its newline.
 ///
 /// Returns `Result` rather than panicking on purpose: the workspace builds
@@ -121,5 +143,25 @@ mod tests {
             r#"{"id":7,"ok":false,"error":"no hardware encoder available"}"#,
             "the data key must be omitted on failure, not serialized as null"
         );
+    }
+
+    /// The wire names third-party UIs read. Spec §3.2 says a UI in any language
+    /// reimplements these types and is in no way second-class, so renaming a field
+    /// here breaks software this repository cannot see.
+    #[test]
+    fn shot_meta_round_trips_and_pins_every_field_name() {
+        let meta = ShotMeta {
+            id: "20260827_143012".into(),
+            created: "2026-08-27T14:30:12".into(),
+            bytes: 412_003,
+            width: 1920,
+            height: 1200,
+        };
+        let json = serde_json::to_string(&meta).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"id":"20260827_143012","created":"2026-08-27T14:30:12","bytes":412003,"width":1920,"height":1200}"#
+        );
+        assert_eq!(serde_json::from_str::<ShotMeta>(&json).expect("deserialize"), meta);
     }
 }
