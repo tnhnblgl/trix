@@ -83,6 +83,45 @@ impl ClientHandler for Daemon {
             Ok(Command::LibraryExport { clip_id, start_ms, end_ms, mode }) => {
                 updated_clip(request.id, self.export_clip(&clip_id, start_ms, end_ms, &mode))
             }
+            Ok(Command::Screenshot) => match self.screenshot() {
+                Ok(meta) => {
+                    // Broadcast here rather than inside `Daemon::screenshot`, like every
+                    // other event in this file: the state method has returned and the
+                    // `armed` lock is released, which is what keeps the lock ordering
+                    // documented in state.rs true by construction rather than by
+                    // discipline.
+                    let payload = serde_json::to_value(&meta).unwrap_or_default();
+                    self.clients.broadcast(&Event::new("shot_saved", payload.clone()));
+                    Response::ok(request.id, payload)
+                }
+                // Broadcast the failure too, as `arm` and `clip` do: a screenshot taken
+                // from the hotkey has no reply channel, so an error event is the only way
+                // "you are not armed" ever reaches a window.
+                Err(e) => fail(self, request.id, "screenshot", &format!("{e:#}")),
+            },
+            Ok(Command::ShotsList { offset, limit }) => {
+                let page = self.shots_list(offset, limit);
+                Response::ok(
+                    request.id,
+                    serde_json::json!({
+                        "shots": page.shots,
+                        "total": page.total,
+                        "offset": page.offset,
+                    }),
+                )
+            }
+            Ok(Command::ShotsDelete { shot_id }) => match self.shots_delete(&shot_id) {
+                Ok(()) => Response::ok(request.id, Value::Object(Map::new())),
+                Err(e) => Response::err(request.id, format!("{e:#}")),
+            },
+            Ok(Command::ShotsReveal { shot_id }) => match self.shots_reveal(&shot_id) {
+                Ok(()) => Response::ok(request.id, Value::Object(Map::new())),
+                Err(e) => Response::err(request.id, format!("{e:#}")),
+            },
+            Ok(Command::ShotsCopy { shot_id }) => match self.shots_copy(&shot_id) {
+                Ok(()) => Response::ok(request.id, Value::Object(Map::new())),
+                Err(e) => Response::err(request.id, format!("{e:#}")),
+            },
             Ok(Command::ConfigGet) => match self.config_json() {
                 Ok(data) => Response::ok(request.id, data),
                 Err(e) => Response::err(request.id, format!("{e:#}")),
@@ -1180,6 +1219,80 @@ mod tests {
             Some(0),
             "the card on a Discord profile has nothing to do with the capture session"
         );
+    }
+
+    #[test]
+    fn the_screenshot_keys_round_trip_and_neither_needs_a_rearm() {
+        let (daemon, _config_path, _clip_dir) = with_scratch_config("screenshot_keys");
+
+        let initial = daemon.dispatch(1, &request(1, "config.get"));
+        let data = initial.data.expect("config.get answers with data");
+        assert_eq!(
+            data.get("screenshot_hotkey").and_then(Value::as_str),
+            Some("alt+f8"),
+            "a combination chosen to be free of NVIDIA's and Steam's defaults"
+        );
+        assert_eq!(data.get("screenshot_sound").and_then(Value::as_bool), Some(true));
+
+        let response = daemon.dispatch(
+            1,
+            &request_with(
+                2,
+                "config.set",
+                &[
+                    ("screenshot_hotkey", Value::String("ctrl+alt+p".into())),
+                    ("screenshot_sound", Value::Bool(false)),
+                ],
+            ),
+        );
+        let data = response.data.expect("config.set answers with data");
+        assert_eq!(
+            data["accepted"].get("screenshot_hotkey").and_then(Value::as_str),
+            Some("ctrl+alt+p"),
+            "read back out of the saved config, not echoed"
+        );
+        assert_eq!(
+            data["requires_rearm"].as_array().map(Vec::len),
+            Some(0),
+            "a hotkey is rebound by the message pump and a sound is read at play \
+             time; showing a Re-arm banner for either would be a lie"
+        );
+    }
+
+    #[test]
+    fn a_screenshot_while_disarmed_says_so_rather_than_going_quiet() {
+        let (daemon, _config_path, _clip_dir) = with_scratch_config("screenshot_disarmed");
+        let response = daemon.dispatch(1, &request(1, "screenshot"));
+        assert!(!response.ok, "a screenshot needs an armed capture session");
+        let error = response.error.expect("a refused screenshot carries its reason");
+        // Pressing a key and getting silence is the failure this wording exists
+        // to prevent.
+        assert!(error.contains("not armed"), "the reason must be legible: {error}");
+    }
+
+    #[test]
+    fn listing_screenshots_answers_the_wire_shape_the_tab_binds_to() {
+        let (daemon, _config_path, _clip_dir) = with_scratch_config("shots_list");
+        let response = daemon.dispatch(1, &request(1, "shots.list"));
+        assert!(response.ok, "an empty folder is an empty list, not an error");
+        let data = response.data.expect("shots.list carries data");
+        // Named-array shape, matching library.list, so a client never has to tell
+        // a bare array from an object.
+        assert_eq!(data["shots"].as_array().map(Vec::len), Some(0));
+        assert_eq!(data["total"].as_u64(), Some(0));
+        assert_eq!(data["offset"].as_u64(), Some(0));
+    }
+
+    #[test]
+    fn a_hostile_shot_id_is_refused_before_it_becomes_a_path() {
+        let (daemon, _config_path, _clip_dir) = with_scratch_config("shots_hostile");
+        for cmd in ["shots.delete", "shots.reveal", "shots.copy"] {
+            let response = daemon.dispatch(
+                1,
+                &request_with(1, cmd, &[("shot_id", Value::String(r"..\..\Windows".into()))]),
+            );
+            assert!(!response.ok, "{cmd} must refuse a traversal id");
+        }
     }
 
     /// The settings dropdowns' data source, over the wire. Named-array shape

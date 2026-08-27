@@ -15,7 +15,7 @@ use trix_core::{
     capture::audio::AudioGains, config::Config, control, control::SingleInstance,
     engine::EngineHandle, engine::EngineStatus, export, library, stats,
 };
-use trix_proto::{ClipMeta, Event};
+use trix_proto::{ClipMeta, Event, ShotMeta};
 
 use crate::clients::Clients;
 
@@ -88,6 +88,12 @@ impl DaemonStatus {
 /// responses are matched by request id, not by argument — a client that has
 /// several pages in flight would otherwise have to remember which id asked for
 /// which page.
+pub struct ShotPage {
+    pub shots: Vec<ShotMeta>,
+    pub total: usize,
+    pub offset: usize,
+}
+
 pub struct LibraryPage {
     pub clips: Vec<ClipMeta>,
     pub total: usize,
@@ -630,6 +636,88 @@ impl Daemon {
             self.record_saved_clip(meta, PlaySound::Yes);
         }
         Ok(saved)
+    }
+
+    /// Writes a screenshot from the live capture session.
+    ///
+    /// Armed-only, and it says so. A screenshot comes off the session that is
+    /// already running, which is what makes it nearly free and what makes it
+    /// correct inside fullscreen games. The wording mirrors [`Self::clip`]'s
+    /// because it is the same failure.
+    ///
+    /// Unlike the clip library, screenshots are **not** cached in memory: they
+    /// are scanned from disk on demand. A screenshot has no sidecar to read, so
+    /// a scan is a directory listing plus a 4 KB header read per file, and a
+    /// cache would buy nothing while adding a second thing to keep in sync.
+    pub fn screenshot(&self) -> Result<ShotMeta> {
+        let meta = {
+            let armed = self.lock_armed();
+            let Some(state) = armed.as_ref() else {
+                bail!("not armed — arm Trix to take a screenshot");
+            };
+            state.engine.screenshot()?
+        };
+        // Read after the `armed` lock is released, honouring the lock ordering
+        // documented at the top of this file.
+        if self.lock_config().screenshot_sound {
+            crate::sound::play_shot();
+        }
+        Ok(meta)
+    }
+
+    /// One page of screenshots, newest first.
+    pub fn shots_list(&self, offset: usize, limit: usize) -> ShotPage {
+        let dir = trix_core::shot::shots_dir(&self.clip_dir());
+        let all = trix_core::shot::scan(&dir).unwrap_or_else(|e| {
+            // An unreadable folder is an empty tab, not a broken app: taking
+            // screenshots still works, only browsing them is affected.
+            tracing::warn!(dir = %dir.display(), error = %format!("{e:#}"), "could not scan screenshots");
+            Vec::new()
+        });
+        ShotPage {
+            total: all.len(),
+            shots: all.into_iter().skip(offset).take(limit).collect(),
+            offset,
+        }
+    }
+
+    pub fn shots_delete(&self, id: &str) -> Result<()> {
+        trix_core::shot::delete(&trix_core::shot::shots_dir(&self.clip_dir()), id)
+    }
+
+    pub fn shots_reveal(&self, id: &str) -> Result<()> {
+        let path = self.shot_image_path(id)?;
+        if !path.exists() {
+            bail!("no screenshot {id}");
+        }
+        crate::reveal::in_explorer(&path)
+            .with_context(|| format!("could not show screenshot {id} in Explorer"))
+    }
+
+    /// Puts an already-saved screenshot back on the clipboard.
+    pub fn shots_copy(&self, id: &str) -> Result<()> {
+        let path = self.shot_image_path(id)?;
+        let (bgra, width, height, stride) = trix_core::thumb::decode_jpeg_bgra(&path)
+            .with_context(|| format!("could not read screenshot {id}"))?;
+        trix_core::clipboard::copy_bgra(&bgra, width, height, stride)
+    }
+
+    /// The single place an id from the socket becomes a screenshot path.
+    ///
+    /// `shot::delete` validates its own id, but `reveal` and `copy` build a path
+    /// before touching the file, so the whitelist has to run here too. Never
+    /// reach a screenshot file any other way — the same seal `paths_for` gives
+    /// the clip library.
+    fn shot_image_path(&self, id: &str) -> Result<std::path::PathBuf> {
+        if !trix_core::library::is_valid_id(id) {
+            bail!("{id:?} is not a screenshot id");
+        }
+        Ok(trix_core::shot::image_path(&trix_core::shot::shots_dir(&self.clip_dir()), id))
+    }
+
+    /// The configured screenshot combination, for the message pump to register.
+    pub fn screenshot_hotkey(&self) -> String {
+        self.lock_config().screenshot_hotkey.clone()
     }
 
     /// Takes a clip that has just been written to disk into the live library

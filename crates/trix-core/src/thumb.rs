@@ -7,11 +7,15 @@
 //! **deliberate, documented exception** to PLAN.md's Decision 1 ("frames never
 //! touch the CPU"). It is paid once per clip, not once per frame.
 
+use std::os::windows::ffi::OsStrExt;
+use std::path::Path;
+
 use anyhow::{Context as _, Result, bail};
-use windows::Win32::Foundation::HGLOBAL;
+use windows::Win32::Foundation::{GENERIC_READ, HGLOBAL};
 use windows::Win32::Graphics::Imaging::{
     CLSID_WICImagingFactory, GUID_ContainerFormatJpeg, GUID_WICPixelFormat32bppBGRA,
-    IWICImagingFactory, WICBitmapEncoderNoCache, WICBitmapInterpolationModeFant,
+    IWICImagingFactory, WICBitmapDitherTypeNone, WICBitmapEncoderNoCache,
+    WICBitmapInterpolationModeFant, WICBitmapPaletteTypeCustom, WICDecodeMetadataCacheOnDemand,
 };
 use windows::Win32::System::Com::StructuredStorage::{
     CreateStreamOnHGlobal, IPropertyBag2, PROPBAG2,
@@ -20,7 +24,7 @@ use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, CoCreateInstance, IStream, STATFLAG_NONAME, STATSTG, STREAM_SEEK_SET,
 };
 use windows::Win32::System::Variant::{VARIANT, VT_R4};
-use windows::core::PWSTR;
+use windows::core::{PCWSTR, PWSTR};
 
 /// JPEG quality. 0.82 is the knee: visually clean in a grid at any thumbnail
 /// size, and roughly a third the bytes of 0.95.
@@ -192,6 +196,56 @@ unsafe fn read_stream(stream: &IStream) -> Result<Vec<u8>> {
             .context("reading the thumbnail stream")?;
         buf.truncate(read as usize);
         Ok(buf)
+    }
+}
+
+/// Decodes a JPEG file back to a top-down BGRA buffer.
+///
+/// Returns `(bgra, width, height, stride)` with `stride == width * 4` — this
+/// buffer is ours, so it carries no driver padding.
+///
+/// Used only by `shots.copy`, which puts an already-saved screenshot back on
+/// the clipboard. Decoding on demand rather than caching frames is deliberate:
+/// a cache of full-resolution BGRA is precisely the memory cost this product
+/// exists not to have.
+pub fn decode_jpeg_bgra(path: &Path) -> Result<(Vec<u8>, u32, u32, usize)> {
+    crate::encode::mf::ensure_mf_started()?;
+    unsafe {
+        let factory: IWICImagingFactory =
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)
+                .context("WIC factory")?;
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let decoder = factory
+            .CreateDecoderFromFilename(
+                PCWSTR(wide.as_ptr()),
+                None,
+                GENERIC_READ,
+                WICDecodeMetadataCacheOnDemand,
+            )
+            .with_context(|| format!("decoding {}", path.display()))?;
+        let frame = decoder.GetFrame(0).context("first frame")?;
+        let converter = factory.CreateFormatConverter().context("format converter")?;
+        converter
+            .Initialize(
+                &frame,
+                &GUID_WICPixelFormat32bppBGRA,
+                WICBitmapDitherTypeNone,
+                None,
+                0.0,
+                WICBitmapPaletteTypeCustom,
+            )
+            .context("converting to BGRA")?;
+
+        let mut width = 0u32;
+        let mut height = 0u32;
+        converter.GetSize(&mut width, &mut height).context("image size")?;
+        let stride = (width as usize).checked_mul(4).context("image geometry overflows")?;
+        let len = stride.checked_mul(height as usize).context("image geometry overflows")?;
+        let mut bgra = vec![0u8; len];
+        converter
+            .CopyPixels(std::ptr::null(), stride as u32, &mut bgra)
+            .context("copying pixels")?;
+        Ok((bgra, width, height, stride))
     }
 }
 

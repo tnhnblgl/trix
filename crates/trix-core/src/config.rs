@@ -127,6 +127,23 @@ pub struct Config {
     /// machine, and with Discord shut it does nothing at all.
     #[serde(default = "default_true")]
     pub discord_presence: bool,
+    /// Hotkey for a screenshot, same grammar as [`Self::clip_hotkey`].
+    ///
+    /// `alt+f8` is chosen to be free rather than to be memorable. NVIDIA's
+    /// overlay owns `alt+f9` (record), `alt+f10` (save replay) and `alt+f1`
+    /// (screenshot), and Steam owns `f12` — a default landing on one of those
+    /// registers as a failure the user currently has no way to see.
+    #[serde(default = "default_screenshot_hotkey")]
+    pub screenshot_hotkey: String,
+    /// Whether a saved screenshot plays its chime.
+    ///
+    /// Its own sound rather than the clip chime, so the two are distinguishable
+    /// by ear mid-game — the only moment either sound matters. There is no
+    /// custom-file setting to match `clip_sound_path`: a second picker, cache
+    /// and repair path is a great deal of surface for a sound that plays a few
+    /// times a session.
+    #[serde(default = "default_true")]
+    pub screenshot_sound: bool,
 }
 
 impl Default for Config {
@@ -150,6 +167,8 @@ impl Default for Config {
             clip_sound: true,
             clip_sound_path: String::new(),
             discord_presence: true,
+            screenshot_hotkey: default_screenshot_hotkey(),
+            screenshot_sound: true,
         }
     }
 }
@@ -159,6 +178,10 @@ impl Default for Config {
 /// this key existed.
 const fn default_true() -> bool {
     true
+}
+
+fn default_screenshot_hotkey() -> String {
+    "alt+f8".into()
 }
 
 impl Config {

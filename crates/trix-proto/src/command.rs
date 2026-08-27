@@ -55,6 +55,30 @@ pub enum Command {
         end_ms: u64,
         mode: String,
     },
+    /// Writes a screenshot from the live capture session.
+    ///
+    /// A command rather than hotkey-only wiring, so the tray, the desktop app and
+    /// any third-party client reach it the same way — spec §3.2's rule that the
+    /// UI holds no privilege the socket does not.
+    Screenshot,
+    ShotsList {
+        offset: usize,
+        limit: usize,
+    },
+    ShotsDelete {
+        shot_id: String,
+    },
+    ShotsReveal {
+        shot_id: String,
+    },
+    /// Puts an already-saved screenshot back on the clipboard.
+    ///
+    /// The daemon's job rather than the app's: `trix-ui.exe` is not resident, so a
+    /// copy implemented in the app would be unavailable in exactly the situation
+    /// the Screenshots tab is open to serve.
+    ShotsCopy {
+        shot_id: String,
+    },
     MonitorsList,
     EncodersList,
     StatsSubscribe {
@@ -123,6 +147,14 @@ impl Command {
                 end_ms: u64_arg(req, "end_ms")?,
                 mode: req.args.get("mode").and_then(Value::as_str).unwrap_or("fast").to_string(),
             },
+            "screenshot" => Self::Screenshot,
+            "shots.list" => Self::ShotsList {
+                offset: usize_arg(req, "offset", 0)?,
+                limit: usize_arg(req, "limit", DEFAULT_LIST_LIMIT)?.min(MAX_LIST_LIMIT),
+            },
+            "shots.delete" => Self::ShotsDelete { shot_id: str_arg(req, "shot_id")? },
+            "shots.reveal" => Self::ShotsReveal { shot_id: str_arg(req, "shot_id")? },
+            "shots.copy" => Self::ShotsCopy { shot_id: str_arg(req, "shot_id")? },
             "monitors.list" => Self::MonitorsList,
             "encoders.list" => Self::EncodersList,
             "stats.subscribe" => Self::StatsSubscribe { enabled: bool_arg(req, "enabled")? },
@@ -175,7 +207,7 @@ fn usize_arg(req: &Request, key: &str, default: usize) -> Result<usize, String> 
 
 #[cfg(test)]
 mod tests {
-    use serde_json::Map;
+    use serde_json::{Map, json};
 
     use super::*;
     use crate::message::decode_request;
@@ -322,5 +354,49 @@ mod tests {
         };
         let error = Command::parse(&req).expect_err("a missing end_ms must be refused");
         assert!(error.contains("end_ms"), "the message must name the missing argument: {error}");
+    }
+
+    fn req(cmd: &str, args: serde_json::Value) -> Request {
+        Request {
+            id: 1,
+            cmd: cmd.to_string(),
+            args: args.as_object().cloned().unwrap_or_default(),
+        }
+    }
+
+    #[test]
+    fn the_shots_commands_parse_with_their_arguments() {
+        assert_eq!(Command::parse(&req("screenshot", json!({}))).unwrap(), Command::Screenshot);
+        assert_eq!(
+            Command::parse(&req("shots.list", json!({}))).unwrap(),
+            Command::ShotsList { offset: 0, limit: DEFAULT_LIST_LIMIT },
+            "shots.list must default exactly as library.list does"
+        );
+        assert_eq!(
+            Command::parse(&req("shots.list", json!({"offset": 5, "limit": 9000}))).unwrap(),
+            Command::ShotsList { offset: 5, limit: MAX_LIST_LIMIT },
+            "the page ceiling is shared with library.list, not reinvented"
+        );
+        for (cmd, expected) in [
+            ("shots.delete", Command::ShotsDelete { shot_id: "20260827_143012".into() }),
+            ("shots.reveal", Command::ShotsReveal { shot_id: "20260827_143012".into() }),
+            ("shots.copy", Command::ShotsCopy { shot_id: "20260827_143012".into() }),
+        ] {
+            assert_eq!(
+                Command::parse(&req(cmd, json!({"shot_id": "20260827_143012"}))).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn a_shots_command_without_its_id_is_refused_by_name() {
+        for cmd in ["shots.delete", "shots.reveal", "shots.copy"] {
+            let err = Command::parse(&req(cmd, json!({}))).expect_err("must not parse");
+            // The message reaches whoever is driving the socket, so it names both
+            // the command and the argument it wanted.
+            assert!(err.contains(cmd), "{err:?} should name the command");
+            assert!(err.contains("shot_id"), "{err:?} should name the argument");
+        }
     }
 }
