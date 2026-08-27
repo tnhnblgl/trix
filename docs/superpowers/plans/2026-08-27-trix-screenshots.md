@@ -478,11 +478,19 @@ pub fn scan(shots: &Path) -> Result<Vec<ShotMeta>> {
         }
         // Taken off the directory entry rather than with a fresh `metadata`
         // call: on Windows the size came back with the enumeration.
-        let bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
-        // A reservation whose writer died, not a screenshot.
-        if bytes == 0 {
+        //
+        // A metadata *error* is treated as "not zero", exactly as
+        // `library::scan` does for clips and for the reason its comment gives:
+        // the file is there, something is wrong with reading it, and hiding a
+        // screenshot is the worse of the two mistakes. Folding an error into
+        // zero would make a transient antivirus lock delete a tile from the
+        // grid with nothing said anywhere.
+        let metadata = entry.metadata();
+        if metadata.as_ref().is_ok_and(|m| m.len() == 0) {
+            // A reservation whose writer died, not a screenshot.
             continue;
         }
+        let bytes = metadata.map(|m| m.len()).unwrap_or(0);
         let (width, height) = read_dimensions(&path).unwrap_or((0, 0));
         found.push(ShotMeta {
             created: library::created_from_id(id),
@@ -551,8 +559,18 @@ pub fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
             i += 1;
             continue;
         }
-        let marker = bytes[i + 1];
-        i += 2;
+        // Skip the fill bytes: a marker may be preceded by any number of extra
+        // 0xFFs, and reading one of them as the marker type sends the parse
+        // off into the middle of a segment.
+        let mut type_at = i + 1;
+        while type_at < bytes.len() && bytes[type_at] == 0xFF {
+            type_at += 1;
+        }
+        if type_at >= bytes.len() {
+            return None;
+        }
+        let marker = bytes[type_at];
+        i = type_at + 1;
         // Standalone markers carry no length payload.
         if marker == 0xD8 || marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
             continue;
