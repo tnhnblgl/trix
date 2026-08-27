@@ -5,6 +5,7 @@
 //! the daemon are peers, both consuming this crate.
 
 pub mod capture;
+pub mod clipboard;
 pub mod config;
 pub mod control;
 pub mod encode;
