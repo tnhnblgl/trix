@@ -20,8 +20,9 @@ use trix_proto::{ClipMeta, ShotMeta};
 
 use crate::{capture::audio::AudioGains, config::Config, replay};
 
-/// What the control loop accepts. Both variants are terminal for the caller:
-/// `Clip` always answers on its reply channel, `Stop` always ends the loop.
+/// What the control loop accepts. All three variants are terminal for the
+/// caller: `Clip` and `Screenshot` always answer on their reply channel,
+/// `Stop` always ends the loop.
 pub enum EngineCommand {
     /// Save a clip now. `Ok(None)` means nothing is buffered yet.
     Clip { reply: Sender<Result<Option<ClipMeta>>> },
