@@ -220,12 +220,7 @@ pub fn decode_jpeg_bgra(path: &Path) -> Result<(Vec<u8>, u32, u32, usize)> {
         let decoder = factory
             .CreateDecoderFromFilename(
                 PCWSTR(wide.as_ptr()),
-                // `None` also compiles here, but `CopyPixels` below takes its
-                // "no rect" argument as a bare `*const WICRect` rather than an
-                // `Option`, with no way to spell that as `None`. Spelling both
-                // as an explicit null keeps the function's two "nothing here"
-                // pointers looking like the same idiom rather than two.
-                Some(std::ptr::null()),
+                None,
                 GENERIC_READ,
                 WICDecodeMetadataCacheOnDemand,
             )

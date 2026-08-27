@@ -1,9 +1,18 @@
 //! Everything the daemon owns, and the rules for changing it.
 //!
-//! Deliberately transport-free: nothing here knows about pipes, requests, or
-//! events. [`crate::dispatch`] turns these methods into responses and decides
-//! what to broadcast — which is also what keeps the lock ordering below
-//! trivially true.
+//! Mostly transport-free: nothing here knows about pipes or requests, and for
+//! every method but two, [`crate::dispatch`] turns the return value into a
+//! response and decides what to broadcast. `record_saved_clip` and
+//! `record_saved_shot` are the exceptions, and deliberately so: a hotkey clip
+//! or a hotkey screenshot calls straight into `Daemon::clip` /
+//! `Daemon::screenshot` and never passes through `dispatch` at all, so the
+//! `clip_saved` and `shot_saved` events have to be broadcast from the one
+//! function both the socket path and the hotkey path actually go through —
+//! see `record_saved_clip`'s comment for the bug that made that structural
+//! rather than a convention to remember. Both broadcasts still happen after
+//! the `armed` lock is released, for the same reason every other event does,
+//! which is what keeps the lock ordering below trivially true regardless of
+//! which module is doing the broadcasting.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -708,15 +717,20 @@ impl Daemon {
         // `shots.copy` is reached from a dispatcher client thread, not the
         // capture thread every other WIC/MF caller runs on — see
         // `reveal.rs`'s `select` for the same distinction made for the shell.
-        // `ensure_mf_started` only calls `MFStartup` (and so only enters a COM
-        // apartment) on whichever thread gets there first; every later thread,
-        // this one included, finds the `OnceLock` already filled and touches
-        // COM not at all. Without an apartment of its own,
-        // `CoCreateInstance(CLSCTX_INPROC_SERVER)` inside `decode_jpeg_bgra`
-        // answers `CO_E_NOTINITIALIZED` every time. Held across the whole
-        // decode, not just the `CoCreateInstance` call, because the guard's
-        // `CoUninitialize` on drop must not run while WIC objects created
-        // under it are still alive.
+        // This thread's COM apartment state is not something this code
+        // controls, and it should not lean on `ensure_mf_started`'s
+        // `MFStartup` call to have supplied one: that call only runs on
+        // whichever thread reaches the `OnceLock` first, and every later
+        // thread — including one that never calls `CoInitializeEx` itself —
+        // gets the implicit-MTA behaviour once the process has an apartment at
+        // all (see `thumb.rs`'s `encode_jpeg_sized` comment for that side of
+        // it). Entering an apartment here defensively is cheap and correct
+        // under all three `CoInitializeEx` outcomes regardless of which of
+        // those states this thread is already in, so there is no reason to
+        // depend on the process-wide side effect instead. Held across the
+        // whole decode, not just the `CoCreateInstance` call, because the
+        // guard's `CoUninitialize` on drop must not run while WIC objects
+        // created under it are still alive.
         let _apartment = crate::com::Apartment::enter()?;
         let (bgra, width, height, stride) = trix_core::thumb::decode_jpeg_bgra(&path)
             .with_context(|| format!("could not read screenshot {id}"))?;

@@ -91,9 +91,14 @@ impl ClientHandler for Daemon {
                 // through this function, so a screenshot taken with the hotkey
                 // would reach disk without any client being told.
                 Ok(meta) => Response::ok(request.id, serde_json::to_value(&meta).unwrap_or_default()),
-                // Broadcast the failure too, as `arm` and `clip` do: a screenshot taken
-                // from the hotkey has no reply channel, so an error event is the only way
-                // "you are not armed" ever reaches a window.
+                // Broadcast the failure too, as `arm` and `clip` do. Like theirs,
+                // this `error` event is socket-only: the success arm above
+                // already explains why a hotkey screenshot never reaches this
+                // function at all, and on the clip side the hotkey failure path
+                // (`window.rs`'s `Action::Clip`, "clip failed") only logs a
+                // `tracing::warn!` — it broadcasts nothing either. Task 7 still
+                // has to decide how a disarmed *hotkey* press is supposed to
+                // reach a window, since nothing here does that for it.
                 Err(e) => fail(self, request.id, "screenshot", &format!("{e:#}")),
             },
             Ok(Command::ShotsList { offset, limit }) => {

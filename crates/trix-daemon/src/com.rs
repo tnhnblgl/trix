@@ -1,10 +1,14 @@
-//! The COM apartment guard, shared by the two places in the daemon that talk
-//! to the shell: [`crate::folder`]'s file dialogs and [`crate::reveal`]'s
-//! "Show in Explorer".
+//! The COM apartment guard, shared by three callers in the daemon:
+//! [`crate::folder`]'s file dialogs, [`crate::reveal`]'s "Show in Explorer",
+//! and [`crate::state::Daemon::shots_copy`]'s WIC decode of a saved
+//! screenshot. The third has nothing to do with the shell — it needs the same
+//! "make sure this thread has an apartment" guarantee WIC requires as much as
+//! `SHOpenFolderAndSelectItems` and the file-open dialog do.
 //!
-//! Its own module because neither of those is the natural owner of the
-//! other's apartment, and because a guard whose whole job is to undo exactly
-//! what it did is easiest to check when it is the only thing in the file.
+//! Its own module because no one of those three is the natural owner of
+//! either of the others' apartments, and because a guard whose whole job is
+//! to undo exactly what it did is easiest to check when it is the only thing
+//! in the file.
 
 use anyhow::Result;
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
@@ -19,10 +23,16 @@ use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUn
 /// count is per call; and `RPC_E_CHANGED_MODE` means the thread is already an
 /// MTA member, where uninitialising would tear down an apartment we do not own.
 ///
-/// Every caller gives itself a fresh thread, so only the first of those can
-/// happen. The other two are handled anyway — the cost is four lines, and the
-/// failures they prevent are a folder picker that never appears and an
-/// apartment torn down under whoever else was using it.
+/// A fresh thread is the common case — every `folder.rs` dialog and
+/// `reveal.rs`'s "Show in Explorer" each spawn their own before calling this,
+/// so `S_OK` is all they ever see. `shots_copy` breaks that pattern: it runs
+/// on a long-lived dispatcher client thread that can call in more than once,
+/// which is exactly when `S_FALSE` (this thread already holds an apartment
+/// from an earlier call) and `RPC_E_CHANGED_MODE` (something else on this
+/// thread already put it in an MTA) stop being the two outcomes nothing ever
+/// hits. They are handled all the same regardless of caller — the cost is
+/// four lines, and the failures they prevent are a folder picker that never
+/// appears and an apartment torn down under whoever else was using it.
 pub struct Apartment {
     owned: bool,
 }
