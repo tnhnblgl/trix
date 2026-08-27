@@ -34,13 +34,32 @@ const QUALITY: f32 = 0.82;
 /// tile on a 2x display and large enough for a hover preview.
 const MAX_WIDTH: u32 = 640;
 
-/// Encodes a top-down BGRA buffer to JPEG bytes.
+/// Passed as `max_width` to ask for no downscaling at all. A screenshot is the
+/// capture resolution by definition — that is the whole difference between it
+/// and the thumbnail this module was written for.
+pub const FULL_SIZE: u32 = u32::MAX;
+
+/// Quality for a full-size screenshot. Higher than the thumbnail's 0.82
+/// because this one is the artifact the user keeps and shares rather than a
+/// tile in a grid: roughly 400 KB for a 1080p frame against ~250 KB at 0.82,
+/// for visibly cleaner HUD text.
+pub const SHOT_QUALITY: f32 = 0.92;
+
+/// Encodes a top-down BGRA buffer to JPEG bytes at a caller-chosen size and
+/// quality.
 ///
 /// `stride` is the row pitch in bytes, which for a staged D3D texture is
 /// whatever the driver chose and is frequently larger than `width * 4`.
 /// Passing `width * 4` when the real pitch is bigger produces a sheared image,
 /// so it is an explicit parameter rather than a derived one.
-pub fn encode_jpeg(bgra: &[u8], width: u32, height: u32, stride: usize) -> Result<Vec<u8>> {
+pub fn encode_jpeg_sized(
+    bgra: &[u8],
+    width: u32,
+    height: u32,
+    stride: usize,
+    max_width: u32,
+    quality: f32,
+) -> Result<Vec<u8>> {
     if width == 0 || height == 0 {
         bail!("cannot encode a {width}x{height} thumbnail");
     }
@@ -75,10 +94,10 @@ pub fn encode_jpeg(bgra: &[u8], width: u32, height: u32, stride: usize) -> Resul
         // Quality goes into the property bag before `Initialize`, or it is
         // silently ignored and every thumbnail ships at the default.
         if let Some(props) = &props {
-            set_quality(props, QUALITY);
+            set_quality(props, quality);
         }
         frame.Initialize(props.as_ref()).context("frame init")?;
-        let (out_w, out_h) = scaled_size(width, height);
+        let (out_w, out_h) = scaled_size(width, height, max_width);
         frame.SetSize(out_w, out_h).context("frame size")?;
         let mut format = GUID_WICPixelFormat32bppBGRA;
         frame.SetPixelFormat(&mut format).context("frame pixel format")?;
@@ -111,18 +130,28 @@ pub fn encode_jpeg(bgra: &[u8], width: u32, height: u32, stride: usize) -> Resul
     }
 }
 
-/// Fits `width` under [`MAX_WIDTH`], keeping the aspect ratio. Never scales
+/// Encodes a top-down BGRA buffer to a JPEG thumbnail: at most [`MAX_WIDTH`]
+/// wide, at [`QUALITY`].
+///
+/// A thin wrapper over [`encode_jpeg_sized`], so the clip path keeps its
+/// established defaults in one place rather than repeating two constants at
+/// every call site.
+pub fn encode_jpeg(bgra: &[u8], width: u32, height: u32, stride: usize) -> Result<Vec<u8>> {
+    encode_jpeg_sized(bgra, width, height, stride, MAX_WIDTH, QUALITY)
+}
+
+/// Fits `width` under `max_width`, keeping the aspect ratio. Never scales
 /// *up* — a small capture stays its own size rather than being blown up into
 /// a blurrier, larger file.
-fn scaled_size(width: u32, height: u32) -> (u32, u32) {
-    if width <= MAX_WIDTH {
+fn scaled_size(width: u32, height: u32, max_width: u32) -> (u32, u32) {
+    if width <= max_width {
         return (width, height);
     }
     // Rounded, and floored at 1: an extreme aspect ratio must not produce a
     // zero-height image, which WIC rejects outright.
-    let height = ((u64::from(height) * u64::from(MAX_WIDTH) + u64::from(width) / 2)
+    let height = ((u64::from(height) * u64::from(max_width) + u64::from(width) / 2)
         / u64::from(width)) as u32;
-    (MAX_WIDTH, height.max(1))
+    (max_width, height.max(1))
 }
 
 /// Writes the `ImageQuality` float into WIC's encoder property bag.
@@ -207,13 +236,13 @@ mod tests {
     /// per clip, which a grid on a low-end PC would pay for on every tile.
     #[test]
     fn a_monitor_sized_frame_is_scaled_down_to_a_thumbnail() {
-        assert_eq!(scaled_size(1920, 1200), (640, 400), "16:10 keeps its ratio");
-        assert_eq!(scaled_size(2560, 1440), (640, 360), "16:9 keeps its ratio");
+        assert_eq!(scaled_size(1920, 1200, MAX_WIDTH), (640, 400), "16:10 keeps its ratio");
+        assert_eq!(scaled_size(2560, 1440, MAX_WIDTH), (640, 360), "16:9 keeps its ratio");
         // Never upscaled: a smaller capture stays its own size.
-        assert_eq!(scaled_size(320, 200), (320, 200));
+        assert_eq!(scaled_size(320, 200, MAX_WIDTH), (320, 200));
         // A pathological ratio must not round to a zero-height image, which
         // WIC refuses.
-        assert_eq!(scaled_size(20_000, 1), (640, 1));
+        assert_eq!(scaled_size(20_000, 1, MAX_WIDTH), (640, 1));
     }
 
     /// The scaled path must still produce a decodable JPEG, and a much smaller
@@ -241,5 +270,19 @@ mod tests {
             "a 640px thumbnail should be tens of KB, got {}",
             scaled.len()
         );
+    }
+
+    /// The 640 px ceiling and the new full-size mode must agree about everything
+    /// except the scaling, because the clip thumbnail and the screenshot are now
+    /// the same encoder called twice.
+    #[test]
+    fn full_size_encoding_keeps_the_capture_resolution() {
+        assert_eq!(scaled_size(1920, 1200, MAX_WIDTH), (640, 400));
+        assert_eq!(scaled_size(1920, 1200, FULL_SIZE), (1920, 1200));
+        // A capture smaller than the ceiling is never blown up.
+        assert_eq!(scaled_size(320, 200, MAX_WIDTH), (320, 200));
+        // An extreme aspect ratio must not floor the height to zero, which WIC
+        // rejects outright.
+        assert_eq!(scaled_size(20_000, 3, MAX_WIDTH).1, 1);
     }
 }
