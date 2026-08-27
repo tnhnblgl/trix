@@ -16,7 +16,7 @@ use std::sync::{
 use std::thread::JoinHandle;
 
 use anyhow::{Context as _, Result, anyhow};
-use trix_proto::ClipMeta;
+use trix_proto::{ClipMeta, ShotMeta};
 
 use crate::{capture::audio::AudioGains, config::Config, replay};
 
@@ -25,6 +25,13 @@ use crate::{capture::audio::AudioGains, config::Config, replay};
 pub enum EngineCommand {
     /// Save a clip now. `Ok(None)` means nothing is buffered yet.
     Clip { reply: Sender<Result<Option<ClipMeta>>> },
+    /// Write a screenshot now.
+    ///
+    /// No `Option` in the reply, unlike `Clip`. A clip can legitimately have
+    /// nothing to save because the ring is still filling; a screenshot needs
+    /// one frame, so a session that cannot produce one within the wait is a
+    /// frozen screen — an error, not an empty success.
+    Screenshot { reply: Sender<Result<ShotMeta>> },
     /// Leave the rebuild loop and shut the capture session down.
     Stop,
 }
@@ -117,6 +124,15 @@ impl EngineHandle {
         // The rebuild loop drains queued commands while it waits for the
         // display to settle, so an unanswered clip means "no ring right now",
         // not a dead engine.
+        answer.recv().map_err(|_| anyhow!("capture is rebuilding — try again in a moment"))?
+    }
+
+    /// Writes a screenshot from the live session, answering with its metadata.
+    pub fn screenshot(&self) -> Result<ShotMeta> {
+        let (reply, answer) = channel();
+        self.tx
+            .send(EngineCommand::Screenshot { reply })
+            .map_err(|_| anyhow!("engine thread is gone"))?;
         answer.recv().map_err(|_| anyhow!("capture is rebuilding — try again in a moment"))?
     }
 

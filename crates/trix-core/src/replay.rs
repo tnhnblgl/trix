@@ -18,7 +18,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use trix_proto::ClipMeta;
+use trix_proto::{ClipMeta, ShotMeta};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC,
     D3D11_USAGE_STAGING, ID3D11Device, ID3D11Texture2D,
@@ -39,6 +39,7 @@ use crate::{
         AudioGains, AudioMixer, ENCODER_BLOCK_ALIGN, SAMPLE_RATE, SILENCE_GRACE_100NS,
         dur_100ns_to_frames, frames_to_100ns,
     },
+    clipboard,
     config::Config,
     control,
     encode::{
@@ -47,7 +48,7 @@ use crate::{
         mf::{ClipMuxer, RecorderSettings, create_device_manager},
     },
     engine::{EngineCommand, EngineStatus},
-    library,
+    library, shot,
     stats::{LatencyHistogram, StatsReporter, mb},
     thumb,
 };
@@ -718,6 +719,93 @@ fn save_clip(
     }))
 }
 
+/// Stages a frame from the live session and writes it as a screenshot.
+///
+/// The frame arrives on the capture thread's *next* callback, so this asks and
+/// then waits — the same two steps `save_clip` performs for a clip thumbnail,
+/// on the same [`THUMB_STAGE_WAIT`] budget. Nothing is retained speculatively:
+/// a screenshot costs one staged frame at the moment it is asked for, and
+/// nothing at all the rest of the time.
+fn take_screenshot(
+    capture: &CaptureControl<ReplaySession, anyhow::Error>,
+    clip_dir: &Path,
+) -> Result<ShotMeta> {
+    let callback = capture.callback();
+    callback.lock().request_thumbnail();
+
+    let deadline = Instant::now() + THUMB_STAGE_WAIT;
+    let staged = loop {
+        if let Some(staged) = callback.lock().take_staged_thumbnail() {
+            break Some(staged);
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let Some(staged) = staged else {
+        // Unlike a clip thumbnail, this frame *is* the product, so an empty
+        // window is an error the caller has to be told about rather than a
+        // debug line over a file that saved fine anyway.
+        bail!("no frame arrived within {THUMB_STAGE_WAIT:?} — is the screen frozen?");
+    };
+
+    write_screenshot(&shot::shots_dir(clip_dir), staged)
+}
+
+/// Encodes, writes and copies an already-staged frame.
+///
+/// Split from [`take_screenshot`] so everything below the capture session is
+/// testable without hardware.
+fn write_screenshot(shots: &Path, staged: StagedFrame) -> Result<ShotMeta> {
+    // Encoded *before* the id is reserved, so an encode that fails leaves no
+    // zero-byte reservation behind for `scan` to skip forever.
+    let full = thumb::encode_jpeg_sized(
+        &staged.bgra,
+        staged.width,
+        staged.height,
+        staged.stride,
+        thumb::FULL_SIZE,
+        thumb::SHOT_QUALITY,
+    )
+    .context("encoding the screenshot")?;
+
+    let id = shot::allocate_shot_id(shots)?;
+    let image = shot::image_path(shots, &id);
+    if let Err(e) = std::fs::write(&image, &full) {
+        // Take the reservation back down rather than leaving an empty file
+        // sitting on a used id.
+        let _ = std::fs::remove_file(&image);
+        return Err(e).with_context(|| format!("writing {}", image.display()));
+    }
+
+    // Everything from here is a nicety over a screenshot already safely on
+    // disk, and none of it may become an error the user sees.
+    match thumb::encode_jpeg(&staged.bgra, staged.width, staged.height, staged.stride) {
+        Ok(jpeg) => {
+            let path = shot::thumb_path(shots, &id);
+            if let Err(e) = std::fs::write(&path, &jpeg) {
+                tracing::warn!(shot = %id, path = %path.display(), %e, "screenshot thumbnail not written");
+            }
+        }
+        Err(e) => tracing::warn!(error = %format!("{e:#}"), "screenshot thumbnail encode failed"),
+    }
+
+    if let Err(e) = clipboard::copy_bgra(&staged.bgra, staged.width, staged.height, staged.stride)
+    {
+        tracing::warn!(shot = %id, error = %format!("{e:#}"), "screenshot not copied to the clipboard");
+    }
+
+    let bytes = std::fs::metadata(&image).map(|m| m.len()).unwrap_or(0);
+    Ok(ShotMeta {
+        created: library::created_from_id(&id),
+        id,
+        bytes,
+        width: staged.width,
+        height: staged.height,
+    })
+}
+
 /// The console line `trix replay` has printed since Phase 5b. Kept in exactly
 /// this shape — the verification workflow greps for it.
 fn print_clip_line(saved: &SavedClip) {
@@ -1038,6 +1126,14 @@ fn run_session(
                 // The hotkey forwarder drops its receiver; the daemon reads it.
                 let _ = reply.send(result.map(|opt| opt.map(|saved| saved.meta)));
             }
+            Ok(EngineCommand::Screenshot { reply }) => {
+                let result = take_screenshot(&capture, &clip_dir);
+                if let Err(e) = &result {
+                    tracing::warn!(error = %format!("{e:#}"), "screenshot failed");
+                }
+                // The daemon reads this; `trix replay` never sends the command.
+                let _ = reply.send(result);
+            }
             Ok(EngineCommand::Stop) => break,
             Err(RecvTimeoutError::Timeout) => {
                 if control::shutdown_requested() {
@@ -1160,5 +1256,31 @@ mod tests {
         for span in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             assert!(clamped_ring_seconds(span, 20).is_finite(), "{span} leaked a non-finite value");
         }
+    }
+
+    /// The screenshot writer is split so everything except the capture session is
+    /// reachable from a test: staging a frame needs hardware, deciding what to
+    /// write and where does not.
+    #[test]
+    fn a_staged_frame_becomes_two_files_and_reports_its_real_size() {
+        let clips = std::env::temp_dir()
+            .join(format!("trix-replay-shot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&clips);
+        let shots = crate::shot::shots_dir(&clips);
+        std::fs::create_dir_all(&shots).expect("scratch shots dir");
+
+        // A 4x2 top-down BGRA frame with driver padding -- the shape
+        // `stage_thumbnail` actually produces.
+        let stride = 20usize;
+        let staged = StagedFrame { bgra: vec![255u8; stride * 2], width: 4, height: 2, stride };
+
+        let meta = write_screenshot(&shots, staged).expect("screenshot written");
+
+        assert!(crate::shot::image_path(&shots, &meta.id).exists(), "the full-size image");
+        assert!(crate::shot::thumb_path(&shots, &meta.id).exists(), "the grid thumbnail");
+        assert_eq!((meta.width, meta.height), (4, 2));
+        assert!(meta.bytes > 0, "bytes must come off the file, not be assumed");
+        assert_eq!(meta.created, crate::library::created_from_id(&meta.id));
+        let _ = std::fs::remove_dir_all(&clips);
     }
 }
