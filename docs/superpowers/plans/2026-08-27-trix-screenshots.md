@@ -1661,6 +1661,14 @@ fn a_hostile_shot_id_is_refused_before_it_becomes_a_path() {
             &request_with(1, cmd, &[("shot_id", Value::String(r"..\..\Windows".into()))]),
         );
         assert!(!response.ok, "{cmd} must refuse a traversal id");
+        // Assert the *reason*. `!ok` alone stays true with the seal removed:
+        // the traversal path simply does not exist, so delete fails on
+        // `remove_file`, reveal on `!path.exists()`, and copy inside the
+        // decoder. Pinning the wording is what makes this a regression guard.
+        assert!(
+            response.error.unwrap_or_default().contains("is not a screenshot id"),
+            "{cmd} must refuse it for being a bad id, not for the file being absent"
+        );
     }
 }
 ```
@@ -1834,19 +1842,14 @@ In `crates/trix-daemon/src/dispatch.rs`, after the `Command::LibraryExport` arm:
 
 ```rust
 Ok(Command::Screenshot) => match self.screenshot() {
-    Ok(meta) => {
-        // Broadcast here rather than inside `Daemon::screenshot`, like every
-        // other event in this file: the state method has returned and the
-        // `armed` lock is released, which is what keeps the lock ordering
-        // documented in state.rs true by construction rather than by
-        // discipline.
-        let payload = serde_json::to_value(&meta).unwrap_or_default();
-        self.clients.broadcast(&Event::new("shot_saved", payload.clone()));
-        Response::ok(request.id, payload)
-    }
-    // Broadcast the failure too, as `arm` and `clip` do: a screenshot taken
-    // from the hotkey has no reply channel, so an error event is the only way
-    // "you are not armed" ever reaches a window.
+    // Only build the response here. `shot_saved` is broadcast inside
+    // `Daemon::screenshot` — see the note below — so broadcasting again
+    // here would send it twice for a socket-initiated screenshot.
+    Ok(meta) => Response::ok(request.id, serde_json::to_value(&meta).unwrap_or_default()),
+    // The `error` event is socket-only, exactly as it is for `clip`. The
+    // clip hotkey path only logs its failure (window.rs), so nothing here
+    // runs for a hotkey press; Task 7 still has to decide how a disarmed
+    // *hotkey* press surfaces to the user.
     Err(e) => fail(self, request.id, format!("{e:#}")),
 },
 Ok(Command::ShotsList { offset, limit }) => {
@@ -1909,6 +1912,35 @@ Neither new config key requires a re-arm. A hotkey is rebound by the message
 pump and a sound is read at play time, so a Re-arm banner for either would
 be telling the user to do something that has already happened."
 ```
+
+**Corrections folded back in after Task 6's review.** Three defects in the
+text above were the plan's, not the implementer's:
+
+1. **`shot_saved` must be broadcast from `Daemon::screenshot`, not from the
+   dispatcher.** The lock-ordering rationale originally given here does not
+   hold: the hotkey does not go through `dispatch` at all — `window.rs` calls
+   `daemon.clip()` directly, which is exactly why `clip_saved` is broadcast
+   from state via `record_saved_clip`. Task 7's screenshot hotkey calls
+   `Daemon::screenshot()` the same direct way, so a dispatcher-side broadcast
+   would leave an open Screenshots tab stale on the feature's primary path.
+   Add a `record_saved_shot` sibling that broadcasts after the `armed` guard
+   drops, and let the dispatcher build only the response.
+2. **The traversal test must assert the rejection wording**, not just `!ok` —
+   see the amended test above for why.
+3. **`decode_jpeg_bgra` needs a round-trip test.** It is this task's only
+   `unsafe` block (COM sequencing, stride arithmetic, buffer sizing) and the
+   plan left it uncovered. Encode a known BGRA buffer with the already-public
+   `thumb::encode_jpeg`, write it to a scratch dir, decode it back, and assert
+   width, height, `stride == width * 4` and a known pixel within JPEG
+   tolerance. A stride or channel-order mistake is otherwise visible only in a
+   user's clipboard.
+
+`Daemon::shots_copy` also takes `com::Apartment::enter()` before the decode.
+Not because `CoCreateInstance` would otherwise fail — `MFStartup` leaves the
+process with an MTA that apartment-less threads join implicitly — but because
+this runs on a long-lived socket client thread whose apartment state the code
+does not control, and `library.reveal` sets the precedent for entering one
+there.
 
 ---
 
