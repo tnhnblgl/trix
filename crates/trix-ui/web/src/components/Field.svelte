@@ -1,5 +1,6 @@
 <script lang="ts">
-  import type { Field } from '../lib/settings';
+  import { onDaemonEvent } from '../lib/ipc';
+  import { hotkeySaveTarget, hotkeySeed, type Field } from '../lib/settings';
   import type { Monitor } from '../lib/types';
   import Button from './ui/Button.svelte';
   import KeycapInput from './ui/KeycapInput.svelte';
@@ -12,32 +13,98 @@
    * One row of the settings page: a label with its help text on the left, and
    * the control for `field.kind` on the right.
    *
-   * Owns one piece of state, `dragging`, documented below. `capture`/
-   * `listening`/`heard` live in `Settings.svelte` because the daemon's
-   * `hotkey_pressed`/`hotkey_rebound` events (wired up there, not here) write
-   * to them directly; this component only renders what they say and reports
-   * user actions back up through the `on*` callbacks.
+   * Owns two kinds of per-instance, ephemeral UI state: `dragging` (below),
+   * for sliders, and -- for a `hotkey` field -- its own `capture`/`listening`/
+   * `heard` triple (spec §6.4). The hotkey trio used to live one level up in
+   * `Settings.svelte`, back when there was exactly one hotkey row; a second
+   * row then had no choice but to share it, so clicking into either row's
+   * keycaps armed both of them and showed each other's combination. Scoping
+   * it to the `Field` instance that owns each row -- the same place
+   * `dragging` already lives, and the same thing keying `{#each FIELDS...}`
+   * by `field.key` in `Settings.svelte` already does for the DOM -- keeps
+   * every hotkey row independent instead.
    */
   let {
-    field, config, monitors, capture, listening, heard,
-    onset, oncapture, onstartcapture, onsavehotkey, ontogglelisten,
-    onpickfolder, onpicksound, ontestsound,
+    field, config, monitors,
+    onset, onpickfolder, onpicksound, ontestsound,
   }: {
     field: Field;
     config: Record<string, unknown>;
     monitors: Monitor[];
-    capture: string | null;
-    listening: boolean;
-    heard: boolean;
     onset: (key: string, value: unknown) => void;
-    oncapture: (e: KeyboardEvent) => void;
-    onstartcapture: () => void;
-    onsavehotkey: () => void;
-    ontogglelisten: () => void;
     onpickfolder: () => void;
     onpicksound: () => void;
     ontestsound: () => void;
   } = $props();
+
+  // Hotkey live test (spec §6.4). Declared unconditionally, the same way
+  // `dragging` below is declared for every field even though only a slider
+  // reads it -- only the `hotkey` branch of the template ever touches these.
+  let listening = $state(false);
+  let heard = $state(false);
+  let capture = $state<string | null>(null);
+
+  /**
+   * Whether this row's press reaches the daemon as `hotkey_pressed`, which is
+   * what the "Test" button and its hint are answering. Only `clip_hotkey`'s
+   * `WM_HOTKEY` arm broadcasts that event -- the screenshot arm deliberately
+   * stays silent (`window.rs`, the arm for `SHOT_HOTKEY_ID`) so a screenshot
+   * press can never make the clip row's "press it now" check look answered.
+   * Keyed off the field's own key rather than `field.kind === 'hotkey'`,
+   * which both rows satisfy, so the Screenshot row hides the button instead
+   * of showing a "Press the hotkey now..." hint that can never resolve.
+   */
+  const testable = $derived(field.kind === 'hotkey' && field.key === 'clip_hotkey');
+
+  // Only the testable row subscribes: `heard` can only ever flip on a row
+  // whose press is broadcast at all, and registering a listener nobody can
+  // drive would just be a teardown to get right for no behaviour.
+  //
+  // An `$effect` rather than a plain top-level subscription: `testable`
+  // derives from the `field` prop, and reading a prop-derived value into a
+  // one-shot `const` outside a reactive block only captures its initial
+  // value (Svelte flags exactly this as `state_referenced_locally`). The
+  // effect's own returned callback is the cleanup, so there is no separate
+  // `onDestroy` to keep in sync with it.
+  $effect(() => {
+    if (!testable) return;
+    const unlistenPromise = onDaemonEvent((event) => {
+      if (event.event === 'hotkey_pressed' && listening) heard = true;
+    });
+    return () => {
+      void unlistenPromise.then((fn) => fn());
+    };
+  });
+
+  function startCapture() {
+    capture = hotkeySeed(field, config);
+  }
+
+  function captureHotkey(e: KeyboardEvent) {
+    e.preventDefault();
+    const parts: string[] = [];
+    if (e.ctrlKey) parts.push('ctrl');
+    if (e.altKey) parts.push('alt');
+    if (e.shiftKey) parts.push('shift');
+    if (e.metaKey) parts.push('win');
+    const key = e.key.toLowerCase();
+    if (['control', 'alt', 'shift', 'meta'].includes(key)) return;
+    parts.push(key);
+    capture = parts.join('+');
+  }
+
+  /** This row's Save button: commit the captured combo, then clear it so the row falls back to showing the saved value. */
+  function saveHotkey() {
+    if (capture === null) return;
+    const { key, value } = hotkeySaveTarget(field, capture);
+    onset(key, value);
+    capture = null;
+  }
+
+  function toggleListen() {
+    listening = !listening;
+    heard = false;
+  }
 
   /**
    * The value under the user's thumb, shown while dragging.
@@ -147,17 +214,19 @@
 
     {:else if field.kind === 'hotkey'}
       <KeycapInput
-        combo={capture ?? String(config[field.key] ?? '')}
+        combo={capture ?? hotkeySeed(field, config)}
         capturing={capture !== null}
-        label="Clip hotkey"
-        oncapture={oncapture}
-        onstart={onstartcapture} />
+        label={field.label}
+        oncapture={captureHotkey}
+        onstart={startCapture} />
       {#if capture && capture !== config[field.key]}
-        <Button size="sm" variant="primary" onclick={onsavehotkey}>Save</Button>
+        <Button size="sm" variant="primary" onclick={saveHotkey}>Save</Button>
       {/if}
-      <Button size="sm" variant="ghost" onclick={ontogglelisten}>{listening ? 'Stop test' : 'Test'}</Button>
-      {#if listening}
-        <span class="hint" class:ok={heard}>{heard ? 'Trix received it.' : 'Press the hotkey now...'}</span>
+      {#if testable}
+        <Button size="sm" variant="ghost" onclick={toggleListen}>{listening ? 'Stop test' : 'Test'}</Button>
+        {#if listening}
+          <span class="hint" class:ok={heard}>{heard ? 'Trix received it.' : 'Press the hotkey now...'}</span>
+        {/if}
       {/if}
     {/if}
   </div>

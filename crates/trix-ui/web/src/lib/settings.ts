@@ -113,3 +113,30 @@ export function validate(key: string, value: unknown): string | null {
   const [min, max] = bound;
   return value < min || value > max ? `${key} accepts ${min} to ${max}` : null;
 }
+
+/**
+ * What a `hotkey` field's Save button commits: always the field's own key,
+ * paired with the combination just captured.
+ *
+ * Pulled out of `Field.svelte` and into this plain module so it can be
+ * pinned by a test -- the web suite has no DOM (see the rest of
+ * `lib/*.test.ts`), so a `<button onclick>` inside a Svelte component can
+ * never be driven directly from a test, but a function it calls can be. This
+ * is exactly the seam that was missing when the Screenshot row's Save button
+ * shipped calling `set('clip_hotkey', capture)` -- a string typed once for
+ * the only hotkey there was, and never revisited when a second one arrived.
+ */
+export function hotkeySaveTarget(field: Field, capture: string): { key: string; value: string } {
+  return { key: field.key, value: capture };
+}
+
+/**
+ * What a `hotkey` field's keycap recorder seeds `capture` with when the user
+ * clicks in to arm it -- the field's own current value, not another field's.
+ * Companion to `hotkeySaveTarget` above, extracted for the same reason: this
+ * is the read-side half of the same bug (`Field.svelte` used to seed every
+ * hotkey row from `config['clip_hotkey']`).
+ */
+export function hotkeySeed(field: Field, config: Record<string, unknown>): string {
+  return String(config[field.key] ?? '');
+}

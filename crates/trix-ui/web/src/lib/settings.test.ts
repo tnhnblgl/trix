@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FIELDS, READ_ONLY_EXTRAS, SECTIONS, unknownKeys, validate } from './settings';
+import { FIELDS, READ_ONLY_EXTRAS, SECTIONS, hotkeySaveTarget, hotkeySeed, unknownKeys, validate } from './settings';
 
 describe('FIELDS', () => {
   it('covers every config key the daemon has today', () => {
@@ -132,5 +132,40 @@ describe('the screenshot fields', () => {
     // The likeliest support question, and the help text is the only place it
     // can be answered before it is asked.
     expect(FIELDS.find((f) => f.key === 'screenshot_hotkey')!.help).toMatch(/armed/i);
+  });
+});
+
+describe('hotkeySaveTarget', () => {
+  it('sends each hotkey row to its own key, never a shared literal', () => {
+    // This is the regression the first pass of this task shipped: both the
+    // clip and the screenshot row saved through `set('clip_hotkey', capture)`
+    // because the key was typed once, for the only hotkey field that existed
+    // at the time, and never revisited when a second one arrived. A field's
+    // own key must come out the other end for every hotkey field, not just
+    // the one that happened to be first.
+    const clip = FIELDS.find((f) => f.key === 'clip_hotkey')!;
+    const screenshot = FIELDS.find((f) => f.key === 'screenshot_hotkey')!;
+    expect(hotkeySaveTarget(clip, 'alt+f10')).toEqual({ key: 'clip_hotkey', value: 'alt+f10' });
+    expect(hotkeySaveTarget(screenshot, 'alt+f8')).toEqual({
+      key: 'screenshot_hotkey',
+      value: 'alt+f8',
+    });
+  });
+});
+
+describe('hotkeySeed', () => {
+  it('seeds capture from each field\'s own config value, never another field\'s', () => {
+    // The read-side half of the same bug: seeding every hotkey row's keycaps
+    // from `config['clip_hotkey']` meant clicking into the Screenshot row
+    // showed the *clip* combination, ready to be saved back over itself.
+    const config = { clip_hotkey: 'alt+f10', screenshot_hotkey: 'alt+f8' };
+    const clip = FIELDS.find((f) => f.key === 'clip_hotkey')!;
+    const screenshot = FIELDS.find((f) => f.key === 'screenshot_hotkey')!;
+    expect(hotkeySeed(clip, config)).toBe('alt+f10');
+    expect(hotkeySeed(screenshot, config)).toBe('alt+f8');
+  });
+
+  it('falls back to an empty string when the config has no value yet', () => {
+    expect(hotkeySeed(FIELDS.find((f) => f.key === 'clip_hotkey')!, {})).toBe('');
   });
 });

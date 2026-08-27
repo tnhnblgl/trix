@@ -106,6 +106,16 @@ impl HotkeyKind {
             Self::Screenshot => SHOT_HOTKEY_ID,
         }
     }
+
+    /// Its slot in [`PENDING_HOTKEY`]. A plain array rather than a `HashMap`
+    /// because there are exactly two kinds and always will be — `HotkeyKind`
+    /// is not an open set a plugin or a config key can grow.
+    fn slot(self) -> usize {
+        match self {
+            Self::Clip => 0,
+            Self::Screenshot => 1,
+        }
+    }
 }
 
 /// How many pending actions the pump may hold. Small on purpose: these are
@@ -134,7 +144,8 @@ pub(crate) const WM_TRIX_QUIT: u32 = WM_APP + 0x10;
 /// Posted to the window when the daemon arms or disarms; `wparam` is the new
 /// state. The icon is only ever changed on the thread that owns it.
 pub(crate) const WM_TRIX_ARMED: u32 = WM_APP + 0x11;
-/// Asks the pump to re-register the clip hotkey from [`PENDING_HOTKEY`].
+/// Asks the pump to re-register whichever hotkeys are pending in
+/// [`PENDING_HOTKEY`] — one message can cover a rebind of either key, or both.
 pub(crate) const WM_TRIX_REHOTKEY: u32 = WM_APP + 0x12;
 /// Asks the pump for the "choose a clip sound" dialog.
 pub(crate) const WM_TRIX_PICK_SOUND: u32 = WM_APP + 0x13;
@@ -147,19 +158,42 @@ const HOTKEY_ID: i32 = 1;
 /// both of them.
 const SHOT_HOTKEY_ID: i32 = 2;
 
-/// The kind and spec a pending rebind wants, left here because `PostMessageW`
-/// carries two integers and neither a `HotkeyKind` nor a `String` is one of
-/// them.
-static PENDING_HOTKEY: Mutex<Option<(HotkeyKind, String)>> = Mutex::new(None);
+/// The spec a pending rebind wants, one slot per [`HotkeyKind`] (see
+/// [`HotkeyKind::slot`]), left here because `PostMessageW` carries two
+/// integers and neither a `HotkeyKind` nor a `String` is one of them.
+///
+/// One slot per kind, not one slot shared between them. `state.rs`'s
+/// `config.set` handler can rebind both keys back to back from a single
+/// request, posting `WM_TRIX_REHOTKEY` twice within microseconds of each
+/// other while the pump still has to wake from `GetMessageW` to read either
+/// one. A single shared slot would let the second `set_pending_hotkey`
+/// overwrite the first before the pump ever looked — silently dropping that
+/// key's rebind, with the old combination staying live and `config.set`
+/// having already answered `requires_rearm: []`. Before there were two keys,
+/// a shared slot could only ever lose a stale spec *for the same key*, where
+/// last-write-wins was the correct behaviour; a second, unrelated key sharing
+/// the slot is what turns the same overwrite into a bug.
+static PENDING_HOTKEY: Mutex<[Option<String>; 2]> = Mutex::new([None, None]);
 
 fn set_pending_hotkey(kind: HotkeyKind, spec: &str) {
     if let Ok(mut pending) = PENDING_HOTKEY.lock() {
-        *pending = Some((kind, spec.to_string()));
+        pending[kind.slot()] = Some(spec.to_string());
     }
 }
 
-fn take_pending_hotkey() -> Option<(HotkeyKind, String)> {
-    PENDING_HOTKEY.lock().ok().and_then(|mut pending| pending.take())
+/// Drains every pending rebind, not just one. `WM_TRIX_REHOTKEY` is a "go look
+/// at `PENDING_HOTKEY`" nudge rather than a message that names which key
+/// changed, so one delivery has to be able to answer for two rebinds posted
+/// before the pump got around to reading either — see [`PENDING_HOTKEY`]'s doc
+/// comment for why leaving one behind is exactly the bug this replaced.
+fn take_pending_hotkeys() -> Vec<(HotkeyKind, String)> {
+    let Ok(mut pending) = PENDING_HOTKEY.lock() else {
+        return Vec::new();
+    };
+    [HotkeyKind::Clip, HotkeyKind::Screenshot]
+        .into_iter()
+        .filter_map(|kind| pending[kind.slot()].take().map(|spec| (kind, spec)))
+        .collect()
 }
 
 /// A live pump thread and the window it owns.
@@ -418,7 +452,10 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_TRIX_REHOTKEY => {
-            if let Some((kind, spec)) = take_pending_hotkey() {
+            // Every pending rebind, not just one — see `take_pending_hotkeys`'s
+            // doc comment for why a single `WM_TRIX_REHOTKEY` delivery has to
+            // be able to answer for both keys.
+            for (kind, spec) in take_pending_hotkeys() {
                 // Unregistered first and unconditionally: leaving the old
                 // binding alive would mean two live hotkeys, with the one the
                 // user just replaced still bound to the old combination.
@@ -1039,17 +1076,28 @@ mod tests {
     /// registration (`RegisterHotKey` posts to the *registering thread's*
     /// queue), so a rebind is a message to the pump plus the new spec left
     /// where the pump can read it.
+    ///
+    /// Sets both kinds, the way `state.rs`'s `config.set` handler does when a
+    /// single request changes `clip_hotkey` and `screenshot_hotkey` together,
+    /// and asserts both come back out. A shared one-slot pending value used to
+    /// let the second `set_pending_hotkey` silently overwrite the first —
+    /// see `PENDING_HOTKEY`'s doc comment — which this would have caught by
+    /// getting only one entry back instead of two.
     #[test]
     fn a_rebind_leaves_the_new_spec_for_the_pump() {
+        set_pending_hotkey(HotkeyKind::Clip, "ctrl+shift+f10");
         set_pending_hotkey(HotkeyKind::Screenshot, "ctrl+shift+f9");
         assert_eq!(
-            take_pending_hotkey(),
-            Some((HotkeyKind::Screenshot, "ctrl+shift+f9".to_string()))
+            take_pending_hotkeys(),
+            vec![
+                (HotkeyKind::Clip, "ctrl+shift+f10".to_string()),
+                (HotkeyKind::Screenshot, "ctrl+shift+f9".to_string()),
+            ]
         );
         assert_eq!(
-            take_pending_hotkey(),
-            None,
-            "the pump takes the request once; a second WM_TRIX_REHOTKEY must not re-register a stale spec"
+            take_pending_hotkeys(),
+            Vec::new(),
+            "the pump takes every pending request once; a second WM_TRIX_REHOTKEY must not re-register a stale spec"
         );
     }
 
@@ -1094,6 +1142,54 @@ mod tests {
         assert_eq!(event.event, "hotkey_pressed");
 
         drop(rx); // never drained on purpose; see the comment above
+        window.shutdown();
+    }
+
+    /// The screenshot hotkey's silence is a deliberate design decision (see
+    /// the `WM_HOTKEY` arm for `SHOT_HOTKEY_ID` above, and `Action::Screenshot`'s
+    /// match arm in `handle_action`): the settings page's "press it now" test
+    /// relies on `hotkey_pressed` meaning "the *clip* combination reached the
+    /// daemon", and broadcasting it for the screenshot key too would make that
+    /// test pass for the wrong hotkey. Nothing enforced that until this test —
+    /// a future refactor unifying the two `WM_HOTKEY` arms could start
+    /// broadcasting `hotkey_pressed` for both and nothing would fail.
+    ///
+    /// Same technique as `hotkey_pressed_reaches_a_client_even_when_the_
+    /// action_queue_is_full` above: post `WM_HOTKEY` by hand rather than
+    /// register a real global hotkey, since `wnd_proc` only ever inspects
+    /// `wparam`.
+    #[test]
+    fn the_screenshot_hotkey_reaches_the_worker_but_never_broadcasts_hotkey_pressed() {
+        let (tx, rx) = sync_channel::<Action>(ACTION_QUEUE_DEPTH);
+
+        let clients = Arc::new(Clients::default());
+        let (out_tx, out_rx) = sync_channel(crate::clients::OUTBOUND_QUEUE_DEPTH);
+        clients.register(out_tx);
+
+        let mut window = spawn(tx, "not+a+hotkey", "not+a+hotkey", Arc::clone(&clients))
+            .expect("an unusable hotkey must not fail the daemon");
+
+        unsafe {
+            let _ = PostMessageW(
+                Some(window.hwnd()),
+                WM_HOTKEY,
+                WPARAM(SHOT_HOTKEY_ID as usize),
+                LPARAM(0),
+            );
+        }
+
+        let action = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the screenshot hotkey must still reach the worker");
+        assert_eq!(action, Action::Screenshot);
+
+        match out_rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            other => panic!(
+                "the screenshot hotkey must never broadcast hotkey_pressed, got {other:?}"
+            ),
+        }
+
         window.shutdown();
     }
 

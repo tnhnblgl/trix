@@ -13,11 +13,6 @@
   let monitors = $state<Monitor[]>([]);
   let extras = $state<string[]>([]);
 
-  // Hotkey live test (spec §6.4).
-  let listening = $state(false);
-  let heard = $state(false);
-  let capture = $state<string | null>(null);
-
   $effect(() => {
     void load();
   });
@@ -26,10 +21,11 @@
   // and is meant to), this handler belongs to a page the user opens and
   // leaves through the rail. Left registered, every visit would stack another
   // handler that outlives its component, still writing to a dead instance's
-  // `listening`/`heard` -- so the returned unlisten function is captured and
-  // run when this component is destroyed.
+  // `config` -- so the returned unlisten function is captured and run when
+  // this component is destroyed. (`Field.svelte` runs the same pattern for
+  // its own `hotkey_pressed` listener, which is per-row rather than
+  // page-level -- see its doc comment for why.)
   const unlisten = onDaemonEvent((event) => {
-    if (event.event === 'hotkey_pressed' && listening) heard = true;
     if (event.event === 'hotkey_rebound' && event.data['registered'] === false) {
       app.toast('error', `Windows would not give Trix ${event.data['spec']}. Another app already owns it.`);
     }
@@ -112,36 +108,6 @@
     }
   }
 
-  /** The hotkey field's own Save button: commit the captured combo, then clear it so the row falls back to showing the saved value. */
-  function saveHotkey() {
-    if (capture === null) return;
-    void set('clip_hotkey', capture);
-    capture = null;
-  }
-
-  /**
-   * Arms the hotkey field. `capture` doubles as "we are listening" for
-   * `KeycapInput`, so it starts as the saved combination rather than as an
-   * empty string -- an empty field would blank the keycaps the moment it was
-   * clicked, before the user had pressed anything.
-   */
-  function startCapture() {
-    capture = String(config['clip_hotkey'] ?? '');
-  }
-
-  function captureHotkey(e: KeyboardEvent) {
-    e.preventDefault();
-    const parts: string[] = [];
-    if (e.ctrlKey) parts.push('ctrl');
-    if (e.altKey) parts.push('alt');
-    if (e.shiftKey) parts.push('shift');
-    if (e.metaKey) parts.push('win');
-    const key = e.key.toLowerCase();
-    if (['control', 'alt', 'shift', 'meta'].includes(key)) return;
-    parts.push(key);
-    capture = parts.join('+');
-  }
-
   let version = $state('');
   let checking = $state(false);
   let checked = $state<string | null>(null);
@@ -199,15 +165,11 @@
     <div class="panel">
       {#each FIELDS.filter((f) => f.section === section) as field (field.key)}
         <Field
-          {field} {config} {monitors} {capture} {listening} {heard}
+          {field} {config} {monitors}
           onset={set}
-          oncapture={captureHotkey}
-          onstartcapture={startCapture}
-          onsavehotkey={saveHotkey}
           onpickfolder={pickFolder}
           onpicksound={pickSound}
-          ontestsound={testSound}
-          ontogglelisten={() => { listening = !listening; heard = false; }} />
+          ontestsound={testSound} />
       {/each}
       {#if section === 'Updates'}
         <div class="row">

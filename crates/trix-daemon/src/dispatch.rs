@@ -96,9 +96,13 @@ impl ClientHandler for Daemon {
                 // already explains why a hotkey screenshot never reaches this
                 // function at all, and on the clip side the hotkey failure path
                 // (`window.rs`'s `Action::Clip`, "clip failed") only logs a
-                // `tracing::warn!` — it broadcasts nothing either. Task 7 still
-                // has to decide how a disarmed *hotkey* press is supposed to
-                // reach a window, since nothing here does that for it.
+                // `tracing::warn!` — it broadcasts nothing either. A hotkey
+                // screenshot that fails (disarmed, or `Daemon::screenshot`
+                // erroring for any other reason) takes the same path: `window.rs`'s
+                // `Action::Screenshot` arm logs a `tracing::warn!` and stays
+                // silent, deliberately matching `Action::Clip` rather than
+                // inventing an `error` event a hotkey press has no socket to
+                // deliver it to — see that arm's comment.
                 Err(e) => fail(self, request.id, "screenshot", &format!("{e:#}")),
             },
             Ok(Command::ShotsList { offset, limit }) => {
