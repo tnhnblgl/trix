@@ -1,4 +1,6 @@
-//! Clip thumbnails: a staged BGRA frame, WIC-encoded to JPEG.
+//! BGRA↔JPEG via WIC: encoding a staged frame for clip thumbnails and
+//! full-size screenshots, and decoding a saved screenshot back to BGRA for
+//! `shots.copy`.
 //!
 //! Spec §5.3 takes the thumbnail from the frame at the hotkey press rather
 //! than from a decoded MP4 — the frame is already in VRAM, so no decoder is
@@ -218,7 +220,12 @@ pub fn decode_jpeg_bgra(path: &Path) -> Result<(Vec<u8>, u32, u32, usize)> {
         let decoder = factory
             .CreateDecoderFromFilename(
                 PCWSTR(wide.as_ptr()),
-                None,
+                // `None` also compiles here, but `CopyPixels` below takes its
+                // "no rect" argument as a bare `*const WICRect` rather than an
+                // `Option`, with no way to spell that as `None`. Spelling both
+                // as an explicit null keeps the function's two "nothing here"
+                // pointers looking like the same idiom rather than two.
+                Some(std::ptr::null()),
                 GENERIC_READ,
                 WICDecodeMetadataCacheOnDemand,
             )
@@ -239,12 +246,18 @@ pub fn decode_jpeg_bgra(path: &Path) -> Result<(Vec<u8>, u32, u32, usize)> {
         let mut width = 0u32;
         let mut height = 0u32;
         converter.GetSize(&mut width, &mut height).context("image size")?;
+        // Mirrors `encode_jpeg_sized`'s own guard: a degenerate size here
+        // would otherwise sail through to a zero-length buffer handed to
+        // `clipboard::copy_bgra`, rather than being refused where the bad
+        // geometry is actually known.
+        if width == 0 || height == 0 {
+            bail!("cannot decode a {width}x{height} screenshot");
+        }
         let stride = (width as usize).checked_mul(4).context("image geometry overflows")?;
         let len = stride.checked_mul(height as usize).context("image geometry overflows")?;
         let mut bgra = vec![0u8; len];
-        converter
-            .CopyPixels(std::ptr::null(), stride as u32, &mut bgra)
-            .context("copying pixels")?;
+        let stride_u32 = u32::try_from(stride).context("image geometry overflows")?;
+        converter.CopyPixels(std::ptr::null(), stride_u32, &mut bgra).context("copying pixels")?;
         Ok((bgra, width, height, stride))
     }
 }
@@ -338,5 +351,66 @@ mod tests {
         // An extreme aspect ratio must not floor the height to zero, which WIC
         // rejects outright.
         assert_eq!(scaled_size(20_000, 3, MAX_WIDTH).1, 1);
+    }
+
+    /// The only test that reaches `decode_jpeg_bgra`'s COM sequencing, stride
+    /// arithmetic and buffer sizing at all. `shots_copy`'s traversal test in
+    /// `trix-daemon` only ever reaches the id-whitelist rejection branch, so
+    /// without this, a stride or channel-order mistake in the decoder would
+    /// ship and only a user's clipboard would ever reveal it.
+    ///
+    /// Writes only to a scratch temp dir it creates and removes -- never the
+    /// developer's real clip library or config, per the rule every test in
+    /// this workspace follows.
+    #[test]
+    fn decoding_recovers_the_encoded_image() {
+        let (w, h) = (64u32, 32u32);
+        let stride = (w * 4) as usize;
+        // The same gradient as `encodes_a_bgra_buffer_into_a_real_jpeg`:
+        // smooth enough that JPEG's quantization does not move a sampled
+        // pixel far from its source value, but varying per-pixel so a stride
+        // or channel-order mistake lands on a visibly wrong value rather than
+        // an accidental match against a solid colour.
+        let mut bgra = vec![0u8; stride * h as usize];
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let p = y * stride + x * 4;
+                bgra[p] = (x * 4) as u8;
+                bgra[p + 1] = (y * 8) as u8;
+                bgra[p + 2] = 0x80;
+                bgra[p + 3] = 0xFF;
+            }
+        }
+
+        let jpeg = encode_jpeg(&bgra, w, h, stride).expect("encode a known buffer");
+
+        let dir = std::env::temp_dir().join(format!("trix-thumb-decode-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("shot.jpg");
+        std::fs::write(&path, &jpeg).expect("write scratch jpeg");
+
+        let result = decode_jpeg_bgra(&path);
+        let _ = std::fs::remove_dir_all(&dir);
+        let (bgra_out, dw, dh, dstride) = result.expect("decode the jpeg back");
+
+        assert_eq!((dw, dh), (w, h), "decode must recover the encoded dimensions");
+        assert_eq!(dstride, w as usize * 4, "decode's own buffer carries no driver padding");
+        assert_eq!(bgra_out.len(), dstride * dh as usize);
+
+        // A point away from every edge, so a stride mistake lands on an
+        // obviously wrong value rather than an edge pixel smeared by the
+        // encoder's own block padding.
+        let (x, y) = (32usize, 16usize);
+        let p = y * dstride + x * 4;
+        let expected = [(x * 4) as u8, (y * 8) as u8, 0x80u8, 0xFFu8];
+        for (channel, want) in expected.iter().enumerate() {
+            let got = bgra_out[p + channel];
+            assert!(
+                (i32::from(got) - i32::from(*want)).abs() <= 12,
+                "channel {channel} at ({x},{y}): expected ~{want}, got {got} -- \
+                 a stride or channel-order bug misses by far more than JPEG noise"
+            );
+        }
     }
 }

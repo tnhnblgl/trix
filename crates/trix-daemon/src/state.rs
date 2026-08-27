@@ -13,7 +13,7 @@ use anyhow::{Context as _, Result, bail};
 use serde_json::{Map, Value};
 use trix_core::{
     capture::audio::AudioGains, config::Config, control, control::SingleInstance,
-    engine::EngineHandle, engine::EngineStatus, export, library, stats,
+    engine::EngineHandle, engine::EngineStatus, export, library, shot, stats,
 };
 use trix_proto::{ClipMeta, Event, ShotMeta};
 
@@ -80,6 +80,17 @@ impl DaemonStatus {
     }
 }
 
+/// One page of screenshots, newest first, plus what a UI needs to render "3 of
+/// 47".
+///
+/// Shares its shape with [`LibraryPage`] rather than its doc comment: read
+/// that struct's comment for why `total` and `offset` are carried at all.
+pub struct ShotPage {
+    pub shots: Vec<ShotMeta>,
+    pub total: usize,
+    pub offset: usize,
+}
+
 /// One page of the clip library, plus what a UI needs to render "3 of 47".
 ///
 /// `total` is the *unpaged* count, not `clips.len()`: without it a client that
@@ -88,12 +99,6 @@ impl DaemonStatus {
 /// responses are matched by request id, not by argument — a client that has
 /// several pages in flight would otherwise have to remember which id asked for
 /// which page.
-pub struct ShotPage {
-    pub shots: Vec<ShotMeta>,
-    pub total: usize,
-    pub offset: usize,
-}
-
 pub struct LibraryPage {
     pub clips: Vec<ClipMeta>,
     pub total: usize,
@@ -657,18 +662,21 @@ impl Daemon {
             };
             state.engine.screenshot()?
         };
-        // Read after the `armed` lock is released, honouring the lock ordering
-        // documented at the top of this file.
-        if self.lock_config().screenshot_sound {
-            crate::sound::play_shot();
-        }
+        // After the `armed` lock is released, mirroring `record_saved_clip`
+        // below: Task 7's hotkey path calls this function directly, the same
+        // way `window::handle_action` calls `Daemon::clip` directly, so the
+        // broadcast has to live here rather than in the dispatcher or it goes
+        // missing for exactly the path that matters most. See
+        // `record_saved_clip`'s comment for the clip-side version of this
+        // mistake.
+        self.record_saved_shot(&meta);
         Ok(meta)
     }
 
     /// One page of screenshots, newest first.
     pub fn shots_list(&self, offset: usize, limit: usize) -> ShotPage {
-        let dir = trix_core::shot::shots_dir(&self.clip_dir());
-        let all = trix_core::shot::scan(&dir).unwrap_or_else(|e| {
+        let dir = shot::shots_dir(&self.clip_dir());
+        let all = shot::scan(&dir).unwrap_or_else(|e| {
             // An unreadable folder is an empty tab, not a broken app: taking
             // screenshots still works, only browsing them is affected.
             tracing::warn!(dir = %dir.display(), error = %format!("{e:#}"), "could not scan screenshots");
@@ -682,7 +690,7 @@ impl Daemon {
     }
 
     pub fn shots_delete(&self, id: &str) -> Result<()> {
-        trix_core::shot::delete(&trix_core::shot::shots_dir(&self.clip_dir()), id)
+        shot::delete(&shot::shots_dir(&self.clip_dir()), id)
     }
 
     pub fn shots_reveal(&self, id: &str) -> Result<()> {
@@ -697,6 +705,19 @@ impl Daemon {
     /// Puts an already-saved screenshot back on the clipboard.
     pub fn shots_copy(&self, id: &str) -> Result<()> {
         let path = self.shot_image_path(id)?;
+        // `shots.copy` is reached from a dispatcher client thread, not the
+        // capture thread every other WIC/MF caller runs on — see
+        // `reveal.rs`'s `select` for the same distinction made for the shell.
+        // `ensure_mf_started` only calls `MFStartup` (and so only enters a COM
+        // apartment) on whichever thread gets there first; every later thread,
+        // this one included, finds the `OnceLock` already filled and touches
+        // COM not at all. Without an apartment of its own,
+        // `CoCreateInstance(CLSCTX_INPROC_SERVER)` inside `decode_jpeg_bgra`
+        // answers `CO_E_NOTINITIALIZED` every time. Held across the whole
+        // decode, not just the `CoCreateInstance` call, because the guard's
+        // `CoUninitialize` on drop must not run while WIC objects created
+        // under it are still alive.
+        let _apartment = crate::com::Apartment::enter()?;
         let (bgra, width, height, stride) = trix_core::thumb::decode_jpeg_bgra(&path)
             .with_context(|| format!("could not read screenshot {id}"))?;
         trix_core::clipboard::copy_bgra(&bgra, width, height, stride)
@@ -708,11 +729,11 @@ impl Daemon {
     /// before touching the file, so the whitelist has to run here too. Never
     /// reach a screenshot file any other way — the same seal `paths_for` gives
     /// the clip library.
-    fn shot_image_path(&self, id: &str) -> Result<std::path::PathBuf> {
-        if !trix_core::library::is_valid_id(id) {
+    fn shot_image_path(&self, id: &str) -> Result<PathBuf> {
+        if !library::is_valid_id(id) {
             bail!("{id:?} is not a screenshot id");
         }
-        Ok(trix_core::shot::image_path(&trix_core::shot::shots_dir(&self.clip_dir()), id))
+        Ok(shot::image_path(&shot::shots_dir(&self.clip_dir()), id))
     }
 
     /// The configured screenshot combination, for the message pump to register.
@@ -790,6 +811,41 @@ impl Daemon {
         // everything that makes the clip real.
         if let Some(custom) = sound {
             crate::sound::play(custom.as_deref());
+        }
+    }
+
+    /// Tells every connected client that a screenshot has just been written,
+    /// and plays the chime if configured to.
+    ///
+    /// Split out of [`Self::screenshot`] for the same reason
+    /// [`Self::record_saved_clip`] is split out of [`Self::clip`]: the only
+    /// thing this needs is a `ShotMeta`, so every caller — socket command
+    /// today, hotkey in Task 7 — goes through the one place that announces a
+    /// saved screenshot, rather than each caller having to remember to do it.
+    /// Unlike clips, there is no in-memory cache to update and no ceiling to
+    /// enforce here, because [`Self::shots_list`] scans the folder on demand.
+    fn record_saved_shot(&self, meta: &ShotMeta) {
+        // `config` is read fresh here rather than threaded down from
+        // `screenshot`, which already reads it after the `armed` lock is
+        // released — see the lock ordering note at the top of this file.
+        let play_sound = self.lock_config().screenshot_sound;
+
+        // Broadcast before the sound, matching `record_saved_clip`: the event
+        // is what makes the screenshot real to a client, and the chime is
+        // feedback about that, not the other way round.
+        match serde_json::to_value(meta) {
+            Ok(data) => self.clients.broadcast(&Event::new("shot_saved", data)),
+            // `ShotMeta` is strings, integers and bools, so this cannot
+            // actually happen -- but `panic = "abort"` leaves no room for an
+            // `unwrap` on a path the hotkey reaches, and a screenshot that
+            // saved is still saved even if nobody can be told.
+            Err(e) => {
+                tracing::error!(error = %e, "could not serialize a saved screenshot for shot_saved");
+            }
+        }
+
+        if play_sound {
+            crate::sound::play_shot();
         }
     }
 
@@ -2402,6 +2458,39 @@ mod tests {
 
         let line = rx.try_recv().expect("a saved clip must still broadcast clip_saved");
         assert!(line.contains("clip_saved"), "the sound must not displace the event: {line}");
+    }
+
+    fn shot_meta(id: &str) -> ShotMeta {
+        ShotMeta { id: id.to_string(), created: "2026-08-27T14:30:12".into(), bytes: 5, width: 1920, height: 1080 }
+    }
+
+    /// A screenshot that reaches disk must reach the clients too -- the same
+    /// regression `a_recorded_clip_is_announced_to_every_client` guards
+    /// against, for the sibling feature. `Daemon::screenshot` needs an armed
+    /// engine and a real capture session, which is unreachable from this
+    /// suite; asserting on `record_saved_shot` is what makes the guarantee
+    /// testable ahead of Task 7's hotkey, which will call
+    /// `Daemon::screenshot` directly the same way the clip hotkey calls
+    /// `Daemon::clip`.
+    #[test]
+    fn a_recorded_shot_is_announced_to_every_client() {
+        use std::sync::mpsc::sync_channel;
+
+        let daemon = idle("shot-saved-broadcast", Config::default());
+        let (tx, rx) = sync_channel(crate::clients::OUTBOUND_QUEUE_DEPTH);
+        daemon.clients.register(tx);
+
+        daemon.record_saved_shot(&shot_meta("20260827_143012"));
+
+        let line = rx.try_recv().expect("a saved screenshot must broadcast shot_saved");
+        let event: Event = serde_json::from_str(line.trim_end())
+            .unwrap_or_else(|e| panic!("event line did not decode: {e}\nline: {line}"));
+        assert_eq!(event.event, "shot_saved");
+        assert_eq!(
+            event.data.get("id").and_then(Value::as_str),
+            Some("20260827_143012"),
+            "the event carries the ShotMeta the Screenshots tab binds to"
+        );
     }
 
     /// Writes one clip into `dir` and returns its id.

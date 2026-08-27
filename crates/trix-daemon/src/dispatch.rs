@@ -84,16 +84,13 @@ impl ClientHandler for Daemon {
                 updated_clip(request.id, self.export_clip(&clip_id, start_ms, end_ms, &mode))
             }
             Ok(Command::Screenshot) => match self.screenshot() {
-                Ok(meta) => {
-                    // Broadcast here rather than inside `Daemon::screenshot`, like every
-                    // other event in this file: the state method has returned and the
-                    // `armed` lock is released, which is what keeps the lock ordering
-                    // documented in state.rs true by construction rather than by
-                    // discipline.
-                    let payload = serde_json::to_value(&meta).unwrap_or_default();
-                    self.clients.broadcast(&Event::new("shot_saved", payload.clone()));
-                    Response::ok(request.id, payload)
-                }
+                // `shot_saved` is broadcast by `Daemon::screenshot` itself, not
+                // here — see that function's comment. It used to be here, and
+                // that was the bug `clip`'s comment above already names: Task 7's
+                // hotkey path calls `Daemon::screenshot` directly and never comes
+                // through this function, so a screenshot taken with the hotkey
+                // would reach disk without any client being told.
+                Ok(meta) => Response::ok(request.id, serde_json::to_value(&meta).unwrap_or_default()),
                 // Broadcast the failure too, as `arm` and `clip` do: a screenshot taken
                 // from the hotkey has no reply channel, so an error event is the only way
                 // "you are not armed" ever reaches a window.
@@ -1292,6 +1289,19 @@ mod tests {
                 &request_with(1, cmd, &[("shot_id", Value::String(r"..\..\Windows".into()))]),
             );
             assert!(!response.ok, "{cmd} must refuse a traversal id");
+            let error = response.error.expect("a refused id carries its reason");
+            // Asserting the wording, not just `!ok`, is the point: delete
+            // `is_valid_id` from `shot::delete` and `Daemon::shot_image_path`
+            // and this test would still fail, but for the wrong reason --
+            // `..\..\Windows.jpg` does not exist, so delete fails on
+            // `remove_file`, reveal fails on `!path.exists()`, and copy fails
+            // inside the decoder, each with a different message. Only the
+            // seal itself produces "is not a screenshot id", so that is what
+            // has to survive.
+            assert!(
+                error.contains("is not a screenshot id"),
+                "{cmd} must be refused by the id seal, not by a downstream failure: {error}"
+            );
         }
     }
 
