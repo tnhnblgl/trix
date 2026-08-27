@@ -1090,7 +1090,7 @@ fn a_staged_frame_becomes_two_files_and_reports_its_real_size() {
     let stride = 20usize;
     let staged = StagedFrame { bgra: vec![255u8; stride * 2], width: 4, height: 2, stride };
 
-    let meta = write_screenshot(&shots, staged).expect("screenshot written");
+    let meta = write_screenshot(&shots, &staged).expect("screenshot written");
 
     assert!(crate::shot::image_path(&shots, &meta.id).exists(), "the full-size image");
     assert!(crate::shot::thumb_path(&shots, &meta.id).exists(), "the grid thumbnail");
@@ -1142,14 +1142,29 @@ fn take_screenshot(
         bail!("no frame arrived within {THUMB_STAGE_WAIT:?} — is the screen frozen?");
     };
 
-    write_screenshot(&shot::shots_dir(clip_dir), staged)
+    let meta = write_screenshot(&shot::shots_dir(clip_dir), &staged)?;
+
+    // The clipboard lives here rather than inside `write_screenshot`, and the
+    // reason is the test suite: `write_screenshot` is the part a unit test
+    // drives, and a test that reached the real clipboard would wipe whatever
+    // the developer had copied every time they ran `cargo test`. That is the
+    // same rule that keeps tests off the real config and clip library.
+    //
+    // A failed copy costs the paste, never the file — the screenshot is
+    // already on disk by the time this runs.
+    if let Err(e) = clipboard::copy_bgra(&staged.bgra, staged.width, staged.height, staged.stride)
+    {
+        tracing::warn!(shot = %meta.id, error = %format!("{e:#}"), "screenshot not copied to the clipboard");
+    }
+    Ok(meta)
 }
 
-/// Encodes, writes and copies an already-staged frame.
+/// Encodes an already-staged frame and writes both files.
 ///
 /// Split from [`take_screenshot`] so everything below the capture session is
-/// testable without hardware.
-fn write_screenshot(shots: &Path, staged: StagedFrame) -> Result<ShotMeta> {
+/// testable without hardware — and so the tested half touches no machine
+/// state beyond the scratch directory it is given.
+fn write_screenshot(shots: &Path, staged: &StagedFrame) -> Result<ShotMeta> {
     // Encoded *before* the id is reserved, so an encode that fails leaves no
     // zero-byte reservation behind for `scan` to skip forever.
     let full = thumb::encode_jpeg_sized(
@@ -1181,11 +1196,6 @@ fn write_screenshot(shots: &Path, staged: StagedFrame) -> Result<ShotMeta> {
             }
         }
         Err(e) => tracing::warn!(error = %format!("{e:#}"), "screenshot thumbnail encode failed"),
-    }
-
-    if let Err(e) = clipboard::copy_bgra(&staged.bgra, staged.width, staged.height, staged.stride)
-    {
-        tracing::warn!(shot = %id, error = %format!("{e:#}"), "screenshot not copied to the clipboard");
     }
 
     let bytes = std::fs::metadata(&image).map(|m| m.len()).unwrap_or(0);
