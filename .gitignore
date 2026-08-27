@@ -16,9 +16,10 @@
 # the brand artwork the app icon is cut from -- shipped, not probed.
 !/assets/*.png
 
-# the built-in clip-saved chime is shipped, not probed -- un-ignore it from
-# the *.wav rule above.
+# the built-in clip-saved and screenshot-saved sounds are shipped, not
+# probed -- un-ignore them from the *.wav rule above.
 !/crates/trix-daemon/assets/clip.wav
+!/crates/trix-daemon/assets/shot.wav
 
 /crates/trix-ui/web/node_modules
 /crates/trix-ui/web/dist
