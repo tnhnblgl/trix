@@ -39,6 +39,10 @@ pub fn dibv5(bgra: &[u8], width: u32, height: u32, stride: usize) -> Result<Vec<
         bail!("buffer is {} bytes, need {needed} for {width}x{height}", bgra.len());
     }
 
+    // Plain multiplication, unlike the two `checked_mul`s above: it is safe
+    // rather than checked-again, because `stride >= row` was just enforced and
+    // `stride.checked_mul(height)` already succeeded as `needed`, so
+    // `row * height <= stride * height` cannot overflow either.
     let mut dib = vec![0u8; BITMAPV5HEADER_BYTES + row * height as usize];
     {
         let mut put = |at: usize, value: u32| {

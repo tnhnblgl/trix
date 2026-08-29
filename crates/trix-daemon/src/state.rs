@@ -211,10 +211,12 @@ pub struct ArmOutcome {
 /// last fifteen seconds the user may be about to clip — because someone nudged
 /// a bitrate slider. The UI decides whether to prompt.
 ///
-/// The three config keys deliberately absent take effect immediately:
-/// `clip_dir` is read per clip, `stats_seconds` per stats tick, and
-/// `clip_hotkey` belongs to `trix replay`'s own loop rather than to anything the
-/// daemon arms.
+/// The config keys deliberately absent take effect immediately: `clip_dir` is
+/// read per clip, `stats_seconds` per stats tick, and `clip_hotkey` and
+/// `screenshot_hotkey` are re-registered live by `window::rebind_hotkey`
+/// rather than requiring a re-arm. `screenshot_sound` is read fresh by
+/// `record_saved_shot` on every screenshot, the same way `clip_sound` already
+/// is for clips.
 pub(crate) const REQUIRES_REARM: [&str; 7] = [
     "fps",
     "bitrate_kbps",
@@ -658,11 +660,6 @@ impl Daemon {
     /// already running, which is what makes it nearly free and what makes it
     /// correct inside fullscreen games. The wording mirrors [`Self::clip`]'s
     /// because it is the same failure.
-    ///
-    /// Unlike the clip library, screenshots are **not** cached in memory: they
-    /// are scanned from disk on demand. A screenshot has no sidecar to read, so
-    /// a scan is a directory listing plus a 4 KB header read per file, and a
-    /// cache would buy nothing while adding a second thing to keep in sync.
     pub fn screenshot(&self) -> Result<ShotMeta> {
         let meta = {
             let armed = self.lock_armed();
@@ -683,6 +680,11 @@ impl Daemon {
     }
 
     /// One page of screenshots, newest first.
+    ///
+    /// Unlike the clip library, screenshots are **not** cached in memory: they
+    /// are scanned from disk on demand. A screenshot has no sidecar to read, so
+    /// a scan is a directory listing plus a 4 KB header read per file, and a
+    /// cache would buy nothing while adding a second thing to keep in sync.
     pub fn shots_list(&self, offset: usize, limit: usize) -> ShotPage {
         let dir = shot::shots_dir(&self.clip_dir());
         let all = shot::scan(&dir).unwrap_or_else(|e| {

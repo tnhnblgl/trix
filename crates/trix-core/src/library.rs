@@ -271,7 +271,9 @@ fn adopt(dir: &Path, id: &str) -> ClipMeta {
 }
 
 /// `20260726_143012` -> `2026-07-26T14:30:12` with no offset claimed, since
-/// an adopted file's original time zone is unknowable.
+/// the time zone in force when the file was made -- an adopted clip, or a
+/// screenshot, whose id is stamped straight from this same format -- is not
+/// recoverable from a filename alone.
 pub fn created_from_id(id: &str) -> String {
     let d = &id[..8];
     let t = &id[9..15];

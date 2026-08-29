@@ -1,4 +1,4 @@
-//! The sound played when a clip is saved.
+//! The sounds played when a clip or a screenshot is saved.
 
 use std::path::Path;
 
