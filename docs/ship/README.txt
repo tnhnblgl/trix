@@ -1,4 +1,4 @@
-Trix 0.8.0
+Trix 1.0.0
 ==========
 
 A clip recorder for Windows, for people whose PC cannot spare the frames.
@@ -6,6 +6,23 @@ Trix keeps the last few seconds of your screen in memory and writes them to
 a file when you press a key. Capture and encoding run on the GPU, so the
 cost to your game is close to nothing, and the app itself stays out of the
 way while you play.
+
+
+NEW IN 1.0.0
+------------
+
+Trix takes screenshots. Alt+F8 saves a picture of the screen and puts it on
+your clipboard at the same moment, and a Screenshots tab in the app keeps
+every one you have taken. It works the way clipping does -- the picture comes
+off the recording that is already running -- so Trix has to be started first,
+and the key tells you so if it is not. There is a section on it further down.
+
+Trix also shows up on Discord while it is running. Your profile says you are
+"Clipping with Trix", with a button your friends can press to get it, and it
+clears when you close Trix. It talks only to the Discord app on this PC and
+sends nothing about you, your clips or what you are recording.
+
+To turn it off:  Settings -> Trix -> Discord presence.
 
 
 NEW IN 0.8.0
@@ -97,7 +114,7 @@ at all. Both are fixed, and links in the app now open in your browser.
 
 PLEASE NOTE: this is a version you have to install by hand, once. Every
 release up to and including 0.5.2 carries the broken updater inside it, so
-none of them can fetch this one -- that is the bug. Download 0.8.0 from the
+none of them can fetch this one -- that is the bug. Download 1.0.0 from the
 releases page and unzip it over your old folder. Your settings and your
 clips live elsewhere and are not touched. From 0.5.3 onward the in-app
 updater works normally again.
@@ -123,7 +140,7 @@ component that was never included in the build, and that ended the app on the
 spot. It is included now.
 
 If you are on 0.4.0 or 0.5.0, Trix cannot update itself out of this, because
-the update check is the thing that closed it. Download 0.8.0 by hand from the
+the update check is the thing that closed it. Download 1.0.0 by hand from the
 releases page and unzip it over your old folder. Your settings and your clips
 are somewhere else and are not touched.
 
@@ -201,6 +218,7 @@ DEFAULTS
   PC sound          100
   Microphone        100
   Start with Windows  off
+  Discord presence  on
 
 All of these are in Settings.
 
