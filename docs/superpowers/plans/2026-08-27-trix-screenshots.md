@@ -2538,7 +2538,13 @@ Create `crates/trix-ui/web/src/components/ShotCard.svelte`:
     opacity: 0;
     transition: opacity var(--t-fast) var(--ease);
   }
-  .card:hover .actions, .card:focus-within .actions { opacity: 1; }
+  /* `.selected` belongs here alongside hover and focus. A ShotCard's single
+     click opens the viewer outright -- there is no separate select gesture the
+     way ClipCard has one -- so arrow-key navigation is the only route to a
+     selected-but-not-hovered card, and without this rule its controls are
+     invisible in exactly that state. ClipCard.svelte makes the same argument
+     in its own comment. */
+  .card:hover .actions, .card:focus-within .actions, .card.selected .actions { opacity: 1; }
 </style>
 ```
 
@@ -2579,7 +2585,7 @@ Create `crates/trix-ui/web/src/components/ShotViewer.svelte`:
 
 {#if shot}
   <div class="viewer">
-    <img src={dir ? shotUrl(dir, shot.id) : ''} alt={`Screenshot from ${shot.created}`} />
+    <img src={dir ? shotUrl(dir, shot.id) : ''} alt={`Screenshot from ${new Date(shot.created).toLocaleString()}`} />
     <div class="bar">
       <span class="tnum">{app.shotSelected + 1} / {app.shots.length}</span>
       <span class="spacer"></span>
@@ -2591,8 +2597,17 @@ Create `crates/trix-ui/web/src/components/ShotViewer.svelte`:
 {/if}
 
 <style>
+  /* `fixed`, not `absolute`. `Shots.svelte`'s `.page` sits inside
+     `App.svelte`'s `.content`, which is the pane that actually scrolls
+     (`overflow: auto`) -- `.page` itself grows past the window whenever the
+     grid has enough rows. An `absolute; inset: 0` viewer sizes to *that* box
+     rather than the window, so the control bar lands off-screen below the
+     fold. `fixed` anchors to the viewport, which is what Modal.svelte's scrim
+     and Toasts.svelte already do. Check the ancestor chain for a
+     `transform`/`filter`/`will-change` that would trap it -- `.app`,
+     `.shell`, `.content` and `TitleBar` set none today. */
   .viewer {
-    position: absolute;
+    position: fixed;
     inset: 0;
     display: flex;
     flex-direction: column;
@@ -2683,7 +2698,23 @@ Create `crates/trix-ui/web/src/views/Shots.svelte`:
   {#if app.shots.length === 0}
     <div class="empty">
       <p>No screenshots yet.</p>
-      <p class="hint">Press {hotkeyCaps} while Trix is armed.</p>
+      <!-- `formatCombo` returns `string[]`, so interpolating it directly would
+           render a comma-joined list. Grid.svelte already solves this with
+           keycaps; match it rather than inventing a second look. -->
+      <p class="hint">
+        Press
+        {#if hotkeyCaps.length > 0}
+          <span class="combo">
+            {#each hotkeyCaps as cap, i (i)}
+              {#if i > 0}<span class="plus">+</span>{/if}
+              <kbd>{cap}</kbd>
+            {/each}
+          </span>
+        {:else}
+          your screenshot hotkey
+        {/if}
+        while Trix is armed.
+      </p>
     </div>
   {:else}
     <div class="grid" bind:this={gridEl}>
@@ -2765,6 +2796,25 @@ The empty state renders the hotkey through formatCombo rather than printing
 the raw config string, which is what the clip grid used to do while Settings
 two clicks away showed keycaps for the same setting."
 ```
+
+**Corrections folded back in after Task 9's review.** Four defects in the text
+above were found during implementation and review, and are already fixed in the
+snippets:
+
+1. **`.viewer` was `position: absolute`.** It would have sized to `Shots.svelte`'s
+   `.page` inside `App.svelte`'s scrolling `.content`, not to the window,
+   stranding the control bar below the fold on any grid long enough to scroll.
+   Now `fixed`, with the ancestor chain checked for a containing-block trap.
+2. **The empty state interpolated `{hotkeyCaps}` directly.** `formatCombo`
+   returns `string[]`, which stringifies to a comma-joined list. Now rendered as
+   `<kbd>` keycaps the way `Grid.svelte` does.
+3. **`.card.selected .actions` was missing from ShotCard's reveal rule.** A
+   ShotCard click opens the viewer outright, so arrow-key navigation is the only
+   way to reach a selected-but-not-hovered card -- and its copy/reveal/delete
+   controls were invisible there.
+4. **The viewer's `alt` text read the raw timestamp aloud.** Now formatted with
+   `toLocaleString()`, matching `ShotCard`. `created` carries no UTC offset, so
+   `new Date()` parsing it as local time is the correct reading.
 
 ---
 
