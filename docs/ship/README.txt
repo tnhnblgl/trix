@@ -193,7 +193,8 @@ DEFAULTS
   Replay length     15 seconds
   Frame rate        60 fps
   Bitrate           8000 kbps, variable
-  Hotkey            Alt+F10
+  Clip hotkey       Alt+F10
+  Screenshot hotkey Alt+F8
   Clips folder      %USERPROFILE%\Videos\Trix
   Library cap       off -- Trix never deletes a clip to save space
   GPU priority      low -- your game gets the GPU first
@@ -226,6 +227,27 @@ To turn the check off:  Settings -> Updates -> Check for updates.
 
 Trix cannot update itself if you put it somewhere Windows protects, such as
 Program Files. It will say so and point you at the download page.
+
+
+SCREENSHOTS
+-----------
+
+Alt+F8 saves a picture of the screen, the way Alt+F10 saves a clip. It goes
+to a Screenshots folder inside your clips folder, and onto your clipboard at
+the same time, so you can paste it straight into Discord or a chat window
+without going to find the file first.
+
+Trix has to be recording. The picture comes off the same live capture the
+clips come off, so with Trix stopped there is nothing to take a picture of,
+and the key says so rather than doing nothing. Press Start first.
+
+The Screenshots tab shows everything you have taken. Click one to see it
+full size; copy, show in folder and delete are on the card.
+
+A screenshot plays a different sound from a clip, so you can tell which key
+you hit without looking. Settings -> Trix has a switch for it, and the
+Screenshot hotkey is there too if something else on your PC already owns
+Alt+F8.
 
 
 CLIP SOUND
