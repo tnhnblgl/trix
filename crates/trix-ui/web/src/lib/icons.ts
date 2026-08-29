@@ -15,7 +15,7 @@ export type IconName =
   | 'pencil' | 'trash' | 'folder' | 'scissors' | 'volume' | 'volume-mute'
   | 'fullscreen' | 'fullscreen-exit' | 'chevron-left' | 'chevron-right'
   | 'chevron-down' | 'dots' | 'check' | 'rearm' | 'minimize' | 'maximize'
-  | 'restore' | 'close' | 'alert';
+  | 'restore' | 'close' | 'alert' | 'camera' | 'copy';
 
 /** Shared by the outline and filled stars, which are one shape drawn twice. */
 const STAR = 'M8 2l1.8 3.9 4.2.5-3.1 2.9.8 4.2L8 11.5 4.3 13.5l.8-4.2L2 6.4l4.2-.5z';
@@ -63,4 +63,6 @@ export const ICONS: Record<IconName, IconDef> = {
   restore: { d: 'M5 5V3.5h7.5V11H11M3.5 5H11v7.5H3.5z' },
   close: { d: 'M3.5 3.5l9 9M12.5 3.5l-9 9' },
   alert: { d: 'M8 2.8l5.7 10H2.3zM8 6.6v3M8 11.4v.6' },
+  camera: { d: 'M2 5.5h2.8l1.2-1.5h4l1.2 1.5H14v7H2zM8 6.5a2.75 2.75 0 1 0 0 5.5 2.75 2.75 0 0 0 0-5.5z' },
+  copy: { d: 'M5.5 2.5h8v8M2.5 5.5h8v8h-8z' },
 };

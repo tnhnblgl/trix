@@ -7,6 +7,9 @@
   <button type="button" class="nav" class:on={app.view === 'grid'} onclick={() => (app.view = 'grid')}>
     <Icon name="clips" size={15} />Clips
   </button>
+  <button type="button" class="nav" class:on={app.view === 'shots'} onclick={() => (app.view = 'shots')}>
+    <Icon name="camera" size={15} />Screenshots
+  </button>
   <button type="button" class="nav" class:on={app.view === 'settings'} onclick={() => (app.view = 'settings')}>
     <Icon name="settings" size={15} />Settings
   </button>

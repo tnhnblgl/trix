@@ -3,6 +3,7 @@
   import DaemonDown from './views/DaemonDown.svelte';
   import Grid from './views/Grid.svelte';
   import ClipPage from './views/ClipPage.svelte';
+  import Shots from './views/Shots.svelte';
   import Settings from './views/Settings.svelte';
   import FirstRun from './views/FirstRun.svelte';
   import Toasts from './components/Toasts.svelte';
@@ -60,6 +61,8 @@
           <Grid />
         {:else if app.view === 'clip'}
           <ClipPage />
+        {:else if app.view === 'shots'}
+          <Shots />
         {:else if app.view === 'settings'}
           <Settings />
         {/if}

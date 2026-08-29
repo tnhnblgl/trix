@@ -11,6 +11,7 @@ const REQUIRED: IconName[] = [
   'trash', 'folder', 'scissors', 'volume', 'volume-mute', 'fullscreen',
   'fullscreen-exit', 'chevron-left', 'chevron-right', 'chevron-down', 'dots',
   'check', 'rearm', 'minimize', 'maximize', 'restore', 'close', 'alert',
+  'camera', 'copy',
 ];
 
 describe('ICONS', () => {
