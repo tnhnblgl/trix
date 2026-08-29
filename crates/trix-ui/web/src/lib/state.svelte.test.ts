@@ -740,7 +740,7 @@ describe('wireDaemon: config_changed', () => {
     app.total = 1;
     callMock.mockImplementation((cmd: string) => {
       if (cmd === 'status') {
-        return Promise.resolve({ ...statusPayload(), clip_dir: 'D:\new-clips' });
+        return Promise.resolve({ ...statusPayload(), clip_dir: 'D:\\new-clips' });
       }
       if (cmd === 'library.list') {
         return Promise.resolve({ clips: [clip('in-the-new-folder')], total: 1, offset: 0 });
@@ -749,7 +749,7 @@ describe('wireDaemon: config_changed', () => {
     });
     const handle = registerDaemonEventHandler();
 
-    handle({ event: 'config_changed', data: { clip_dir_resolved: 'D:\new-clips' } });
+    handle({ event: 'config_changed', data: { clip_dir_resolved: 'D:\\new-clips' } });
 
     await vi.waitFor(() => expect(app.clips.map((c) => c.id)).toEqual(['in-the-new-folder']));
   });
@@ -765,7 +765,7 @@ describe('wireDaemon: config_changed', () => {
     app.shotTotal = 1;
     callMock.mockImplementation((cmd: string) => {
       if (cmd === 'status') {
-        return Promise.resolve({ ...statusPayload(), clip_dir: 'D:\new-clips' });
+        return Promise.resolve({ ...statusPayload(), clip_dir: 'D:\\new-clips' });
       }
       if (cmd === 'shots.list') {
         return Promise.resolve({ shots: [shot('in-the-new-folder')], total: 1, offset: 0 });
@@ -774,7 +774,7 @@ describe('wireDaemon: config_changed', () => {
     });
     const handle = registerDaemonEventHandler();
 
-    handle({ event: 'config_changed', data: { clip_dir_resolved: 'D:\new-clips' } });
+    handle({ event: 'config_changed', data: { clip_dir_resolved: 'D:\\new-clips' } });
 
     await vi.waitFor(() => expect(app.shots.map((s) => s.id)).toEqual(['in-the-new-folder']));
   });
