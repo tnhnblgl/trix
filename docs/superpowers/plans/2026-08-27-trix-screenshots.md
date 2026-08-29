@@ -2840,7 +2840,14 @@ Record the observed result for each — not "should":
 1. **Disarmed press.** Trix not armed, press `Alt+F8`. Expected: an error toast saying Trix is not armed. **Not silence.**
 2. **Armed press.** Arm Trix, press `Alt+F8`. Expected: the blip sounds, and it is audibly different from the clip chime.
 3. **The files.** `<clip_dir>\Screenshots\` holds `{id}.jpg` at full monitor resolution and `{id}.thumb.jpg` 640 px wide.
-4. **The clipboard.** Paste into Discord or Paint. Expected: the screenshot, **right way up**. A vertically mirrored paste means the row flip in `clipboard::dibv5` is inverted.
+4. **The clipboard.** Paste into **Discord specifically, not Paint**. Expected:
+   the screenshot, **right way up** and **fully opaque**. A vertically mirrored
+   paste means the row flip in `clipboard::dibv5` is inverted. A transparent or
+   black paste means the `CF_DIBV5` alpha mask (`clipboard.rs:53`) is honouring
+   a capture alpha channel that is not opaque -- Paint ignores alpha and would
+   look fine either way, which is exactly why it is the wrong target to test
+   with. The mitigation is held in reserve: force the alpha byte to `0xFF` in
+   the row copy, or set `bV5AlphaMask` to `0`.
 5. **The tab.** The Screenshots tab shows the new tile without a reload, because `shot_saved` arrived. The thumbnail renders — a broken image here means the asset-scope grant from Task 8 is not working.
 6. **In a game.** Launch a fullscreen game, arm, press `Alt+F8`. Expected: the game, not a black frame.
 7. **The actions.** Copy re-copies. Show in folder opens Explorer with the file selected. Delete removes **both** files from disk.
