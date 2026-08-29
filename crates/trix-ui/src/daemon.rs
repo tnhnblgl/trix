@@ -202,6 +202,16 @@ fn terminate(pid: u32) -> Result<(), String> {
 /// same rule that could drift apart.
 fn grant_clip_dir(app: &AppHandle, dir: &str) {
     let _ = app.asset_protocol_scope().allow_directory(dir, false);
+    // The screenshots subfolder needs its own grant: `allow_directory` is
+    // non-recursive, so without this every thumbnail in the Screenshots tab is
+    // a broken image with nothing logged and nothing on screen to say why.
+    //
+    // A second call rather than flipping the first to recursive: the clips
+    // folder is one the user chose, and it may well have unrelated subtrees
+    // under it that the webview has no business reading.
+    let _ = app
+        .asset_protocol_scope()
+        .allow_directory(std::path::Path::new(dir).join("Screenshots"), false);
 }
 
 /// Owns the current connection and the thread that keeps trying to make one.

@@ -17,6 +17,20 @@ export type ClipMeta = {
   favorite: boolean;
 };
 
+/**
+ * Mirrors `trix_proto::ShotMeta`. No sidecar exists, so every field is
+ * recovered from the file itself, and `created` carries no UTC offset —
+ * `new Date()` parses it as local time, which is the right reading for a file
+ * this machine wrote.
+ */
+export type ShotMeta = {
+  id: string;
+  created: string;
+  bytes: number;
+  width: number;
+  height: number;
+};
+
 export type Status = {
   armed: boolean;
   encoder: string | null;

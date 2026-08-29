@@ -2,9 +2,9 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { call, daemonConnected, onConnected, onDaemonEvent, onDisconnected } from './ipc';
 import { mergeSaved } from './clips';
-import type { ClipMeta, Status } from './types';
+import type { ClipMeta, ShotMeta, Status } from './types';
 
-export type View = 'grid' | 'clip' | 'settings' | 'firstrun';
+export type View = 'grid' | 'clip' | 'shots' | 'settings' | 'firstrun';
 export type Toast = { id: number; kind: 'error' | 'info'; text: string };
 
 let nextToastId = 1;
@@ -47,6 +47,10 @@ class AppState {
   view = $state<View>('grid');
   clips = $state<ClipMeta[]>([]);
   total = $state(0);
+  shots = $state<ShotMeta[]>([]);
+  shotTotal = $state(0);
+  /** Index into `shots` of the tile the grid has selected. */
+  shotSelected = $state(0);
   /** Index into `clips` of the clip the clip page is showing. */
   selected = $state(0);
   toasts = $state<Toast[]>([]);
@@ -58,6 +62,8 @@ class AppState {
    * first-run question, so this is one more field off a call already made.
    */
   hotkey = $state('alt+f10');
+  /** The saved screenshot hotkey, for the empty tab's "press X while you play". */
+  shotHotkey = $state('alt+f8');
   /**
    * Config keys accepted while armed whose new value only takes effect at
    * the next arm -- the "Re-arm to apply" banner's contents. Lives on `app`
@@ -154,6 +160,53 @@ class AppState {
       this.clips = page.clips;
       this.total = page.total;
       this.selected = 0;
+    } catch (e) {
+      this.toast('error', String(e));
+    }
+  }
+
+  async loadShots() {
+    try {
+      const page = await call<{ shots: ShotMeta[]; total: number; offset: number }>('shots.list', {
+        offset: 0,
+        limit: 200,
+      });
+      this.shots = page.shots;
+      this.shotTotal = page.total;
+      this.shotSelected = 0;
+    } catch (e) {
+      this.toast('error', String(e));
+    }
+  }
+
+  async deleteShot(id: string) {
+    try {
+      await call('shots.delete', { shot_id: id });
+      const index = this.shots.findIndex((s) => s.id === id);
+      this.shots = this.shots.filter((s) => s.id !== id);
+      this.shotTotal = Math.max(0, this.shotTotal - 1);
+      // Keep the selection on the tile that took the deleted one's place, so
+      // holding Delete walks the grid instead of jumping back to the start.
+      this.shotSelected = Math.min(index < 0 ? 0 : index, Math.max(0, this.shots.length - 1));
+    } catch (e) {
+      this.toast('error', String(e));
+    }
+  }
+
+  async revealShot(id: string) {
+    try {
+      await call('shots.reveal', { shot_id: id });
+    } catch (e) {
+      this.toast('error', String(e));
+    }
+  }
+
+  async copyShot(id: string) {
+    try {
+      await call('shots.copy', { shot_id: id });
+      // A clipboard write is otherwise entirely invisible: nothing on screen
+      // changes, so without this the button looks broken when it worked.
+      this.toast('info', 'Screenshot copied');
     } catch (e) {
       this.toast('error', String(e));
     }
@@ -320,6 +373,7 @@ async function onDaemonUp() {
     // not close it.
     const config = await call<Record<string, unknown>>('config.get');
     app.hotkey = String(config['clip_hotkey'] ?? 'alt+f10');
+    app.shotHotkey = String(config['screenshot_hotkey'] ?? 'alt+f8');
     if (config['config_file_exists'] === false) app.view = 'firstrun';
     // Reached only once config.get has actually resolved, which is what
     // makes "skip the automatic check when config.get fails" automatic --
@@ -372,6 +426,9 @@ export function wireDaemon() {
     const data = event.data as Record<string, unknown>;
     if (event.event === 'config_changed' && typeof event.data['clip_hotkey'] === 'string') {
       app.hotkey = event.data['clip_hotkey'];
+    }
+    if (event.event === 'config_changed' && typeof event.data['screenshot_hotkey'] === 'string') {
+      app.shotHotkey = event.data['screenshot_hotkey'];
     }
     switch (event.event) {
       case 'armed':
@@ -434,6 +491,19 @@ export function wireDaemon() {
           // `selected` already points.
           if (!wasEmpty) app.selected += 1;
           app.toast('info', `Saved ${saved.title}`);
+        }
+        break;
+      }
+      case 'shot_saved': {
+        const saved = event.data as unknown as ShotMeta;
+        // Prepend: `shot::scan` is newest-first and so is this list.
+        if (!app.shots.some((s) => s.id === saved.id)) {
+          app.shots = [saved, ...app.shots];
+          app.shotTotal += 1;
+          // Every existing tile shifts down one slot, so a selection held by
+          // index would silently move to a different screenshot -- the same
+          // bug `clip_saved` documents for the clip grid.
+          if (app.shots.length > 1) app.shotSelected += 1;
         }
         break;
       }
