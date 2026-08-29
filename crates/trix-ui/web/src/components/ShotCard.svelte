@@ -63,5 +63,5 @@
     opacity: 0;
     transition: opacity var(--t-fast) var(--ease);
   }
-  .card:hover .actions, .card:focus-within .actions { opacity: 1; }
+  .card:hover .actions, .card:focus-within .actions, .card.selected .actions { opacity: 1; }
 </style>

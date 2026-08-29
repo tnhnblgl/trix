@@ -28,7 +28,7 @@
 
 {#if shot}
   <div class="viewer">
-    <img src={dir ? shotUrl(dir, shot.id) : ''} alt={`Screenshot from ${shot.created}`} />
+    <img src={dir ? shotUrl(dir, shot.id) : ''} alt={`Screenshot from ${new Date(shot.created).toLocaleString()}`} />
     <div class="bar">
       <span class="tnum">{app.shotSelected + 1} / {app.shots.length}</span>
       <span class="spacer"></span>
