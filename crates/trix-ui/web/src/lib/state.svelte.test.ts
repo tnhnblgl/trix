@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ClipMeta, DaemonEvent } from './types';
+import type { ClipMeta, DaemonEvent, ShotMeta } from './types';
 
 // `state.svelte.ts` talks to the daemon through `./ipc`; mocking it here is
 // what lets these tests call the real store methods -- `remove`, `step`,
@@ -91,6 +91,15 @@ const clip = (id: string): ClipMeta => ({
   favorite: false,
 });
 
+/** Minimal valid `ShotMeta`, mirroring `clip` above. */
+const shot = (id: string): ShotMeta => ({
+  id,
+  created: '2026-07-26T14:30:12+03:00',
+  bytes: 2048576,
+  width: 1920,
+  height: 1200,
+});
+
 beforeEach(() => {
   callMock.mockReset();
   invokeMock.mockReset();
@@ -99,6 +108,9 @@ beforeEach(() => {
   app.clips = [];
   app.total = 0;
   app.selected = 0;
+  app.shots = [];
+  app.shotTotal = 0;
+  app.shotSelected = 0;
   app.view = 'clip';
   app.toasts = [];
   app.rearmNeeded = [];
@@ -176,6 +188,76 @@ describe('AppState.remove', () => {
 
     expect(app.clips.map((c) => c.id)).toEqual(['a', 'b']);
     expect(app.total).toBe(2);
+    expect(app.toasts.at(-1)?.text).toContain('pipe closed');
+  });
+});
+
+describe('AppState.deleteShot', () => {
+  it('lands on the screenshot that slid into the deleted slot', async () => {
+    callMock.mockResolvedValue({});
+    app.shots = [shot('a'), shot('b'), shot('c')];
+    app.shotTotal = 3;
+    app.shotSelected = 1; // pointing at 'b'
+
+    await app.deleteShot('b');
+
+    expect(callMock).toHaveBeenCalledWith('shots.delete', { shot_id: 'b' });
+    expect(app.shots.map((s) => s.id)).toEqual(['a', 'c']);
+    // 'c' slid down into index 1, where 'b' used to be.
+    expect(app.shotSelected).toBe(1);
+    expect(app.shotTotal).toBe(2);
+  });
+
+  it('clamps to the new last screenshot when the deleted one was at the end', async () => {
+    // The off-by-one this guards: deleting the last screenshot must not leave
+    // `shotSelected` pointing one past the new end of the (now shorter) array.
+    callMock.mockResolvedValue({});
+    app.shots = [shot('a'), shot('b'), shot('c')];
+    app.shotSelected = 2; // pointing at 'c', the last one
+
+    await app.deleteShot('c');
+
+    expect(app.shots.map((s) => s.id)).toEqual(['a', 'b']);
+    expect(app.shotSelected).toBe(1);
+  });
+
+  it('stays put when deleting the first screenshot while selected elsewhere', async () => {
+    callMock.mockResolvedValue({});
+    app.shots = [shot('a'), shot('b'), shot('c')];
+    app.shotSelected = 2; // pointing at 'c'
+
+    await app.deleteShot('a');
+
+    expect(app.shots.map((s) => s.id)).toEqual(['b', 'c']);
+    // 'c' is now at index 1, but selection tracked the deleted screenshot's
+    // slot (index 0), not the tile the user was actually looking at -- the
+    // same documented, if surprising, contract `remove` has for clips.
+    expect(app.shotSelected).toBe(0);
+  });
+
+  it('clamps to 0 once the last screenshot is gone', async () => {
+    callMock.mockResolvedValue({});
+    app.shots = [shot('a')];
+    app.shotTotal = 1;
+    app.shotSelected = 0;
+
+    await app.deleteShot('a');
+
+    expect(app.shots).toHaveLength(0);
+    expect(app.shotTotal).toBe(0);
+    expect(app.shotSelected).toBe(0);
+  });
+
+  it('leaves the screenshot list untouched and toasts when the daemon call fails', async () => {
+    callMock.mockRejectedValue(new Error('pipe closed'));
+    app.shots = [shot('a'), shot('b')];
+    app.shotTotal = 2;
+    app.shotSelected = 0;
+
+    await app.deleteShot('a');
+
+    expect(app.shots.map((s) => s.id)).toEqual(['a', 'b']);
+    expect(app.shotTotal).toBe(2);
     expect(app.toasts.at(-1)?.text).toContain('pipe closed');
   });
 });
@@ -559,6 +641,67 @@ describe('wireDaemon: clip_saved', () => {
     expect(app.total).toBe(2);
     expect(app.selected).toBe(1);
     expect(app.toasts).toHaveLength(0);
+  });
+});
+
+describe('wireDaemon: shot_saved', () => {
+  it('prepends a genuinely new screenshot and bumps the total', () => {
+    app.shots = [shot('a'), shot('b')];
+    app.shotTotal = 2;
+    app.shotSelected = 0;
+    const handle = registerDaemonEventHandler();
+
+    handle({ event: 'shot_saved', data: shot('new') as unknown as Record<string, unknown> });
+
+    expect(app.shots.map((s) => s.id)).toEqual(['new', 'a', 'b']);
+    expect(app.shotTotal).toBe(3);
+  });
+
+  // The bug the comment at state.svelte.ts:503 names: a genuine prepend
+  // shifts every existing tile down one slot, so a selection held by index
+  // would silently move to a different screenshot -- the same regression
+  // clip_saved is tested against above.
+  it('shifts the selection so it still points at the screenshot the user had, not the slot', () => {
+    app.shots = [shot('a'), shot('b')];
+    app.shotTotal = 2;
+    app.shotSelected = 1; // pointing at 'b'
+    const handle = registerDaemonEventHandler();
+
+    handle({ event: 'shot_saved', data: shot('new') as unknown as Record<string, unknown> });
+
+    // 'b' slid from index 1 to index 2 when 'new' was prepended.
+    expect(app.shotSelected).toBe(2);
+    expect(app.shots[app.shotSelected]?.id).toBe('b');
+  });
+
+  it('does not shift the selection when the screenshot list was empty', () => {
+    app.shots = [];
+    app.shotTotal = 0;
+    app.shotSelected = 0;
+    const handle = registerDaemonEventHandler();
+
+    handle({ event: 'shot_saved', data: shot('new') as unknown as Record<string, unknown> });
+
+    expect(app.shots.map((s) => s.id)).toEqual(['new']);
+    expect(app.shotTotal).toBe(1);
+    expect(app.shotSelected).toBe(0);
+  });
+
+  it('does not duplicate, inflate the total, or move the selection for a screenshot already in the list', () => {
+    // Mirrors a reconnect: `shots.list` already loaded 'a', and its
+    // `shot_saved` event arrives after. Unlike `clip_saved`, there is no
+    // `mergeSaved` here to fold the repeat in -- a known id is a straight
+    // no-op, so the list itself must come back untouched too.
+    app.shots = [shot('a'), shot('b')];
+    app.shotTotal = 2;
+    app.shotSelected = 1; // pointing at 'b'
+    const handle = registerDaemonEventHandler();
+
+    handle({ event: 'shot_saved', data: shot('a') as unknown as Record<string, unknown> });
+
+    expect(app.shots.map((s) => s.id)).toEqual(['a', 'b']);
+    expect(app.shotTotal).toBe(2);
+    expect(app.shotSelected).toBe(1);
   });
 });
 
