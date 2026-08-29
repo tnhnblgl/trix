@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 // Read through Vite's `?raw`, not `node:fs`: the filesystem would mean adding
 // @types/node, and this project takes no new dependency, dev ones included.
 import clipCardSource from '../components/ClipCard.svelte?raw';
+import shotCardSource from '../components/ShotCard.svelte?raw';
 import gridSource from '../views/Grid.svelte?raw';
+import shotsSource from '../views/Shots.svelte?raw';
 import {
   shouldHandleKey,
   sliderOwnsKey,
@@ -258,5 +260,20 @@ describe('the card/grid control marker', () => {
     // constant would go unused, and this project sets no `noUnusedLocals`, so
     // nothing else would say a word.
     expect(gridSource).toContain('CARD_CONTROL_SELECTOR');
+  });
+
+  // I2: `ShotCard` shipped with its three IconButtons marked not at all,
+  // which is what silently unenforced looks like -- this pattern was already
+  // established and held for `ClipCard` above, and nothing caught the new
+  // card missing it. One mark on the `.actions` wrapper covers Copy, Show in
+  // folder and Delete, since `closest()` walks up from whichever button has
+  // focus.
+  it('is carried by the shot card, so its actions are not stolen by the grid', () => {
+    const marks = shotCardSource.split(CARD_CONTROL_ATTR).length - 1;
+    expect(marks).toBe(1);
+  });
+
+  it('is what the Screenshots grid actually searches for', () => {
+    expect(shotsSource).toContain('CARD_CONTROL_SELECTOR');
   });
 });

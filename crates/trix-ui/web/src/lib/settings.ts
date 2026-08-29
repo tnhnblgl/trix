@@ -11,6 +11,23 @@ export type Field = {
   options?: { value: string; label: string }[];
   /** Filled at runtime from monitors.list / encoders.list. */
   dynamic?: 'monitors';
+  /**
+   * Whether a press of this hotkey reaches the daemon as `hotkey_pressed`,
+   * which is what `Field.svelte`'s "Test" button and its hint are answering.
+   * Only `clip_hotkey`'s `WM_HOTKEY` arm broadcasts that event -- the
+   * screenshot arm deliberately stays silent (`window.rs`, the arm for
+   * `SHOT_HOTKEY_ID`) so a screenshot press can never make the clip row's
+   * "press it now" check look answered.
+   *
+   * A flag on the descriptor rather than a `field.key === 'clip_hotkey'`
+   * string check in the component: this branch already shipped one Critical
+   * from a hard-coded `clip_hotkey` overwriting the wrong setting, and tying
+   * a UI affordance to a literal key name is the same shape of mistake
+   * waiting for a third hotkey row. `true` is the only value this ever takes,
+   * so a missing flag and an absent one both mean "not live-testable" with
+   * nothing to get out of sync.
+   */
+  liveTest?: true;
 };
 
 /**
@@ -56,7 +73,7 @@ export const FIELDS: Field[] = [
   { key: 'clip_dir', label: 'Clips folder', kind: 'folder', section: 'Clips', help: 'Where clips are saved. Empty means Videos\\Trix.' },
   { key: 'max_library_gb', label: 'Library limit', kind: 'number', section: 'Clips', ...span('max_library_gb'), help: 'GB. When exceeded the oldest non-favorite clips are deleted. 0 turns the limit off.' },
 
-  { key: 'clip_hotkey', label: 'Clip hotkey', kind: 'hotkey', section: 'Trix', help: 'Press the combination to test it. Overlays can silently take a hotkey inside games.' },
+  { key: 'clip_hotkey', label: 'Clip hotkey', kind: 'hotkey', section: 'Trix', liveTest: true, help: 'Press the combination to test it. Overlays can silently take a hotkey inside games.' },
   { key: 'screenshot_hotkey', label: 'Screenshot hotkey', kind: 'hotkey', section: 'Trix', help: 'Saves a picture of the screen and copies it to your clipboard. Only works while Trix is armed, because the picture comes from the recording that is already running.' },
   { key: 'screenshot_sound', label: 'Screenshot sound', kind: 'bool', section: 'Trix', help: 'A short blip when a screenshot is saved, different from the clip sound so you can tell them apart without looking.' },
   { key: 'clip_sound', label: 'Clip sound', kind: 'bool', section: 'Trix', help: 'Plays a sound when a clip is saved, even when the Trix window is closed.' },

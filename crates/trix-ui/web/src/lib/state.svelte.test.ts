@@ -77,6 +77,9 @@ const statusPayload = () => ({
 /** Minimal valid `library.list` payload, enough for `loadClips` to read. */
 const libraryListPayload = () => ({ clips: [], total: 0, offset: 0 });
 
+/** Minimal valid `shots.list` payload, enough for `loadShots` to read. */
+const shotsListPayload = () => ({ shots: [], total: 0, offset: 0 });
+
 const clip = (id: string): ClipMeta => ({
   id,
   title: `clip_${id}`,
@@ -645,7 +648,10 @@ describe('wireDaemon: clip_saved', () => {
 });
 
 describe('wireDaemon: shot_saved', () => {
-  it('prepends a genuinely new screenshot and bumps the total', () => {
+  it('prepends a genuinely new screenshot, bumps the total, and toasts', () => {
+    // C1's second half: prepending the tile is invisible unless the
+    // Screenshots tab happens to be open, so the settled "clipboard + toast +
+    // sound" scope needs a toast here the same way `clip_saved` toasts above.
     app.shots = [shot('a'), shot('b')];
     app.shotTotal = 2;
     app.shotSelected = 0;
@@ -655,6 +661,7 @@ describe('wireDaemon: shot_saved', () => {
 
     expect(app.shots.map((s) => s.id)).toEqual(['new', 'a', 'b']);
     expect(app.shotTotal).toBe(3);
+    expect(app.toasts.at(-1)?.text).toBe('Screenshot saved');
   });
 
   // The bug the comment at state.svelte.ts:503 names: a genuine prepend
@@ -687,11 +694,12 @@ describe('wireDaemon: shot_saved', () => {
     expect(app.shotSelected).toBe(0);
   });
 
-  it('does not duplicate, inflate the total, or move the selection for a screenshot already in the list', () => {
+  it('does not duplicate, inflate the total, move the selection, or toast for a screenshot already in the list', () => {
     // Mirrors a reconnect: `shots.list` already loaded 'a', and its
     // `shot_saved` event arrives after. Unlike `clip_saved`, there is no
     // `mergeSaved` here to fold the repeat in -- a known id is a straight
-    // no-op, so the list itself must come back untouched too.
+    // no-op, so the list itself must come back untouched too, and there is
+    // nothing new to toast about.
     app.shots = [shot('a'), shot('b')];
     app.shotTotal = 2;
     app.shotSelected = 1; // pointing at 'b'
@@ -702,6 +710,7 @@ describe('wireDaemon: shot_saved', () => {
     expect(app.shots.map((s) => s.id)).toEqual(['a', 'b']);
     expect(app.shotTotal).toBe(2);
     expect(app.shotSelected).toBe(1);
+    expect(app.toasts).toHaveLength(0);
   });
 });
 
@@ -745,6 +754,31 @@ describe('wireDaemon: config_changed', () => {
     await vi.waitFor(() => expect(app.clips.map((c) => c.id)).toEqual(['in-the-new-folder']));
   });
 
+  // I1: the same folder dialog belongs to the daemon and can be opened from
+  // the tray menu while the app sits on the Screenshots tab, so a moved
+  // folder has to reload `app.shots` too, not just `app.clips` -- otherwise
+  // every tile keeps building `asset:` URLs against a folder that no longer
+  // holds those ids.
+  it('reloads the screenshot list when the folder actually moved', async () => {
+    app.status = statusPayload();
+    app.shots = [shot('from-the-old-folder')];
+    app.shotTotal = 1;
+    callMock.mockImplementation((cmd: string) => {
+      if (cmd === 'status') {
+        return Promise.resolve({ ...statusPayload(), clip_dir: 'D:\new-clips' });
+      }
+      if (cmd === 'shots.list') {
+        return Promise.resolve({ shots: [shot('in-the-new-folder')], total: 1, offset: 0 });
+      }
+      return Promise.resolve({});
+    });
+    const handle = registerDaemonEventHandler();
+
+    handle({ event: 'config_changed', data: { clip_dir_resolved: 'D:\new-clips' } });
+
+    await vi.waitFor(() => expect(app.shots.map((s) => s.id)).toEqual(['in-the-new-folder']));
+  });
+
   // Every accepted `config.set` broadcasts this event carrying
   // `clip_dir_resolved`, whether or not `clip_dir` was among the keys -- so a
   // bitrate nudge lands here too. Reloading on those would refetch the page and
@@ -762,6 +796,7 @@ describe('wireDaemon: config_changed', () => {
     await vi.waitFor(() => expect(callMock).toHaveBeenCalledWith('status'));
 
     expect(callMock).not.toHaveBeenCalledWith('library.list', expect.anything());
+    expect(callMock).not.toHaveBeenCalledWith('shots.list', expect.anything());
     expect(app.clips.map((c) => c.id)).toEqual(['a', 'b']);
     expect(app.selected).toBe(1);
   });
@@ -769,10 +804,10 @@ describe('wireDaemon: config_changed', () => {
 
 describe('onDaemonUp: first-run routing', () => {
   // Every command onDaemonUp can reach needs a stub, regardless of which
-  // branch a given test takes -- refreshStatus, loadClips and
+  // branch a given test takes -- refreshStatus, loadClips, loadShots and
   // stats.subscribe all run before or after the config.get check, so an
   // unstubbed one would leave a call resolving to `undefined` and throw
-  // inside `refreshStatus`/`loadClips` reading its shape.
+  // inside `refreshStatus`/`loadClips`/`loadShots` reading its shape.
   function stubDaemonCommands(configFileExists: boolean) {
     callMock.mockImplementation((cmd: string) => {
       switch (cmd) {
@@ -782,6 +817,8 @@ describe('onDaemonUp: first-run routing', () => {
           return Promise.resolve(statusPayload());
         case 'library.list':
           return Promise.resolve(libraryListPayload());
+        case 'shots.list':
+          return Promise.resolve(shotsListPayload());
         case 'stats.subscribe':
           return Promise.resolve({});
         default:
@@ -813,6 +850,21 @@ describe('onDaemonUp: first-run routing', () => {
 
     await vi.waitFor(() => expect(callMock).toHaveBeenCalledWith('config.get'));
     expect(app.view).toBe('grid');
+  });
+
+  // I1's other hole: a daemon restart while the Screenshots tab is open. Only
+  // `Shots.svelte`'s mount loaded `app.shots` before this fix, so a reconnect
+  // left it stale. onDaemonUp runs on every connect, including a reconnect
+  // (see its own comment), so this is also what the resiliency-panel restart
+  // path in App.svelte exercises.
+  it('reloads the screenshot list on every connect, same as the clip list', async () => {
+    app.view = 'grid';
+    stubDaemonCommands(true);
+    const handle = registerConnectedHandler();
+
+    handle(undefined);
+
+    await vi.waitFor(() => expect(callMock).toHaveBeenCalledWith('shots.list', expect.anything()));
   });
 });
 

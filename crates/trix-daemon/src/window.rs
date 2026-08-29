@@ -106,16 +106,6 @@ impl HotkeyKind {
             Self::Screenshot => SHOT_HOTKEY_ID,
         }
     }
-
-    /// Its slot in [`PENDING_HOTKEY`]. A plain array rather than a `HashMap`
-    /// because there are exactly two kinds and always will be — `HotkeyKind`
-    /// is not an open set a plugin or a config key can grow.
-    fn slot(self) -> usize {
-        match self {
-            Self::Clip => 0,
-            Self::Screenshot => 1,
-        }
-    }
 }
 
 /// How many pending actions the pump may hold. Small on purpose: these are
@@ -158,26 +148,47 @@ const HOTKEY_ID: i32 = 1;
 /// both of them.
 const SHOT_HOTKEY_ID: i32 = 2;
 
-/// The spec a pending rebind wants, one slot per [`HotkeyKind`] (see
-/// [`HotkeyKind::slot`]), left here because `PostMessageW` carries two
-/// integers and neither a `HotkeyKind` nor a `String` is one of them.
+/// The spec a pending rebind wants, one named field per [`HotkeyKind`], left
+/// here because `PostMessageW` carries two integers and neither a
+/// `HotkeyKind` nor a `String` is one of them.
 ///
-/// One slot per kind, not one slot shared between them. `state.rs`'s
-/// `config.set` handler can rebind both keys back to back from a single
-/// request, posting `WM_TRIX_REHOTKEY` twice within microseconds of each
-/// other while the pump still has to wake from `GetMessageW` to read either
-/// one. A single shared slot would let the second `set_pending_hotkey`
-/// overwrite the first before the pump ever looked — silently dropping that
-/// key's rebind, with the old combination staying live and `config.set`
-/// having already answered `requires_rearm: []`. Before there were two keys,
-/// a shared slot could only ever lose a stale spec *for the same key*, where
-/// last-write-wins was the correct behaviour; a second, unrelated key sharing
-/// the slot is what turns the same overwrite into a bug.
-static PENDING_HOTKEY: Mutex<[Option<String>; 2]> = Mutex::new([None, None]);
+/// A named pair rather than a `[_; 2]` indexed by an ad hoc `slot()`: the
+/// fields are addressed by an exhaustive `match` in [`PendingHotkeys::get_mut`]
+/// instead of a computed index, so there is no panicking index here to be the
+/// one exception to this workspace's `panic = "abort"` rule against them.
+///
+/// One field per kind, not one shared between them. `state.rs`'s `config.set`
+/// handler can rebind both keys back to back from a single request, posting
+/// `WM_TRIX_REHOTKEY` twice within microseconds of each other while the pump
+/// still has to wake from `GetMessageW` to read either one. A single shared
+/// field would let the second `set_pending_hotkey` overwrite the first before
+/// the pump ever looked — silently dropping that key's rebind, with the old
+/// combination staying live and `config.set` having already answered
+/// `requires_rearm: []`. Before there were two keys, a shared field could only
+/// ever lose a stale spec *for the same key*, where last-write-wins was the
+/// correct behaviour; a second, unrelated key sharing the field is what turns
+/// the same overwrite into a bug.
+#[derive(Default)]
+struct PendingHotkeys {
+    clip: Option<String>,
+    screenshot: Option<String>,
+}
+
+impl PendingHotkeys {
+    fn get_mut(&mut self, kind: HotkeyKind) -> &mut Option<String> {
+        match kind {
+            HotkeyKind::Clip => &mut self.clip,
+            HotkeyKind::Screenshot => &mut self.screenshot,
+        }
+    }
+}
+
+static PENDING_HOTKEY: Mutex<PendingHotkeys> =
+    Mutex::new(PendingHotkeys { clip: None, screenshot: None });
 
 fn set_pending_hotkey(kind: HotkeyKind, spec: &str) {
     if let Ok(mut pending) = PENDING_HOTKEY.lock() {
-        pending[kind.slot()] = Some(spec.to_string());
+        *pending.get_mut(kind) = Some(spec.to_string());
     }
 }
 
@@ -192,7 +203,7 @@ fn take_pending_hotkeys() -> Vec<(HotkeyKind, String)> {
     };
     [HotkeyKind::Clip, HotkeyKind::Screenshot]
         .into_iter()
-        .filter_map(|kind| pending[kind.slot()].take().map(|spec| (kind, spec)))
+        .filter_map(|kind| pending.get_mut(kind).take().map(|spec| (kind, spec)))
         .collect()
 }
 
@@ -764,15 +775,34 @@ pub fn handle_action(daemon: &Arc<Daemon>, action: Action) {
             // `screenshot` command announce a saved shot identically, and a
             // hotkey screenshot is never broadcast twice.
             //
-            // A failure has no reply channel either, and stays a log line
-            // only, matching `Action::Clip`'s "clip failed" above: this pump
-            // never invents an `error` event for a hotkey action, since
-            // nothing here dispatches through `dispatch.rs`'s `fail` helper.
+            // A failure is different from `Action::Clip`'s on purpose: Trix
+            // does not arm by default, so "press the new hotkey" is the
+            // *ordinary* first experience of this feature, not a corner case,
+            // and the design this branch was built from is explicit that
+            // disarmed silence is the one failure this feature may not have.
+            // The socket `screenshot` command already reaches a client
+            // through `dispatch.rs`'s `fail` helper, but nothing in the
+            // desktop app sends that command -- the hotkey is the only path
+            // that exists in the shipped product, so it has to raise the
+            // toast itself rather than leaning on a dispatch arm it never
+            // goes through. Built by hand rather than reusing `dispatch.rs`'s
+            // private `error_data` (out of reach here) or `serde_json::json!`
+            // (hides an `unwrap`), but the shape matches it exactly:
+            // `{"cmd":"screenshot","error":…}`, which `state.svelte.ts`'s
+            // `case 'error'` already renders as a toast with no client-side
+            // change needed.
             match daemon.screenshot() {
                 Ok(meta) => {
                     tracing::info!(shot = %meta.id, "screenshot saved from the hotkey")
                 }
-                Err(e) => tracing::warn!(error = %format!("{e:#}"), "screenshot failed"),
+                Err(e) => {
+                    let error = format!("{e:#}");
+                    tracing::warn!(error = %error, "screenshot failed");
+                    let mut fields = Map::new();
+                    fields.insert("cmd".to_string(), Value::from("screenshot"));
+                    fields.insert("error".to_string(), Value::from(error));
+                    daemon.clients.broadcast(&Event::new("error", Value::Object(fields)));
+                }
             }
         }
         Action::HotkeyRebound { spec, registered } => {
@@ -1252,6 +1282,45 @@ mod tests {
         assert_eq!(event.event, "hotkey_rebound");
         assert_eq!(event.data.get("spec").and_then(Value::as_str), Some("ctrl+shift+f9"));
         assert_eq!(event.data.get("registered").and_then(Value::as_bool), Some(true));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Pins the C1 fix: a screenshot hotkey pressed while disarmed must
+    /// broadcast an `error` event, not just a log line. Before this test the
+    /// only path that exists in the shipped product for this feature --
+    /// nothing in the desktop app ever sends the socket `screenshot` command
+    /// -- was silent on failure, which contradicts the spec's explicit
+    /// "pressing the key while not armed must say so."
+    ///
+    /// Same fixture shape as `hotkey_rebound_broadcasts_the_settings_page_
+    /// wire_shape` above: a scratch, never-armed `Daemon` driven directly
+    /// through `handle_action`, so this touches no real config or clip
+    /// library and starts no window.
+    #[test]
+    fn a_disarmed_screenshot_hotkey_broadcasts_an_error_event() {
+        use trix_core::config::Config;
+
+        let dir = std::env::temp_dir().join(format!("trix-shot-hotkey-error-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp clip dir");
+        let config = Config { clip_dir: dir.to_string_lossy().into_owned(), ..Config::default() };
+        let daemon = Arc::new(Daemon::new_at(config, None));
+
+        let (tx, rx) = sync_channel(crate::clients::OUTBOUND_QUEUE_DEPTH);
+        daemon.clients.register(tx);
+
+        handle_action(&daemon, Action::Screenshot);
+
+        let line = rx.try_recv().expect("a disarmed screenshot must broadcast an `error` event");
+        let event: Event = serde_json::from_str(line.trim_end())
+            .unwrap_or_else(|e| panic!("event line did not decode: {e}\nline: {line}"));
+        assert_eq!(event.event, "error");
+        assert_eq!(event.data.get("cmd").and_then(Value::as_str), Some("screenshot"));
+        assert_eq!(
+            event.data.get("error").and_then(Value::as_str),
+            Some("not armed — arm Trix to take a screenshot")
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

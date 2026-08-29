@@ -389,6 +389,11 @@ async function onDaemonUp() {
     // on screen.
   }
   await app.loadClips();
+  // A daemon restart while the Screenshots tab is open is the same stale-list
+  // hole `loadClips` closes above: `Shots.svelte` only loads on mount, so
+  // without this a reconnect would leave the grid showing whatever it had
+  // before the daemon went away.
+  await app.loadShots();
   // Stats drive the ring meter; per spec §4.4 the daemon measures nothing
   // until a client asks, so nobody pays for this while no UI is open.
   try {
@@ -452,19 +457,25 @@ export function wireDaemon() {
         // rebuilt (state.rs's `set_config`), so the app has to ask again or it
         // keeps rendering the old folder's clips against the new folder's
         // asset scope -- every thumbnail broken, every clip unplayable.
+        // Screenshots hit the identical failure: `Screenshots\` lives under
+        // the same `clip_dir`, and the folder dialog this event reacts to can
+        // be opened from the tray menu while the app sits on the Screenshots
+        // tab, so `loadShots` needs the same after-a-move refresh `loadClips`
+        // already gets.
         //
         // Conditional on the folder actually changing, not run on every
         // `config_changed`: `clip_dir_resolved` rides along on all of them
         // (dispatch.rs sends it whether or not `clip_dir` was among the keys),
-        // and `loadClips` resets `selected` to 0. Reloading on every bitrate
-        // nudge would move the selection out from under whoever is in
-        // settings. `status.clip_dir` is the same resolved path, which is what
-        // makes this a fair comparison -- and it is read before
-        // `refreshStatus` replaces it.
+        // and `loadClips`/`loadShots` reset `selected`/`shotSelected` to 0.
+        // Reloading on every bitrate nudge would move the selection out from
+        // under whoever is in settings. `status.clip_dir` is the same resolved
+        // path, which is what makes this a fair comparison -- and it is read
+        // before `refreshStatus` replaces it.
         const moved = String(data['clip_dir_resolved'] ?? '') !== app.clipDir;
         void app.refreshStatus();
         if (moved) {
           void app.loadClips();
+          void app.loadShots();
         }
         break;
       }
@@ -504,6 +515,12 @@ export function wireDaemon() {
           // index would silently move to a different screenshot -- the same
           // bug `clip_saved` documents for the clip grid.
           if (app.shots.length > 1) app.shotSelected += 1;
+          // Prepending the tile is invisible unless the Screenshots tab
+          // happens to be open -- the settled scope for this feature is
+          // "clipboard + toast + its own sound" on every press, matching
+          // `clip_saved`'s toast above. `ShotMeta` has no title (screenshots
+          // are never renamed), so this names the thing instead of quoting it.
+          app.toast('info', 'Screenshot saved');
         }
         break;
       }

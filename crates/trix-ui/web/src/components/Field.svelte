@@ -45,16 +45,13 @@
   let capture = $state<string | null>(null);
 
   /**
-   * Whether this row's press reaches the daemon as `hotkey_pressed`, which is
-   * what the "Test" button and its hint are answering. Only `clip_hotkey`'s
-   * `WM_HOTKEY` arm broadcasts that event -- the screenshot arm deliberately
-   * stays silent (`window.rs`, the arm for `SHOT_HOTKEY_ID`) so a screenshot
-   * press can never make the clip row's "press it now" check look answered.
-   * Keyed off the field's own key rather than `field.kind === 'hotkey'`,
-   * which both rows satisfy, so the Screenshot row hides the button instead
-   * of showing a "Press the hotkey now..." hint that can never resolve.
+   * Whether this row's press reaches the daemon as `hotkey_pressed` -- see
+   * `Field`'s `liveTest` doc comment in `settings.ts` for which row that is
+   * and why. Read off the descriptor rather than a `field.key === 'clip_hotkey'`
+   * literal here, so the affordance is tied to the daemon arm that actually
+   * broadcasts rather than to a string a third hotkey row could silently miss.
    */
-  const testable = $derived(field.kind === 'hotkey' && field.key === 'clip_hotkey');
+  const testable = $derived(field.kind === 'hotkey' && field.liveTest === true);
 
   // Only the testable row subscribes: `heard` can only ever flip on a row
   // whose press is broadcast at all, and registering a listener nobody can

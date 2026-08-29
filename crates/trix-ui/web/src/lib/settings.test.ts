@@ -133,6 +133,30 @@ describe('the screenshot fields', () => {
     // can be answered before it is asked.
     expect(FIELDS.find((f) => f.key === 'screenshot_hotkey')!.help).toMatch(/armed/i);
   });
+
+  it('does not offer a live test, because the screenshot hotkey arm never broadcasts hotkey_pressed', () => {
+    // `window.rs`'s arm for SHOT_HOTKEY_ID deliberately stays silent so a
+    // screenshot press can never make the clip row's "press it now" check
+    // look answered -- `Field.svelte` reads this flag to decide whether to
+    // show the Test button at all.
+    expect(FIELDS.find((f) => f.key === 'screenshot_hotkey')!.liveTest).toBeUndefined();
+  });
+});
+
+describe('liveTest', () => {
+  it('is set only for the one hotkey row the daemon actually echoes back', () => {
+    // A regression guard for the pattern this replaced: `Field.svelte` used to
+    // read `field.key === 'clip_hotkey'` directly, which is exactly the kind
+    // of hard-coded key literal that shipped a real Critical earlier on this
+    // branch. Asserting the flag here, rather than the string, is what makes
+    // a future third hotkey row a decision instead of a silent default.
+    const hotkeyFields = FIELDS.filter((f) => f.kind === 'hotkey');
+    expect(hotkeyFields.map((f) => f.key)).toEqual(['clip_hotkey', 'screenshot_hotkey']);
+    expect(FIELDS.find((f) => f.key === 'clip_hotkey')!.liveTest).toBe(true);
+    expect(hotkeyFields.filter((f) => f.liveTest === true).map((f) => f.key)).toEqual([
+      'clip_hotkey',
+    ]);
+  });
 });
 
 describe('hotkeySaveTarget', () => {

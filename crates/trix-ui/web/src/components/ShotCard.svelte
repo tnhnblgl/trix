@@ -33,7 +33,13 @@
     <span class="when">{taken}</span>
     <span class="size tnum">{shot.width}x{shot.height} &middot; {formatBytes(shot.bytes)}</span>
   </div>
-  <div class="actions">
+  <!-- The card/grid control marker (see `keys.ts`'s `CARD_CONTROL_ATTR` doc
+       comment): `Shots.svelte`'s grid keyboard handler walks up from the
+       focused element with `closest()`, so this one mark on the wrapper
+       covers all three buttons and keeps the grid from stealing Enter and
+       Space off them, the way `ClipCard`'s equivalent controls are already
+       covered. -->
+  <div class="actions" data-card-control>
     <IconButton icon="copy" label="Copy" onclick={() => app.copyShot(shot.id)} />
     <IconButton icon="folder" label="Show in folder" onclick={() => app.revealShot(shot.id)} />
     <IconButton icon="trash" label="Delete" onclick={() => app.deleteShot(shot.id)} />
