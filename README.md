@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/logo.png" width="112" alt="Trix logo">
+<img src="assets/logo-transparent.png" width="112" alt="Trix logo">
 
 # Trix
 
