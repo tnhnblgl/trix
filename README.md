@@ -1,10 +1,10 @@
 <div align="center">
 
-<img src="assets/logo-transparent.png" width="112" alt="Trix logo">
+<img src="assets/logo.png" width="112" alt="Trix logo">
 
 # Trix
 
-**A GPU-resident game clip recorder for Windows, for people whose PC cannot spare the frames.**
+**A GPU-resident modern game clip recorder for Windows, for people whose PC cannot spare the frames.**
 
 [![Version](https://img.shields.io/badge/version-1.0.0-2b7fff)](https://github.com/tnhnblgl/trix/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6)](#requirements)
