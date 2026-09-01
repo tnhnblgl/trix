@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDaemonEvent } from '../lib/ipc';
-  import { hotkeySaveTarget, hotkeySeed, type Field } from '../lib/settings';
+  import { CUSTOM_TIER, hotkeySaveTarget, hotkeySeed, tierFor, tierOptions, type Field } from '../lib/settings';
   import type { Monitor } from '../lib/types';
   import Button from './ui/Button.svelte';
   import KeycapInput from './ui/KeycapInput.svelte';
@@ -123,6 +123,36 @@
     dragging = null;
   });
 
+  /**
+   * Whether a `tier` row is showing its Custom box.
+   *
+   * Needed because the dropdown's position is otherwise derived straight from
+   * the saved number, and `Custom` is the one entry no number selects: pick it
+   * while the value is still 8000 and `tierFor` would answer `Medium`, snapping
+   * the dropdown back and hiding the box in the same frame.
+   *
+   * Deliberately sticky once set -- typing 8000 into the box does not throw the
+   * user back onto the Medium preset mid-edit. It resets when the page is left,
+   * which is the point at which the saved number is the only thing left to
+   * describe the setting.
+   */
+  let custom = $state(false);
+  const tier = $derived(custom ? CUSTOM_TIER : tierFor(field, config[field.key]));
+
+  /**
+   * A preset writes its number and closes the box. `Custom` writes nothing at
+   * all: it opens the box on the value already in effect, so reaching for the
+   * box is never itself a change to what is being recorded.
+   */
+  function pickTier(value: string) {
+    if (value === CUSTOM_TIER) {
+      custom = true;
+      return;
+    }
+    custom = false;
+    onset(field.key, Number(value));
+  }
+
   const monitorOptions = $derived(
     monitors.map((m) => ({
       value: String(m.index),
@@ -176,6 +206,22 @@
         unit={UNITS[field.key]}
         label={field.label}
         onchange={(v) => onset(field.key, v)} />
+
+    {:else if field.kind === 'tier'}
+      <Select
+        value={tier}
+        options={tierOptions(field)}
+        label={field.label}
+        onchange={pickTier} />
+      {#if tier === CUSTOM_TIER}
+        <Stepper
+          value={Number(config[field.key] ?? 0)}
+          min={field.min ?? 0}
+          max={field.max ?? 0}
+          unit={UNITS[field.key]}
+          label="{field.label}, custom value"
+          onchange={(v) => onset(field.key, v)} />
+      {/if}
 
     {:else if field.kind === 'slider'}
       <Slider
