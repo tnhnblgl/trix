@@ -1,4 +1,4 @@
-export type FieldKind = 'number' | 'text' | 'select' | 'bool' | 'folder' | 'hotkey' | 'slider' | 'sound';
+export type FieldKind = 'number' | 'text' | 'select' | 'bool' | 'folder' | 'hotkey' | 'slider' | 'sound' | 'tier';
 
 export type Field = {
   key: string;
@@ -9,6 +9,14 @@ export type Field = {
   min?: number;
   max?: number;
   options?: { value: string; label: string }[];
+  /**
+   * A `tier` field's presets, in dropdown order. Lives on the descriptor
+   * rather than in a table `Field.svelte` looks up by `field.key`, for the
+   * same reason `liveTest` does: this page has already shipped one Critical
+   * from a control keyed on a hard-coded config-key literal, and a second
+   * tiered setting would repeat it.
+   */
+  tiers?: { value: number; label: string }[];
   /** Filled at runtime from monitors.list / encoders.list. */
   dynamic?: 'monitors';
   /**
@@ -51,6 +59,53 @@ const BOUNDS: Record<string, [number, number]> = {
   mic_volume: [0, 100],
 };
 
+/**
+ * The value `tierFor` reports when a saved number matches no preset, and the
+ * option the dropdown shows for it. Not a number, so it can never collide
+ * with a real bitrate.
+ */
+export const CUSTOM_TIER = 'custom';
+
+/**
+ * Target-bitrate presets, in kbit/s.
+ *
+ * Not stored anywhere: `bitrate_kbps` remains the plain number the daemon and
+ * `config.toml` have always held, and the tier is derived back out of it by
+ * `tierFor`. A saved tier would be a second source of truth for one value,
+ * and the two would disagree the first time somebody edited config.toml by
+ * hand.
+ *
+ * The steps are roughly 1.5x apart, and 8000 -- the shipped default, and the
+ * bitrate every published Trix measurement was taken at -- is deliberately a
+ * preset rather than a boundary, so an existing install shows `Medium` with
+ * nothing migrated.
+ */
+export const BITRATE_TIERS: { value: number; label: string }[] = [
+  { value: 5000, label: 'Low - 5000 kbps' },
+  { value: 8000, label: 'Medium - 8000 kbps' },
+  { value: 14000, label: 'High - 14000 kbps' },
+  { value: 20000, label: 'Extra high - 20000 kbps' },
+];
+
+/**
+ * Which dropdown entry a saved value shows as: the matching preset, or
+ * `CUSTOM_TIER` for anything else -- including a number typed into an older
+ * Trix, which must round-trip back into the box rather than being rounded
+ * onto the nearest preset behind the user's back.
+ */
+export function tierFor(field: Field, value: unknown): string {
+  const n = Number(value);
+  return (field.tiers ?? []).some((t) => t.value === n) ? String(n) : CUSTOM_TIER;
+}
+
+/** The dropdown's options: the presets, then Custom. */
+export function tierOptions(field: Field): { value: string; label: string }[] {
+  return [
+    ...(field.tiers ?? []).map((t) => ({ value: String(t.value), label: t.label })),
+    { value: CUSTOM_TIER, label: 'Custom...' },
+  ];
+}
+
 export const FIELDS: Field[] = [
   { key: 'monitor_index', label: 'Monitor', kind: 'select', section: 'Capture', dynamic: 'monitors', help: 'Which screen is captured.' },
   { key: 'fps', label: 'Frame rate', kind: 'number', section: 'Capture', ...span('fps'), help: 'Capture and encode rate.' },
@@ -63,7 +118,7 @@ export const FIELDS: Field[] = [
   { key: 'system_volume', label: 'PC sound', kind: 'slider', section: 'Audio', ...span('system_volume'), help: 'How loud your PC\'s own sound is in the clip. Affects the recording only, never your Windows volume. 0 turns it off.' },
   { key: 'mic_volume', label: 'Microphone', kind: 'slider', section: 'Audio', ...span('mic_volume'), help: 'How loud your voice is in the clip. 0 closes the microphone entirely, so Windows stops showing Trix as using it.' },
 
-  { key: 'bitrate_kbps', label: 'Bitrate', kind: 'number', section: 'Quality', ...span('bitrate_kbps'), help: 'Target average, in kbit/s.' },
+  { key: 'bitrate_kbps', label: 'Target bitrate', kind: 'tier', section: 'Quality', ...span('bitrate_kbps'), tiers: BITRATE_TIERS, help: 'How much data a second of video gets. Higher tiers hold up better in fast motion and cost more disk per clip -- and more RAM, because the replay buffer holds this many seconds of it. Custom takes any number.' },
   { key: 'max_bitrate_kbps', label: 'Peak bitrate', kind: 'number', section: 'Quality', ...span('max_bitrate_kbps'), help: '0 means 1.5x the target. This cap is also the replay buffer\'s worst-case RAM.' },
   { key: 'rate_control', label: 'Rate control', kind: 'select', section: 'Quality', options: [
       { value: 'vbr', label: 'VBR - quality-leaning' },

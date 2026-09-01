@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FIELDS, READ_ONLY_EXTRAS, SECTIONS, hotkeySaveTarget, hotkeySeed, unknownKeys, validate } from './settings';
+import { BITRATE_TIERS, CUSTOM_TIER, FIELDS, READ_ONLY_EXTRAS, SECTIONS, hotkeySaveTarget, hotkeySeed, tierFor, tierOptions, unknownKeys, validate } from './settings';
 
 describe('FIELDS', () => {
   it('covers every config key the daemon has today', () => {
@@ -31,6 +31,59 @@ describe('FIELDS', () => {
     expect(validate('system_volume', 101)).toMatch(/0 to 100/);
     expect(validate('mic_volume', 0)).toBeNull();
     expect(validate('system_volume', 100)).toBeNull();
+  });
+});
+
+describe('bitrate tiers', () => {
+  const field = FIELDS.find((f) => f.key === 'bitrate_kbps')!;
+
+  it('renders the bitrate as a tier dropdown carrying its own presets', () => {
+    // `tiers` on the descriptor, not a table keyed on 'bitrate_kbps' inside
+    // the component -- see the `tiers` doc comment for why this page does not
+    // key controls on config-key literals.
+    expect(field.kind).toBe('tier');
+    expect(field.tiers).toBe(BITRATE_TIERS);
+  });
+
+  it('shows every preset as itself', () => {
+    for (const tier of BITRATE_TIERS) {
+      expect(tierFor(field, tier.value), tier.label).toBe(String(tier.value));
+    }
+  });
+
+  it('keeps the shipped 8000 default a preset, so no install needs migrating', () => {
+    // The tier is derived from the number rather than stored, so an existing
+    // config.toml is already correct -- but only while 8000 is on the list.
+    // Drop it and every default install silently becomes `Custom`.
+    expect(tierFor(field, 8000)).toBe('8000');
+  });
+
+  it('falls back to Custom for a number no preset matches', () => {
+    // A value hand-typed into an older Trix. It must survive as itself; a
+    // dropdown that rounded it onto the nearest preset would change what the
+    // user records without telling them.
+    expect(tierFor(field, 9500)).toBe(CUSTOM_TIER);
+    expect(tierFor(field, 0)).toBe(CUSTOM_TIER);
+    expect(tierFor(field, undefined)).toBe(CUSTOM_TIER);
+  });
+
+  it('lists the presets in order with Custom last', () => {
+    expect(tierOptions(field).map((o) => o.value)).toEqual([
+      '5000', '8000', '14000', '20000', CUSTOM_TIER,
+    ]);
+  });
+
+  it('keeps every preset inside the bounds the daemon enforces', () => {
+    // A preset outside them would be a dropdown entry whose only outcome is a
+    // refusal the row cannot explain.
+    for (const tier of BITRATE_TIERS) {
+      expect(validate('bitrate_kbps', tier.value), tier.label).toBeNull();
+    }
+  });
+
+  it('rises monotonically, so the labels mean what they say', () => {
+    const values = BITRATE_TIERS.map((t) => t.value);
+    expect([...values].sort((a, b) => a - b)).toEqual(values);
   });
 });
 
