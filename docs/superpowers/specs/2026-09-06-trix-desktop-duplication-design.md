@@ -1,6 +1,9 @@
 # Desktop Duplication capture backend — design
 
-**Status:** **Phase 0 complete. Ship 1 is unblocked with no open questions.**
+**Status:** **Phase 0 complete. Ship 1 in progress** — the `FrameSink` seam
+and the WGC re-wrap are built and hand-verified on `feat/frame-sink-seam`; the
+Desktop Duplication backend and the `capture_method` setting are next.
+No open questions.
 Desktop Duplication clears the border — proven from a Trix process on the
 reporting user's own machine — survives repeated alt-tabs (4 of 4 recovered,
 0.4 s), survives the secure desktop (3 of 3 recovered, 0.1 s unobstructed), and
@@ -175,6 +178,34 @@ becomes `frame.qpc_100ns`, `capture_control.stop()` becomes
 `return Ok(Flow::Stop)`. The `settings()` builders, `border_settings()` and
 `min_update_interval()` all stay exactly where they are, used only by this
 backend.
+
+**Built, on `feat/frame-sink-seam`.** `capture/source.rs` is the seam,
+`capture/wgc.rs` is the backend, and all three sinks are through it —
+`border_settings` and `min_update_interval` are now private to the capture
+module, which is the check that nothing else reaches WGC. Verified on this
+machine, not just compiled: a full-resolution PNG snapshot, a 6 s recording
+(357 frames, 0 dropped, audio in sync), and an 8 s replay clip with its
+thumbnail.
+
+Four things the design did not anticipate, all small:
+
+- **`CaptureControl::callback()` hands back a `parking_lot::Mutex`,** which
+  cannot be named without a new direct dependency. So `CaptureHandle` owns the
+  sink itself, behind a `std::sync::Mutex` whose guard recovers from poisoning
+  — a sink that panics mid-frame must still be reachable, or `record.rs` can
+  never call `finish()` and the MP4 keeps no `moov` atom.
+- **The probe could not come along for free.** `Frame::save_as_image` is a
+  windows-capture method, so the snapshot needed its own PNG writer;
+  `thumb.rs`'s WIC encoder was parameterised by container to provide one, and
+  `ReplaySession::stage_thumbnail` moved out to `capture::stage::stage_bgra` so
+  both callers share the copy out of VRAM.
+- **The seam owns monitor lookup** (`source::monitor_info`), so `replay.rs` and
+  `record.rs` no longer import `windows_capture::monitor::Monitor` for their
+  encoder dimensions. Desktop Duplication takes its geometry from
+  `DXGI_OUTPUT_DESC` instead, and nothing above the seam has to care.
+- **A frame with no readable timestamp is now skipped for all three sinks.**
+  The ring and the recorder already did; the probe used to save its snapshot
+  anyway. A frame that cannot be placed on the timeline cannot be encoded.
 
 ### Backend 2: Desktop Duplication (new)
 
