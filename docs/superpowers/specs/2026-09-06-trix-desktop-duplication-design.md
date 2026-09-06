@@ -1,9 +1,17 @@
 # Desktop Duplication capture backend — design
 
-**Status:** **Phase 0 complete. Ship 1 in progress** — the `FrameSink` seam
-and the WGC re-wrap are built and hand-verified on `feat/frame-sink-seam`; the
-Desktop Duplication backend and the `capture_method` setting are next.
-No open questions.
+**Status:** **Phase 0 and Ship 1 complete, merged to `master` as `47c55a7`.**
+The `FrameSink` seam, the WGC re-wrap, the Desktop Duplication backend and the
+`capture_method` setting are all built and hand-verified. `auto` is still WGC
+for everyone, and Desktop Duplication is opt-in only, as Ship 1 intends.
+**Ship 2 is not built**, by decision: cursor compositing on the duplication
+backend, and `auto` adopting the OBS policy. Two hand-verification items are
+also outstanding because they need a real game session — Testing #3 (rebuild
+across a fullscreen transition, on the merged backend rather than the spike)
+and #4 (hybrid GPU with the game on the dGPU).
+One limitation shipped knowingly: Desktop Duplication records **fewer frames
+per second** than WGC on this machine — see **Throughput**. Disclosed in the
+setting's help text. No open questions.
 Desktop Duplication clears the border — proven from a Trix process on the
 reporting user's own machine — survives repeated alt-tabs (4 of 4 recovered,
 0.4 s), survives the secure desktop (3 of 3 recovered, 0.1 s unobstructed), and
@@ -179,7 +187,7 @@ becomes `frame.qpc_100ns`, `capture_control.stop()` becomes
 `min_update_interval()` all stay exactly where they are, used only by this
 backend.
 
-**Built, on `feat/frame-sink-seam`.** `capture/source.rs` is the seam,
+**Built, and on `master`.** `capture/source.rs` is the seam,
 `capture/wgc.rs` is the backend, and all three sinks are through it —
 `border_settings` and `min_update_interval` are now private to the capture
 module, which is the check that nothing else reaches WGC. Verified on this
