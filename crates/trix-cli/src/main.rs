@@ -54,6 +54,10 @@ enum Command {
         /// How long to hold the duplication open
         #[arg(long, default_value_t = 20, value_name = "SECONDS")]
         seconds: u64,
+        /// Countdown before anything is captured, so the tester can alt-tab
+        /// into their game first. The first run was ruined without this.
+        #[arg(long, default_value_t = 10, value_name = "SECONDS")]
+        warmup: u64,
     },
     /// Record the screen to an MP4 file
     Record {
@@ -120,8 +124,8 @@ fn main() -> Result<()> {
         // Deliberately outside the single-instance lock: the point of the
         // spike is to run it *while* Trix is armed, and taking the lock would
         // make the one interesting case impossible.
-        Command::DdProbe { monitor, seconds } => {
-            dd_probe::run(monitor.unwrap_or(config.monitor_index), seconds)
+        Command::DdProbe { monitor, seconds, warmup } => {
+            dd_probe::run(monitor.unwrap_or(config.monitor_index), seconds, warmup)
         }
         Command::Record { duration, output, no_audio } => {
             let _single = control::acquire_single_instance()?;
@@ -322,11 +326,16 @@ mod tests {
     #[test]
     fn dd_probe_defaults_to_the_configured_monitor_and_twenty_seconds() {
         let cli = Cli::try_parse_from(["trix", "dd-probe"]).unwrap();
-        let Command::DdProbe { monitor, seconds } = cli.command else {
+        let Command::DdProbe { monitor, seconds, warmup } = cli.command else {
             panic!("expected DdProbe");
         };
         assert_eq!(monitor, None, "no --monitor means the config's monitor_index, not 0");
         assert_eq!(seconds, 20);
+        assert!(
+            warmup > 0,
+            "a bare run must count the tester in — the first run's result was void because \
+             they were still alt-tabbing while it captured"
+        );
 
         let cli = Cli::try_parse_from(["trix", "dd-probe", "--monitor", "2"]).unwrap();
         let Command::DdProbe { monitor, .. } = cli.command else {
