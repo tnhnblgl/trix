@@ -1,10 +1,11 @@
 # Desktop Duplication capture backend — design
 
-**Status:** **Phase 0 answered. Ship 1 is unblocked.** Desktop Duplication
-clears the border, proven from a Trix process on the reporting user's own
-machine, and survives repeated alt-tabs with a 0.4 s blackout and full
-recovery. One implementation detail remains unconfirmed — whether recovery can
-keep the D3D11 device — and it is answerable locally. See **Phase 0**.
+**Status:** **Phase 0 complete. Ship 1 is unblocked with no open questions.**
+Desktop Duplication clears the border — proven from a Trix process on the
+reporting user's own machine — survives repeated alt-tabs (4 of 4 recovered,
+0.4 s), survives the secure desktop (3 of 3 recovered, 0.1 s unobstructed), and
+recovers **without recreating the D3D11 device**, which is what lets the sink,
+encoder, mixer and replay ring live through a transition. See **Phase 0**.
 **Date:** 2026-09-06
 
 ## Goal
@@ -553,10 +554,30 @@ return. These are the alt-tabs and nothing else.
 the backend and far too small to justify taking the session down for — see
 **Access loss** for what that policy would have cost.
 
-*Still unconfirmed:* whether recovery works while **keeping the D3D11 device**,
-which is what decides whether the sink survives. The tiering is written; one
-local run with Ctrl+Alt+Del exercises it without spending the tester's
-patience again.
+### Confirmed: recovery keeps the device, so the sink survives
+
+Tested on the developer machine with Ctrl+Alt+Del, which is a harder event than
+an alt-tab — the secure desktop refuses duplication to everyone while it is up.
+
+| | |
+| --- | --- |
+| Access losses | 3 |
+| Recovered | **3 of 3** |
+| Kept the D3D11 device | **3 of 3** — none needed a new one |
+| Reopens refused and retried | 12, all `E_ACCESSDENIED` |
+| Recovery latency, unobstructed | **0.1 s** |
+| Worst blackout | 2.7 s |
+
+**Read the 2.7 s correctly.** That is how long the secure desktop was up, not
+how long recovery took. While Windows holds that desktop nothing may capture it
+— WGC included — so it is not a cost this backend imposes, and the shortest
+recovery, with nothing blocking, was 0.1 s. The probe's own verdict line does
+not draw that distinction; a reader of a future log should.
+
+**Every Phase 0 question is now closed**, including the one Ship 1's
+architecture depends on: recovery is invisible above the seam, so the sink, the
+encoder, the mixer and the replay ring all survive a transition. Internal
+recovery is viable as specified.
 
 ## Effort
 
