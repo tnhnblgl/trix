@@ -1,4 +1,4 @@
-Trix 1.0.0
+Trix 1.1.0
 ==========
 
 A clip recorder for Windows, for people whose PC cannot spare the frames.
@@ -6,6 +6,13 @@ Trix keeps the last few seconds of your screen in memory and writes them to
 a file when you press a key. Capture and encoding run on the GPU, so the
 cost to your game is close to nothing, and the app itself stays out of the
 way while you play.
+
+
+NEW IN 1.1.0
+------------
+
+DXGI Duplication solution for yellow borders. Settings -> Capture -> Capture Method 
+You can experience low fps on clip so not recommended if you specifically doesn't want yellow borders.
 
 
 NEW IN 1.0.0
