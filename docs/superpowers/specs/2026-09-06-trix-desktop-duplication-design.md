@@ -307,6 +307,15 @@ So the recovery is tiered:
 2. Only if that keeps failing, create a new device. Correct when the adapter
    itself has changed, and honest about its cost: this tier takes the sink down.
 
+**A refused reopen is temporary.** `DuplicateOutput` returns `E_ACCESSDENIED`
+while the secure desktop is up — a UAC prompt, Ctrl+Alt+Del, the lock screen —
+because no user process may duplicate it. That is correct and expected, and it
+must be a backed-off retry, never a failure that ends the capture. Phase 0's
+probe treated it as fatal and exited on the first Ctrl+Alt+Del; a backend that
+did the same would die on every UAC prompt, which users see far more often.
+`DXGI_ERROR_DEVICE_REMOVED` is the same kind of event with a different answer:
+recoverable, but only on a new device, so it goes straight to tier 2.
+
 **Release before rebuilding, always.** Both failing Phase 0 versions created the
 replacement duplication while the dead one was still alive, leaving two
 duplications of one output open in the process — and DXGI returns the second
@@ -319,6 +328,10 @@ fixed, the same test recovered 4 of 4.
 `GetDeviceRemovedReason` reported the device healthy. Re-enumerating from a
 fresh factory is cheap and is what the spike does, but it fixes nothing on its
 own; the ordering is what matters.
+
+The stale state itself is real, though — `IsCurrent` came back **false** on a
+Ctrl+Alt+Del. So re-enumerating on every reopen stays, on its own merits rather
+than as a fix for something it never fixed.
 
 ### Adapter selection (hybrid GPU)
 
