@@ -186,10 +186,10 @@ impl H264Encoder {
             let event_type = unsafe { event.GetType()? } as i32;
             if event_type == METransformNeedInput.0 {
                 self.input_credits += 1;
-            } else if event_type == METransformHaveOutput.0 {
-                if let Some(packet) = self.drain_one()? {
-                    sink(packet);
-                }
+            } else if event_type == METransformHaveOutput.0
+                && let Some(packet) = self.drain_one()?
+            {
+                sink(packet);
             }
         }
     }

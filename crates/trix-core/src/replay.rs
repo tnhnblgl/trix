@@ -230,11 +230,7 @@ impl ReplaySession {
 
     fn evict(&mut self) {
         let budget = self.replay_100ns + KEYFRAME_MARGIN_100NS;
-        loop {
-            let (Some(front), Some(back)) = (self.video_ring.front(), self.video_ring.back())
-            else {
-                break;
-            };
+        while let (Some(front), Some(back)) = (self.video_ring.front(), self.video_ring.back()) {
             if back.pts_100ns - front.pts_100ns <= budget {
                 break;
             }
@@ -450,7 +446,7 @@ impl FrameSink for ReplaySession {
     }
 }
 
-fn write_clip(snapshot: &ClipSnapshot, path: &PathBuf) -> Result<()> {
+fn write_clip(snapshot: &ClipSnapshot, path: &Path) -> Result<()> {
     let muxer = ClipMuxer::new(path, &snapshot.settings, &snapshot.video_type)?;
     for packet in &snapshot.video {
         muxer.write_video_packet(
@@ -1070,27 +1066,28 @@ fn run_session(
                         status.paced = session.frames_paced;
                     }
                 }
-                if let Some(secs) = options.auto_clip_secs {
-                    if !*auto_clip_fired && run_started.elapsed() >= Duration::from_secs(secs) {
-                        *auto_clip_fired = true;
-                        // Same two outcomes the hotkey arm reports. An
-                        // --auto-clip that fires before the ring has buffered
-                        // anything must say so: a verification run that
-                        // silently produces no clip looks like a pass.
-                        match save_clip(&capture, &clip_dir, &encoder_name) {
-                            Ok(Some(saved)) => print_clip_line(&saved),
-                            Ok(None) => println!("nothing buffered yet — try again in a moment"),
-                            Err(e) => {
-                                pending_error = Some(e);
-                                break;
-                            }
+                if let Some(secs) = options.auto_clip_secs
+                    && !*auto_clip_fired
+                    && run_started.elapsed() >= Duration::from_secs(secs)
+                {
+                    *auto_clip_fired = true;
+                    // Same two outcomes the hotkey arm reports. An
+                    // --auto-clip that fires before the ring has buffered
+                    // anything must say so: a verification run that
+                    // silently produces no clip looks like a pass.
+                    match save_clip(&capture, &clip_dir, &encoder_name) {
+                        Ok(Some(saved)) => print_clip_line(&saved),
+                        Ok(None) => println!("nothing buffered yet — try again in a moment"),
+                        Err(e) => {
+                            pending_error = Some(e);
+                            break;
                         }
                     }
                 }
-                if let Some(secs) = options.exit_after_secs {
-                    if run_started.elapsed() >= Duration::from_secs(secs) {
-                        break;
-                    }
+                if let Some(secs) = options.exit_after_secs
+                    && run_started.elapsed() >= Duration::from_secs(secs)
+                {
+                    break;
                 }
             }
             Err(RecvTimeoutError::Disconnected) => break,

@@ -43,6 +43,12 @@ pub struct AudioTimeline {
     pub discontinuity_events: u64, // gaps beyond the sane bound, re-anchored rather than filled
 }
 
+impl Default for AudioTimeline {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AudioTimeline {
     pub fn new() -> Self {
         Self {

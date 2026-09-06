@@ -161,7 +161,7 @@ unsafe fn make_icon(armed: bool) -> Result<HICON> {
     let pixels = icon_pixels(armed);
     // CreateIcon takes separate AND and XOR masks; with a full alpha channel
     // in the colour bits the AND mask is ignored, so it is all-zero.
-    let and_mask = vec![0u8; ICON_SIDE * ICON_SIDE / 8];
+    let and_mask = [0u8; ICON_SIDE * ICON_SIDE / 8];
     let xor: Vec<u8> = pixels.iter().flat_map(|p| p.to_le_bytes()).collect();
     unsafe {
         CreateIcon(None, ICON_SIDE as i32, ICON_SIDE as i32, 1, 32, and_mask.as_ptr(), xor.as_ptr())

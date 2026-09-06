@@ -38,7 +38,7 @@ use crate::capture::audio::{CHANNELS, ENCODER_BLOCK_ALIGN, SAMPLE_RATE};
 use crate::config::RateControl;
 use crate::encode::convert::VideoConverter;
 
-const MF_VERSION: u32 = ((MF_SDK_VERSION as u32) << 16) | MF_API_VERSION as u32;
+const MF_VERSION: u32 = (MF_SDK_VERSION << 16) | MF_API_VERSION;
 
 /// Media Foundation startup is process-wide; do it exactly once. `MFShutdown`
 /// is deliberately skipped — the OS reclaims everything at process exit.
