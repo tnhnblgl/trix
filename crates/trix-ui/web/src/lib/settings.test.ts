@@ -24,7 +24,7 @@ describe('FIELDS', () => {
    * When the cursor lands on this backend, both warnings come out in the same
    * commit -- and this test is what fails until they do.
    */
-  it('warns about the missing cursor in the Desktop Duplication label and the help', () => {
+  it('discloses what Desktop Duplication costs, in the label and the help', () => {
     const field = FIELDS.find((f) => f.key === 'capture_method');
     expect(field, 'capture_method must be a rendered field').toBeDefined();
     const dd = field!.options?.find((o) => o.value === 'dd');
@@ -33,6 +33,9 @@ describe('FIELDS', () => {
     expect(field!.help.toLowerCase()).toContain('cursor');
     // The symptom, not the API: a user picks this because of what they can see.
     expect(field!.help.toLowerCase()).toContain('yellow border');
+    // Measured at roughly 44 fps against 57 on the developer machine, and it
+    // is a cost the user is choosing, so it is theirs to know about.
+    expect(field!.help.toLowerCase()).toContain('frames per second');
   });
 
   it('renders both levels as sliders in the Audio section', () => {
