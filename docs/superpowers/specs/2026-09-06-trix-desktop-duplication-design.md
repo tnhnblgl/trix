@@ -1,8 +1,11 @@
 # Desktop Duplication capture backend — design
 
-**Status:** Phase 0 answered — **Desktop Duplication clears the border**, proven
-from a Trix process on the reporting user's own machine. Ship 1 is unblocked.
-See **Phase 0** below for the evidence and the one thing it did not test.
+**Status:** Phase 0 half answered. **Desktop Duplication clears the border** —
+proven from a Trix process on the reporting user's own machine, and that was
+the question the whole design rested on. **But it has not yet survived an
+alt-tab**, and that now gates Ship 1: a backend that dies at the first
+fullscreen transition is unusable for the person it exists for. Cause found,
+fix written, confirmation pending. See **Phase 0**.
 **Date:** 2026-09-06
 
 ## Goal
@@ -277,16 +280,25 @@ rebuild**, rather than re-acquiring inside the backend. One recovery path, one
 place where the "replay ring restarts empty" warning is emitted, and the
 behaviour a user sees is identical to what a display change already does today.
 
-**The rebuild must go all the way down to a new `CreateDXGIFactory1`.** Phase 0
-learned this the expensive way: its first version re-called `DuplicateOutput`
-on the output it had resolved at startup, and never recovered — 37 consecutive
-losses in which `DuplicateOutput` *succeeded* every time and the first
-`AcquireNextFrame` failed every time. After a mode change `IDXGIFactory1::IsCurrent`
-goes false and every adapter and output that factory produced is dead, so
-re-duplicating a cached output re-opens nothing. Factory, adapter, output,
-device, duplication: all five, every time. A backend that caches any of them
-across a rebuild will look correct on a developer machine and die permanently
-the first time a game goes fullscreen.
+**Release the old duplication before creating its replacement.** Phase 0 paid
+for this twice. Both of its failing versions rebuilt while the dead
+`IDXGIOutputDuplication` was still alive, so the process briefly held two
+duplications of the same output — and DXGI hands the second one back looking
+valid while every `AcquireNextFrame` on it fails. The signature is
+unmistakable and was identical in both runs: `DuplicateOutput` succeeding every
+time, the first acquire failing every time, permanently. 37 losses in one run,
+18 in the next, zero recoveries in either.
+
+**A stale factory is not the cause, and the first diagnosis that said so was
+wrong.** `IDXGIFactory1::IsCurrent` returned **true** at every one of those 18
+losses, and `GetDeviceRemovedReason` reported the device healthy. Rebuilding
+from a fresh factory is harmless and is what the spike does, but it fixes
+nothing on its own — the ordering is what matters. Recording the wrong
+diagnosis here would have cost Ship 1 the same two days it cost the spike.
+
+*Status: the ordering fix is written and unverified.* It cannot be exercised on
+the developer machine, which has no non-disruptive way to lose access on
+demand. Confirmation is one probe run away and must land before Ship 1.
 
 ### Adapter selection (hybrid GPU)
 
@@ -487,10 +499,21 @@ transition ever happened — which means **the rebuild path above never
 executed.** Armed Trix runs continuously while people alt-tab in and out of
 games, so that transition is not an edge case, it is the normal case.
 
-One more probe run covers it: alt-tab out and back during capture, and measure
-whether every loss recovers and how long the blackout lasts. That number is the
-product question — a blackout is a hole in the replay ring at the exact moment
-someone wants to clip.
+One probe run covered it, and **it failed**: three alt-tabs, 18 access losses,
+**zero recoveries**, dark for 23 of 31 seconds. The cause is in **Access loss**
+above — the rebuild held two duplications of the same output at once — and the
+fix is written but not yet confirmed on the machine that reproduces it.
+
+**This, not the border, is now the gate on Ship 1.** A backend that dies at the
+first alt-tab is unusable for the person it exists for: armed Trix lives
+through that transition constantly, and a permanent death means a replay ring
+that never refills. The border question is answered; this one is not.
+
+The number to watch is the blackout, not the loss count — how long the screen
+was dark, measured from the first loss of a burst to the next delivered frame.
+A blackout is a hole in the replay ring at the exact moment somebody wants to
+clip, so recovering in 200 ms and recovering in four seconds are different
+products.
 
 ## Effort
 
