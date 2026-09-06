@@ -33,9 +33,13 @@ describe('FIELDS', () => {
     expect(field!.help.toLowerCase()).toContain('cursor');
     // The symptom, not the API: a user picks this because of what they can see.
     expect(field!.help.toLowerCase()).toContain('yellow border');
-    // Measured at roughly 44 fps against 57 on the developer machine, and it
-    // is a cost the user is choosing, so it is theirs to know about.
-    expect(field!.help.toLowerCase()).toContain('frames per second');
+    // Measured at ~30 fps against ~59 on the developer machine, on controlled
+    // content. The magnitude has to be in the copy: "fewer frames" reads as a
+    // trim, and a user who picks this and finds half the frame rate was misled.
+    // "some PCs" is not a hedge for its own sake -- that machine is a hybrid
+    // laptop, the case OBS deliberately steers away from duplication, and the
+    // single-adapter desktops this backend exists for are untested.
+    expect(field!.help.toLowerCase()).toContain('half the frame rate');
   });
 
   it('renders both levels as sliders in the Audio section', () => {
