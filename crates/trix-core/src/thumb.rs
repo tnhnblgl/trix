@@ -1,6 +1,7 @@
 //! BGRA↔JPEG via WIC: encoding a staged frame for clip thumbnails and
 //! full-size screenshots, and decoding a saved screenshot back to BGRA for
-//! `shots.copy`.
+//! `shots.copy`. PNG comes out of the same encoder, for the capture probe's
+//! snapshot.
 //!
 //! Spec §5.3 takes the thumbnail from the frame at the hotkey press rather
 //! than from a decoded MP4 — the frame is already in VRAM, so no decoder is
@@ -15,9 +16,10 @@ use std::path::Path;
 use anyhow::{Context as _, Result, bail};
 use windows::Win32::Foundation::{GENERIC_READ, HGLOBAL};
 use windows::Win32::Graphics::Imaging::{
-    CLSID_WICImagingFactory, GUID_ContainerFormatJpeg, GUID_WICPixelFormat32bppBGRA,
-    IWICImagingFactory, WICBitmapDitherTypeNone, WICBitmapEncoderNoCache,
-    WICBitmapInterpolationModeFant, WICBitmapPaletteTypeCustom, WICDecodeMetadataCacheOnDemand,
+    CLSID_WICImagingFactory, GUID_ContainerFormatJpeg, GUID_ContainerFormatPng,
+    GUID_WICPixelFormat32bppBGRA, IWICImagingFactory, WICBitmapDitherTypeNone,
+    WICBitmapEncoderNoCache, WICBitmapInterpolationModeFant, WICBitmapPaletteTypeCustom,
+    WICDecodeMetadataCacheOnDemand,
 };
 use windows::Win32::System::Com::StructuredStorage::{
     CreateStreamOnHGlobal, IPropertyBag2, PROPBAG2,
@@ -26,7 +28,7 @@ use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, CoCreateInstance, IStream, STATFLAG_NONAME, STATSTG, STREAM_SEEK_SET,
 };
 use windows::Win32::System::Variant::{VARIANT, VT_R4};
-use windows::core::{PCWSTR, PWSTR};
+use windows::core::{GUID, PCWSTR, PWSTR};
 
 /// JPEG quality. 0.82 is the knee: visually clean in a grid at any thumbnail
 /// size, and roughly a third the bytes of 0.95.
@@ -66,15 +68,40 @@ pub fn encode_jpeg_sized(
     max_width: u32,
     quality: f32,
 ) -> Result<Vec<u8>> {
+    encode_wic(&GUID_ContainerFormatJpeg, Some(quality), bgra, width, height, stride, max_width)
+}
+
+/// Encodes a top-down BGRA buffer to PNG bytes at its own size.
+///
+/// PNG rather than JPEG for exactly one caller: `trix probe capture
+/// --snapshot`, which exists to show what the capture stack actually produced.
+/// A lossy snapshot of a capture under diagnosis would be a poor tool — the
+/// artefact you are looking for could be the encoder's.
+pub fn encode_png(bgra: &[u8], width: u32, height: u32, stride: usize) -> Result<Vec<u8>> {
+    encode_wic(&GUID_ContainerFormatPng, None, bgra, width, height, stride, FULL_SIZE)
+}
+
+/// The shared WIC path. `quality` is JPEG's alone: PNG is lossless and has no
+/// property to set, and passing one it ignores would only invite the reader to
+/// believe it did something.
+fn encode_wic(
+    container: &GUID,
+    quality: Option<f32>,
+    bgra: &[u8],
+    width: u32,
+    height: u32,
+    stride: usize,
+    max_width: u32,
+) -> Result<Vec<u8>> {
     if width == 0 || height == 0 {
-        bail!("cannot encode a {width}x{height} thumbnail");
+        bail!("cannot encode a {width}x{height} image");
     }
     if stride < (width as usize).saturating_mul(4) {
         bail!("stride {stride} is too small for a {width}px BGRA row");
     }
-    let needed = stride.checked_mul(height as usize).context("thumbnail geometry overflows")?;
+    let needed = stride.checked_mul(height as usize).context("image geometry overflows")?;
     if bgra.len() < needed {
-        bail!("thumbnail buffer is {} bytes, need {needed} for {width}x{height}", bgra.len());
+        bail!("frame buffer is {} bytes, need {needed} for {width}x{height}", bgra.len());
     }
 
     // WIC is COM, and this is reachable from the capture thread and from a
@@ -87,10 +114,8 @@ pub fn encode_jpeg_sized(
                 .context("WIC factory")?;
         // A null HGLOBAL asks the runtime to allocate and grow one for us; the
         // `true` hands ownership of it to the stream.
-        let stream = CreateStreamOnHGlobal(HGLOBAL::default(), true).context("thumbnail stream")?;
-        let encoder = factory
-            .CreateEncoder(&GUID_ContainerFormatJpeg, std::ptr::null())
-            .context("JPEG encoder")?;
+        let stream = CreateStreamOnHGlobal(HGLOBAL::default(), true).context("encoder stream")?;
+        let encoder = factory.CreateEncoder(container, std::ptr::null()).context("WIC encoder")?;
         encoder.Initialize(&stream, WICBitmapEncoderNoCache).context("encoder init")?;
 
         let mut frame = None;
@@ -99,7 +124,7 @@ pub fn encode_jpeg_sized(
         let frame = frame.context("WIC returned no frame")?;
         // Quality goes into the property bag before `Initialize`, or it is
         // silently ignored and every thumbnail ships at the default.
-        if let Some(props) = &props {
+        if let (Some(props), Some(quality)) = (&props, quality) {
             set_quality(props, quality);
         }
         frame.Initialize(props.as_ref()).context("frame init")?;
@@ -118,7 +143,7 @@ pub fn encode_jpeg_sized(
             )
             .context("wrapping the staged frame")?;
         if (out_w, out_h) == (width, height) {
-            frame.WriteSource(&source, std::ptr::null()).context("writing thumbnail pixels")?;
+            frame.WriteSource(&source, std::ptr::null()).context("writing image pixels")?;
         } else {
             let scaler = factory.CreateBitmapScaler().context("bitmap scaler")?;
             // Fant is WIC's best downscale filter — a box or nearest filter on
@@ -127,7 +152,7 @@ pub fn encode_jpeg_sized(
             scaler
                 .Initialize(&source, out_w, out_h, WICBitmapInterpolationModeFant)
                 .context("scaler init")?;
-            frame.WriteSource(&scaler, std::ptr::null()).context("writing thumbnail pixels")?;
+            frame.WriteSource(&scaler, std::ptr::null()).context("writing image pixels")?;
         }
         frame.Commit().context("frame commit")?;
         encoder.Commit().context("encoder commit")?;
@@ -284,6 +309,27 @@ mod tests {
         assert!(jpeg.len() > 256, "suspiciously small for a 64x32 gradient: {}", jpeg.len());
         assert_eq!(&jpeg[..2], &[0xFF, 0xD8], "JPEG SOI marker");
         assert_eq!(&jpeg[jpeg.len() - 2..], &[0xFF, 0xD9], "JPEG EOI marker");
+    }
+
+    /// The PNG container is a second WIC encoder behind the same code path, so
+    /// it is worth proving it produces a real PNG rather than a JPEG with a
+    /// different extension: the signature bytes are what an image viewer reads.
+    ///
+    /// Full size, not scaled: the snapshot exists to show the capture exactly
+    /// as it arrived.
+    #[test]
+    fn encodes_a_bgra_buffer_into_a_real_full_size_png() {
+        let (w, h) = (64u32, 32u32);
+        // Driver padding on the row pitch, which is what a staged capture
+        // frame actually carries.
+        let stride = (w * 4) as usize + 16;
+        let bgra = vec![0x40u8; stride * h as usize];
+
+        let png = encode_png(&bgra, w, h, stride).expect("WIC must encode a plain BGRA buffer");
+        assert_eq!(&png[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A], "PNG signature");
+        // `IHDR` carries the dimensions big-endian, right after the signature
+        // and the chunk length: proof nothing scaled it on the way through.
+        assert_eq!(&png[16..24], &[0, 0, 0, 64, 0, 0, 0, 32], "64x32, unscaled");
     }
 
     /// A short buffer must be refused rather than read past the end. This runs
