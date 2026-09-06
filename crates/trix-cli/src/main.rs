@@ -114,8 +114,12 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Probe { snapshot, capture, audio } => match (snapshot, capture, audio) {
-            (Some(path), _, _) => capture::video::snapshot(config.monitor_index, path),
-            (None, Some(seconds), _) => capture::video::measure(config.monitor_index, seconds),
+            (Some(path), _, _) => {
+                capture::video::snapshot(config.capture_method(), config.monitor_index, path)
+            }
+            (None, Some(seconds), _) => {
+                capture::video::measure(config.capture_method(), config.monitor_index, seconds)
+            }
             (None, None, Some(seconds)) => {
                 capture::audio::record_wav(seconds, std::path::Path::new("audio_probe.wav"))
             }

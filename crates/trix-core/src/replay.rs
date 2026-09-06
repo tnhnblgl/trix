@@ -932,6 +932,7 @@ fn start_session(
     }
 
     let capture = crate::capture::source::start::<ReplaySession>(
+        config.capture_method(),
         config.monitor_index,
         Some(config.fps),
         flags,

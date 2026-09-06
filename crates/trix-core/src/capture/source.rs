@@ -28,7 +28,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use anyhow::Result;
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 
-use super::wgc;
+use super::{duplication, wgc};
+use crate::config::CaptureMethod;
 
 /// One captured frame, borrowed for the length of the callback.
 pub struct SourceFrame<'a> {
@@ -108,14 +109,20 @@ impl<S> SinkRef<S> {
     }
 }
 
+/// The running backend. The only place in the codebase that knows there is
+/// more than one way to get a frame.
+enum Backend<S: FrameSink> {
+    Wgc(wgc::Session<S>),
+    Duplication(duplication::Session<S>),
+}
+
 /// A running capture session and the sink it is feeding.
 ///
 /// Mirrors the parts of `windows-capture`'s `CaptureControl` that the call
 /// sites actually used, so switching to the seam changed their names and not
-/// their shape. The backend lives behind [`wgc::Session`]; the second backend
-/// turns that field into a choice, and nothing above this line notices.
+/// their shape — and adding a second backend changed nothing at all above it.
 pub struct CaptureHandle<S: FrameSink> {
-    session: wgc::Session<S>,
+    backend: Backend<S>,
     sink: SinkRef<S>,
 }
 
@@ -129,17 +136,26 @@ impl<S: FrameSink> CaptureHandle<S> {
     /// Whether the capture thread has ended on its own — which, for the replay
     /// engine, is the signal to rebuild.
     pub fn is_finished(&self) -> bool {
-        self.session.is_finished()
+        match &self.backend {
+            Backend::Wgc(session) => session.is_finished(),
+            Backend::Duplication(session) => session.is_finished(),
+        }
     }
 
     /// Asks the session to stop and waits for its thread.
     pub fn stop(self) -> Result<()> {
-        self.session.stop()
+        match self.backend {
+            Backend::Wgc(session) => session.stop(),
+            Backend::Duplication(session) => session.stop(),
+        }
     }
 
     /// Waits for a session that is already ending, and reports why it ended.
     pub fn wait(self) -> Result<()> {
-        self.session.wait()
+        match self.backend {
+            Backend::Wgc(session) => session.wait(),
+            Backend::Duplication(session) => session.wait(),
+        }
     }
 }
 
@@ -153,10 +169,18 @@ pub struct MonitorInfo {
     pub refresh_hz: u32,
 }
 
-/// Looks up `monitor_index` the same way the capture backend will.
+/// Looks up `monitor_index`, for sizing an encoder before capture starts.
 ///
 /// The index is Trix's own zero-based `monitor_index` from `config.toml`;
 /// translating it is the backend's problem, not every caller's.
+///
+/// Deliberately **not** per-backend, even though Desktop Duplication
+/// enumerates monitors itself. DXGI reports the DPI-virtualised desktop
+/// rectangle — a 1920x1200 screen at 125% enumerates as 1536x960 — while both
+/// backends deliver real pixels, so sizing an encoder from DXGI would record
+/// every scaled display at the wrong resolution. `EnumDisplaySettingsW`, which
+/// is what this reads, reports the display mode. Same reasoning, and the same
+/// fix, as `probe::monitors_true_pixels`.
 pub fn monitor_info(monitor_index: u32) -> Result<MonitorInfo> {
     wgc::monitor_info(monitor_index)
 }
@@ -167,15 +191,30 @@ pub fn monitor_info(monitor_index: u32) -> Result<MonitorInfo> {
 /// rate where it can — WGC's `MinUpdateInterval`, which stops DWM copying 165
 /// frames a second for an encoder that wants 60. `None` asks for every frame
 /// the compositor produces, which is what the cadence probe measures. It is a
-/// hint: a backend without an equivalent ignores it, and the sinks pace
-/// themselves off `qpc_100ns` regardless.
+/// hint, but not an optional one: Desktop Duplication has no OS-side
+/// equivalent and makes the same cut in its own loop, because a backend that
+/// delivers everything the desktop produces swamps the encoder rather than
+/// merely outrunning it.
 pub fn start<S: FrameSink>(
+    method: CaptureMethod,
     monitor_index: u32,
     pace_to_fps: Option<u32>,
     flags: S::Flags,
 ) -> Result<CaptureHandle<S>> {
-    let (session, sink) = wgc::start::<S>(monitor_index, pace_to_fps, flags)?;
-    Ok(CaptureHandle { session, sink })
+    match method {
+        CaptureMethod::Duplication => {
+            let (session, sink) = duplication::start::<S>(monitor_index, pace_to_fps, flags)?;
+            Ok(CaptureHandle { backend: Backend::Duplication(session), sink })
+        }
+        // `Auto` is Windows Graphics Capture in this release, deliberately: a
+        // capture backend earns its way to being everyone's default by holding
+        // up in real use first, and nobody's recording should change because
+        // they upgraded.
+        CaptureMethod::Auto | CaptureMethod::Wgc => {
+            let (session, sink) = wgc::start::<S>(monitor_index, pace_to_fps, flags)?;
+            Ok(CaptureHandle { backend: Backend::Wgc(session), sink })
+        }
+    }
 }
 
 #[cfg(test)]

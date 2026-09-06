@@ -23,7 +23,7 @@ use super::{
     source::{self, Flow, FrameSink, SourceFrame},
     stage::stage_bgra,
 };
-use crate::thumb;
+use crate::{config::CaptureMethod, thumb};
 
 /// What the probe capture session does with arriving frames.
 enum Mode {
@@ -137,10 +137,16 @@ fn write_png(texture: &ID3D11Texture2D, path: &Path) -> Result<()> {
 }
 
 /// Captures a single frame of `monitor_index` and writes it to `path` as PNG.
-pub fn snapshot(monitor_index: u32, path: PathBuf) -> Result<()> {
+///
+/// Runs on the configured backend, which is the point: this is how a user
+/// checks that the capture method they picked actually works on their machine,
+/// and — because Desktop Duplication has no cursor — what it does and does not
+/// record.
+pub fn snapshot(method: CaptureMethod, monitor_index: u32, path: PathBuf) -> Result<()> {
     let (done, result) = mpsc::channel();
 
     let control = source::start::<ProbeCapture>(
+        method,
         monitor_index,
         None,
         Flags { mode: Mode::Snapshot { path: path.clone(), done } },
@@ -163,7 +169,7 @@ pub fn snapshot(monitor_index: u32, path: PathBuf) -> Result<()> {
 ///
 /// Frames only arrive when screen content changes, so a static desktop reads
 /// low; run moving content (a video/game) to see the full refresh rate.
-pub fn measure(monitor_index: u32, seconds: u64) -> Result<()> {
+pub fn measure(method: CaptureMethod, monitor_index: u32, seconds: u64) -> Result<()> {
     let refresh = source::monitor_info(monitor_index)?.refresh_hz;
     println!(
         "measuring frame arrival for {seconds} s (monitor refresh: {refresh} Hz) — \
@@ -173,7 +179,7 @@ pub fn measure(monitor_index: u32, seconds: u64) -> Result<()> {
     // No pacing hint: the point of this probe is the backend's true delivery
     // cadence, and asking it to slow down would measure the request.
     let control =
-        source::start::<ProbeCapture>(monitor_index, None, Flags { mode: Mode::Measure })?;
+        source::start::<ProbeCapture>(method, monitor_index, None, Flags { mode: Mode::Measure })?;
 
     std::thread::sleep(Duration::from_secs(seconds));
 

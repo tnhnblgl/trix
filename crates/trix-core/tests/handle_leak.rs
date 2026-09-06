@@ -76,7 +76,11 @@ fn capture_only_cycles() {
         // two frames arrived" on a static desktop, and it stops the capture
         // before that check, so the session is created and torn down either
         // way — which is all this test is measuring.
-        let _ = trix_core::capture::video::measure(0, LIVE.as_secs());
+        let _ = trix_core::capture::video::measure(
+            trix_core::config::CaptureMethod::Wgc,
+            0,
+            LIVE.as_secs(),
+        );
         std::thread::sleep(SETTLE);
         samples.push(handles());
     }

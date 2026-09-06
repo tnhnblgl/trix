@@ -310,6 +310,7 @@ pub fn run(config: &Config, options: RecordOptions) -> Result<()> {
     };
 
     let control = crate::capture::source::start::<RecordSession>(
+        config.capture_method(),
         config.monitor_index,
         Some(config.fps),
         flags,

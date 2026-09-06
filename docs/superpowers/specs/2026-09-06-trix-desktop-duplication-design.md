@@ -227,6 +227,54 @@ so the borrowed `SourceFrame` lifetime already expresses this correctly and
 nothing needs to change in the sinks. This is the single most important
 invariant in the backend and must be stated in the module doc.
 
+### Throughput — measured, and not yet at parity
+
+Desktop Duplication delivers fewer encoded frames than WGC on the same screen,
+on the developer machine (Intel UHD driving the panel, RTX 5060 idle, 1920x1200,
+60 fps target, a scrolling console as the moving content). Both backends
+select the same encoder — `Intel Quick Sync Video H.264 Encoder MFT` — so this
+is the capture path, not the encoder choice.
+
+| Build | Delivered/s | Encoded | Dropped | Effective |
+| --- | --- | --- | --- | --- |
+| WGC | 75 | 358 | 0 | **57.9 fps** |
+| DD, first working version | 133 | 228 | 599 | 36.8 fps |
+| DD, + delivery gate | 53 | 169 | 151 | 27.3 fps |
+| DD, + copy before release | 53 | 230 | 94 | **37.7 fps** |
+
+Two causes were found and fixed, and one remains.
+
+**Fixed: no delivery cut.** WGC's `MinUpdateInterval` was doing more than
+saving DWM some copies — it was the only thing keeping the sink's frame rate
+near the target. Desktop Duplication has no OS-side equivalent and delivered
+133 frames a second into an encoder that sustains about 58. The sink's own QPC
+pacer cannot absorb that: it re-anchors its schedule to the last frame it
+*encoded*, and a dropped frame never advances it, so once the encoder starts
+refusing frames the pacer stops pacing entirely (4 paced, 599 dropped). The
+backend now makes the same three-quarters-of-a-frame-period cut itself.
+
+**Fixed: encoding before releasing.** Handing DXGI's own surface to the sink
+puts a frame of GPU work between `AcquireNextFrame` and `ReleaseFrame` every
+frame. Copying into a texture the backend owns — one blit, reallocated only on
+a resolution change — and releasing immediately took the effective rate from
+27.3 to 37.7 fps.
+
+**Open: the encoder grants input credits more slowly on this path.** Every one
+of the 94 remaining drops is `ready_for_input() == false` with the converter
+pool nearly empty, so it is not pool depth and not a one-line fix. `pump()` is
+only called from `on_frame`, which couples how often the MFT's event queue is
+drained to how often frames arrive — but raising the delivery rate does not
+help either (133/s delivered gave 36.8 fps against 53/s giving 37.7), so
+pump frequency is not the whole story.
+
+**What this means for shipping.** Desktop Duplication is correct — right
+colours, right resolution, timestamps that measure the same cadence as WGC's
+to within a millisecond, and audio in sync — but on this machine it records at
+roughly two thirds of WGC's frame rate. That is a real cost to state in the
+option's help text, or to close before the setting is offered. It is not a
+reason to withhold the backend from someone whose alternative is a yellow
+border across their game, and it is a reason not to make it anybody's default.
+
 ### Timestamps
 
 Not interchangeable, and getting this wrong desynchronises audio.
