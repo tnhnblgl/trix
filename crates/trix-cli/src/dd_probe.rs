@@ -325,6 +325,15 @@ struct Stats {
     /// spent actually capturing.
     live: Duration,
     longest_live: Duration,
+    /// The longest stretch between losing access and delivering again — the
+    /// blackout a viewer of the finished clip would see as a jump cut.
+    ///
+    /// This is the product number, not a diagnostic one. In the real backend a
+    /// blackout is a hole in the replay ring at the exact moment somebody wants
+    /// to clip: a game going fullscreen is when the interesting thing happens.
+    longest_blackout: Duration,
+    /// When the current outage began, if there is one in progress.
+    blackout_since: Option<Instant>,
     /// Gaps between consecutive `LastPresentTime` values, in 100 ns units.
     /// This is the *presented* cadence, not the loop's — the two diverge as
     /// soon as the loop is slower than the display.
@@ -361,6 +370,17 @@ impl Stats {
         let live = session.live_time();
         self.live += live;
         self.longest_live = self.longest_live.max(live);
+    }
+
+    /// Ends the outage in progress and folds it into [`Self::longest_blackout`],
+    /// returning how long it lasted. Zero when nothing was dark.
+    fn close_blackout(&mut self) -> Duration {
+        let Some(since) = self.blackout_since.take() else {
+            return Duration::ZERO;
+        };
+        let dark = since.elapsed();
+        self.longest_blackout = self.longest_blackout.max(dark);
+        dark
     }
 }
 
@@ -483,9 +503,11 @@ pub fn run(monitor_index: u32, seconds: u64, warmup: u64) -> Result<()> {
                     if session.last_frame.is_none() && stats.access_losses > 0 {
                         stats.recoveries += 1;
                         backoff_ms = BACKOFF_START_MS;
+                        let blackout = stats.close_blackout();
                         println!(
-                            "  [{:>5.1}s] recovered — frames are flowing again",
-                            started.elapsed().as_secs_f64()
+                            "  [{:>5.1}s] recovered after {:.1} s dark",
+                            started.elapsed().as_secs_f64(),
+                            blackout.as_secs_f64()
                         );
                     }
                     session.last_frame = Some(Instant::now());
@@ -497,6 +519,10 @@ pub fn run(monitor_index: u32, seconds: u64, warmup: u64) -> Result<()> {
             Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
                 stats.access_losses += 1;
                 stats.retire(&session);
+                // `get_or_insert`, not a fresh stamp: a fullscreen transition
+                // is a burst of losses, and that is one blackout as far as the
+                // recording is concerned, not six.
+                stats.blackout_since.get_or_insert_with(Instant::now);
 
                 if stats.access_losses <= LOSSES_LOGGED_IN_FULL {
                     println!(
@@ -549,6 +575,13 @@ pub fn run(monitor_index: u32, seconds: u64, warmup: u64) -> Result<()> {
         }
     }
     stats.retire(&session);
+    // A run that ends while still dark has a blackout with no known end, so its
+    // length is a floor rather than a measurement. Folded in anyway — an
+    // outage that outlasted the run is the worst one by definition — but
+    // remembered separately, because "never came back" is a different verdict
+    // from "came back slowly".
+    let ended_dark = stats.blackout_since.is_some();
+    stats.close_blackout();
 
     let elapsed = started.elapsed().as_secs_f64().max(f64::EPSILON);
     let live = stats.live.as_secs_f64();
@@ -574,6 +607,26 @@ pub fn run(monitor_index: u32, seconds: u64, warmup: u64) -> Result<()> {
         );
     } else {
         println!("  present gap          no two presents to compare");
+    }
+
+    // Only printed when there was something to recover from, so an ordinary
+    // run does not carry a section about a situation it never met.
+    if stats.access_losses > 0 {
+        println!("\n[recovery]");
+        println!(
+            "  {} loss(es), {} recovered, worst blackout {:.1} s{}",
+            stats.access_losses,
+            stats.recoveries,
+            stats.longest_blackout.as_secs_f64(),
+            if ended_dark { " (and it never came back)" } else { "" },
+        );
+        if ended_dark {
+            println!("  NEVER RECOVERED — this is the failure the backend cannot ship with.");
+        } else if stats.longest_blackout > Duration::from_secs(3) {
+            println!("  Recovered, but slowly. A blackout that long is a hole in the clip.");
+        } else {
+            println!("  Recovered every time, and quickly. This is the behaviour we want.");
+        }
     }
 
     println!("\n[the question]");
@@ -664,6 +717,42 @@ mod tests {
         stats.record_present(Some(170_000), 250_000);
         assert_eq!(stats.min_gap_100ns, 80_000, "the smaller gap must win");
         assert_eq!(stats.max_gap_100ns, 170_000);
+    }
+
+    /// A fullscreen transition arrives as a burst of losses, and the recording
+    /// loses one continuous stretch, not one per loss. Stamping the clock on
+    /// every loss would report a blackout of a few milliseconds for an outage
+    /// that actually cost seconds — flattering exactly the number the backend
+    /// will be judged on.
+    #[test]
+    fn a_burst_of_losses_is_a_single_blackout() {
+        let mut stats = Stats::default();
+        let first_loss = Instant::now() - Duration::from_millis(400);
+
+        stats.blackout_since.get_or_insert(first_loss);
+        stats.blackout_since.get_or_insert(Instant::now());
+        assert_eq!(stats.blackout_since, Some(first_loss), "a later loss must not restart it");
+
+        let dark = stats.close_blackout();
+        assert!(dark >= Duration::from_millis(400), "measured from the first loss, not the last");
+        assert_eq!(stats.longest_blackout, dark);
+        assert_eq!(stats.close_blackout(), Duration::ZERO, "nothing is dark now");
+    }
+
+    /// The report quotes the worst outage, so a short recovery after a long one
+    /// must not overwrite it.
+    #[test]
+    fn the_worst_blackout_is_the_one_reported() {
+        let mut stats = Stats {
+            blackout_since: Some(Instant::now() - Duration::from_millis(900)),
+            ..Default::default()
+        };
+        let long = stats.close_blackout();
+
+        stats.blackout_since = Some(Instant::now());
+        stats.close_blackout();
+
+        assert_eq!(stats.longest_blackout, long, "the brief second outage must not win");
     }
 
     /// The threshold that decides whether a run is allowed to be an answer.
