@@ -292,17 +292,55 @@ Two candidate causes have been eliminated by measurement:
   difference is purely how long it takes to ask again: about 56 times a second
   fed from WGC, about 44 fed from duplication.
 
-What is left is GPU-side work per frame. Duplication costs one extra
-full-frame copy (9.2 MB at 1920x1200) on the same device and the same shared
-memory the encoder is using, and this machine's panel hangs off an Intel UHD
-with 128 MB of VRAM. Removing that copy while keeping the early release needs
-the sink to signal "done with the texture" separately from "done with the
-frame" — an addition to the seam, not a tweak.
+**Tried and rejected: removing the copy.** The obvious remaining suspect was
+GPU-side work per frame — duplication costs one extra full-frame copy (9.2 MB
+at 1920x1200) on the same device and the same shared memory the encoder is
+using, on a panel hanging off an Intel UHD with 128 MB of VRAM. So the seam
+was given a second phase: `on_frame` reads the texture, `finish_frame` encodes
+once the backend has released the surface, and the copy is no longer needed to
+get an early release.
+
+**It made throughput worse.** Paired runs, master and the change alternating on
+identical animated content:
+
+| Backend | master | with the copy removed |
+| --- | --- | --- |
+| WGC | 59.3, 59.0 | 58.6, 59.2 |
+| DD | 30.7, 31.5, 28.4 | 27.9, 26.1, 25.9 |
+
+Master won every paired duplication run, by about 12%. Two things were wrong
+with the theory. The copy is not a cost but a **saving**: reading DXGI's
+duplication surface directly as a video-processor input is more expensive than
+copying it once into an ordinary texture and converting from that. And the
+split had nothing to add anyway — the copy already buys the property it was
+meant to introduce, because master encodes after `ReleaseFrame` too.
+
+Kept unmerged on `fix/dd-throughput` as the record. **Do not try it again.**
+
+Eliminated in the same investigation:
+
+- **A per-frame rescale.** Both backends run at 1920x1200 and no resize is
+  logged, so the converter is not scaling on one path and not the other.
+- **Device creation flags.** `windows-capture` creates its device with
+  `D3D11_CREATE_DEVICE_BGRA_SUPPORT` alone, exactly as the duplication backend
+  does, and `mf.rs` already sets multithread protection on both paths.
+- **Burstiness.** Widening the delivery gate from three quarters of a frame
+  period to 95% cut refused frames from 167 to 49 while the encoded count held
+  at ~169. Spacing the offers evenly removes waste and does not raise the
+  ceiling.
+
+**Where a next attempt should start.** The same converter and the same Intel
+QSV encoder sustain about 59 fps fed from WGC's device and about 30 fps fed
+from the duplication backend's, at the same resolution, with the same flags,
+on the same adapter. Nothing above explains that, and it is the only question
+left worth asking. The difference is the device itself, not the copy, the
+pacing, or the seam.
 
 **What this means for shipping.** Desktop Duplication is correct — right
 colours, right resolution, timestamps that measure the same cadence as WGC's
 to within a millisecond, and audio in sync — but on this machine it records at
-roughly two thirds of WGC's frame rate. That is a real cost to state in the
+roughly half of WGC's frame rate: 30 against 59 on controlled content, worse
+than the 44-against-57 measured earlier on a scrolling console. That is a real cost to state in the
 option's help text, or to close before the setting is offered. It is not a
 reason to withhold the backend from someone whose alternative is a yellow
 border across their game, and it is a reason not to make it anybody's default.
