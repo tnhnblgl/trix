@@ -758,3 +758,29 @@ on anything else shipping first.
 4. ~~Does the cursor need parity with WGC before Ship 1?~~ **Answered: no.**
    Desktop Duplication ships cursor-less behind the opt-in setting and gains
    the cursor in a follow-up. Disclosed in the option label and the help text.
+
+5. **OPEN, awaiting a decision — why is the encoder half as fast on our
+   device?** The same `VideoConverter` and the same Intel QSV encoder sustain
+   ~59 fps fed from WGC's device and ~30 fps fed from the duplication
+   backend's: same adapter, same creation flags, same resolution, same
+   content. The copy, the pacing, a per-frame rescale and the seam have all
+   been eliminated by measurement (see **Throughput**), so the difference is
+   the device itself. Nothing here explains it.
+
+   **The cheapest next experiment**, and the one to run first: force the
+   duplication device onto the discrete RTX instead of the Intel that drives
+   the panel, and re-measure. `resolve_output` already enumerates every
+   adapter, so this is a few lines behind a temporary flag.
+   - If the gap **closes** on the dGPU, the cause is hybrid-GPU output
+     routing — exactly the case OBS refuses to use duplication for — and the
+     single-adapter desktops this backend exists for are probably unaffected.
+     That would also mean the shipped warning is pessimistic for its actual
+     audience.
+   - If the gap **stays** at ~30 on both adapters, the cause is in our own
+     duplication path and will follow every user home, which makes the
+     backend's value much narrower and is an argument for withdrawing the
+     option until it is fixed.
+
+   Either answer changes what the setting should say and whether it should be
+   offered at all, which is why it is worth running before any further work on
+   this backend.
