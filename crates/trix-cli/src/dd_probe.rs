@@ -1,0 +1,506 @@
+//! `trix dd-probe` — the Phase 0 spike for the Desktop Duplication backend.
+//!
+//! **This file is throwaway.** It exists to answer one question the design in
+//! `docs/superpowers/specs/2026-09-06-trix-desktop-duplication-design.md` rests
+//! on and cannot answer from here: does DXGI Desktop Duplication clear the
+//! yellow capture border *from a Trix process*? The evidence so far is OBS's
+//! behaviour on the reporting user's machine, which is a different claim.
+//!
+//! It deliberately contains no sink, no seam, no encoder, no ring, and no
+//! cursor. It opens a duplication, acquires and releases frames, counts them,
+//! and prints. When the question is answered — either way — delete this file
+//! and its subcommand in `main.rs`.
+//!
+//! Three things here are load-bearing for the real backend, and are why the
+//! spike is worth compiling rather than just describing:
+//!
+//! 1. The monitor index must resolve to the adapter that *drives the output*,
+//!    not to the default adapter (see [`resolve_output`]).
+//! 2. `LastPresentTime` is raw QPC ticks, not the 100 ns units WGC hands us
+//!    (see [`qpc_to_100ns`], the one function here worth keeping).
+//! 3. The acquired texture must not outlive `ReleaseFrame`.
+
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, anyhow, bail};
+use windows::Win32::Foundation::HMODULE;
+use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11CreateDevice,
+    ID3D11Device, ID3D11Texture2D,
+};
+use windows::Win32::Graphics::Dxgi::{
+    CreateDXGIFactory1, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED,
+    DXGI_ERROR_NOT_CURRENTLY_AVAILABLE, DXGI_ERROR_SESSION_DISCONNECTED, DXGI_ERROR_UNSUPPORTED,
+    DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput,
+    IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+};
+use windows::Win32::System::Performance::QueryPerformanceFrequency;
+use windows::core::Interface as _;
+
+/// How long `AcquireNextFrame` waits before reporting that nothing changed.
+///
+/// Short enough that the progress line still ticks once a second on a
+/// completely static desktop, long enough that a still screen does not spin
+/// this loop. A timeout is not an error: like WGC, duplication only delivers
+/// on change.
+const ACQUIRE_TIMEOUT_MS: u32 = 100;
+
+/// How long to wait after `DXGI_ERROR_ACCESS_LOST` before re-duplicating.
+///
+/// Access loss arrives in bursts — a fullscreen transition is several in a row
+/// — and re-duplicating instantly turns that into a busy loop against a display
+/// that is still changing mode.
+const REACQUIRE_SETTLE_MS: u64 = 250;
+
+/// Stops counting access losses rather than scrolling forever.
+///
+/// The real backend surfaces loss as session death and lets `run_driven_inner`
+/// rebuild on its own budget; this cap exists only so that a machine where
+/// duplication cannot hold at all prints a verdict the user can read back.
+const MAX_ACCESS_LOSSES: u32 = 60;
+
+/// Converts a QPC tick count into the 100 ns units the rest of the pipeline
+/// already uses.
+///
+/// This is the one piece of arithmetic Ship 1 inherits verbatim. WGC's
+/// `SystemRelativeTime` is *already* 100 ns; Desktop Duplication's
+/// `LastPresentTime` is raw QPC. The two are not interchangeable, and mixing
+/// them desynchronises audio.
+///
+/// The 128-bit intermediate is not defensive padding. `LastPresentTime` is an
+/// **absolute** QPC value counting from boot, so on a 10 MHz timer it passes
+/// 8.6e11 after a day of uptime — and multiplying that by 10,000,000 overflows
+/// `i64`. A machine awake since Tuesday would silently produce negative
+/// timestamps, which is the hardest possible bug to reproduce on a developer
+/// machine that reboots daily.
+fn qpc_to_100ns(ticks: i64, qpf: i64) -> i64 {
+    debug_assert!(qpf > 0, "QueryPerformanceFrequency never reports zero");
+    ((ticks as i128 * 10_000_000) / qpf as i128) as i64
+}
+
+/// The adapter and output that `monitor_index` names.
+struct Target {
+    adapter: IDXGIAdapter1,
+    output: IDXGIOutput,
+    adapter_index: u32,
+    adapter_name: String,
+    output_index: u32,
+    output_name: String,
+    width: i32,
+    height: i32,
+    left: i32,
+    top: i32,
+}
+
+/// Walks DXGI the way `trix_core::probe` does, and stops at `monitor_index`.
+///
+/// The counting rule is the contract: desktop-attached outputs only, counted
+/// **across** adapters in DXGI's order, because that is what
+/// `config.monitor_index` stores and what the settings dropdown binds to.
+/// `probe.rs` owns the test that pins this index space against
+/// `windows-capture`'s. This is the same walk, repeated here rather than shared
+/// because the spike needs the live COM objects and `probe.rs` deliberately
+/// returns only descriptions.
+///
+/// Returning the *adapter* is the entire point of the function. Creating the
+/// device on the default adapter instead would work on this developer machine
+/// and fail with `DXGI_ERROR_UNSUPPORTED` on a hybrid-GPU laptop whose display
+/// hangs off the iGPU — which is exactly the configuration the design flags as
+/// its largest technical risk.
+fn resolve_output(monitor_index: u32) -> Result<Target> {
+    let factory: IDXGIFactory1 =
+        unsafe { CreateDXGIFactory1() }.context("CreateDXGIFactory1 failed")?;
+
+    let mut seen = 0u32;
+    let mut adapter_index = 0u32;
+    while let Ok(adapter) = unsafe { factory.EnumAdapters1(adapter_index) } {
+        let adapter_desc = unsafe { adapter.GetDesc1() }.context("IDXGIAdapter1::GetDesc1")?;
+        let adapter_name = wide_to_string(&adapter_desc.Description);
+
+        let mut output_index = 0u32;
+        while let Ok(output) = unsafe { adapter.EnumOutputs(output_index) } {
+            let out_desc = unsafe { output.GetDesc() }.context("IDXGIOutput::GetDesc")?;
+            if out_desc.AttachedToDesktop.as_bool() {
+                if seen == monitor_index {
+                    let r = out_desc.DesktopCoordinates;
+                    return Ok(Target {
+                        adapter,
+                        output,
+                        adapter_index,
+                        adapter_name,
+                        output_index,
+                        output_name: wide_to_string(&out_desc.DeviceName),
+                        width: r.right - r.left,
+                        height: r.bottom - r.top,
+                        left: r.left,
+                        top: r.top,
+                    });
+                }
+                seen += 1;
+            }
+            output_index += 1;
+        }
+        adapter_index += 1;
+    }
+
+    bail!(
+        "monitor {monitor_index} does not exist — DXGI reports {seen} desktop-attached \
+         monitor(s). Run `trix probe` to list them."
+    )
+}
+
+fn wide_to_string(wide: &[u16]) -> String {
+    let len = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
+    String::from_utf16_lossy(&wide[..len])
+}
+
+/// Creates a D3D11 device **on the given adapter**.
+///
+/// `D3D_DRIVER_TYPE_UNKNOWN` is required rather than preferred: passing an
+/// adapter together with any other driver type is an invalid-argument error.
+fn create_device(adapter: &IDXGIAdapter1) -> Result<ID3D11Device> {
+    let mut device: Option<ID3D11Device> = None;
+    unsafe {
+        D3D11CreateDevice(
+            adapter,
+            D3D_DRIVER_TYPE_UNKNOWN,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            None,
+        )
+    }
+    .context("D3D11CreateDevice on the adapter driving this monitor failed")?;
+    device.context("D3D11CreateDevice reported success but handed back no device")
+}
+
+/// Opens the duplication, translating the failures a user can actually hit.
+///
+/// These three HRESULTs are worth naming because they are the difference
+/// between "this machine cannot do it", "close OBS", and "you are on RDP".
+/// Anything else is a genuine surprise and is reported raw.
+fn duplicate(output: &IDXGIOutput, device: &ID3D11Device) -> Result<IDXGIOutputDuplication> {
+    let output1: IDXGIOutput1 = output
+        .cast()
+        .context("this output does not support IDXGIOutput1, so it cannot be duplicated")?;
+
+    unsafe { output1.DuplicateOutput(device) }.map_err(|e| {
+        let code = e.code();
+        if code == DXGI_ERROR_UNSUPPORTED {
+            anyhow!(
+                "DXGI_ERROR_UNSUPPORTED — the device was created on the wrong adapter for this \
+                 output, or this display cannot be duplicated at all. A hybrid-GPU laptop is the \
+                 usual cause."
+            )
+        } else if code == DXGI_ERROR_NOT_CURRENTLY_AVAILABLE {
+            anyhow!(
+                "DXGI_ERROR_NOT_CURRENTLY_AVAILABLE — this output already has the maximum number \
+                 of duplications open. Close OBS or any other duplication-based recorder and run \
+                 this again."
+            )
+        } else if code == DXGI_ERROR_SESSION_DISCONNECTED {
+            anyhow!(
+                "DXGI_ERROR_SESSION_DISCONNECTED — there is no interactive desktop session to \
+                 duplicate (a remote-desktop connection, a locked screen, or a service context)"
+            )
+        } else {
+            anyhow!("DuplicateOutput failed: {e}")
+        }
+    })
+}
+
+/// Everything the run measures.
+#[derive(Default)]
+struct Stats {
+    /// Frames carrying new desktop content (`LastPresentTime != 0`).
+    desktop: u64,
+    /// Frames where only the pointer moved. The real backend skips these; they
+    /// are counted here because their share is worth knowing before judging
+    /// how much a missing cursor actually costs.
+    mouse_only: u64,
+    timeouts: u64,
+    access_losses: u32,
+    /// Gaps between consecutive `LastPresentTime` values, in 100 ns units.
+    /// This is the *presented* cadence, not the loop's — the two diverge as
+    /// soon as the loop is slower than the display.
+    min_gap_100ns: i64,
+    max_gap_100ns: i64,
+    total_gap_100ns: i64,
+    gaps: u64,
+}
+
+impl Stats {
+    fn record_present(&mut self, previous: Option<i64>, now: i64) {
+        self.desktop += 1;
+        let Some(previous) = previous else { return };
+
+        // A gap of zero or less means the clock did not advance between two
+        // frames DXGI called distinct presents. That is not a cadence sample,
+        // and averaging it in would flatter every number below it.
+        let gap = now - previous;
+        if gap <= 0 {
+            return;
+        }
+        if self.gaps == 0 {
+            self.min_gap_100ns = gap;
+            self.max_gap_100ns = gap;
+        } else {
+            self.min_gap_100ns = self.min_gap_100ns.min(gap);
+            self.max_gap_100ns = self.max_gap_100ns.max(gap);
+        }
+        self.total_gap_100ns += gap;
+        self.gaps += 1;
+    }
+}
+
+fn ms(hundred_ns: i64) -> f64 {
+    hundred_ns as f64 / 10_000.0
+}
+
+/// Names the handful of formats duplication actually hands back.
+///
+/// The output of this probe is read by someone who is not looking at this
+/// source, so a bare `87` is not a useful thing to send them. 87 is
+/// `B8G8R8A8_UNORM` — the same format WGC delivers and `VideoConverter`
+/// already consumes, which is the answer worth being able to read at a glance.
+fn format_name(format: i32) -> &'static str {
+    match format {
+        87 => "B8G8R8A8_UNORM (same as WGC)",
+        28 => "R8G8B8A8_UNORM",
+        24 => "R10G10B10A2_UNORM (HDR / wide colour)",
+        10 => "R16G16B16A16_FLOAT (HDR)",
+        _ => "unrecognised — worth reporting",
+    }
+}
+
+pub fn run(monitor_index: u32, seconds: u64) -> Result<()> {
+    println!("trix dd-probe — Desktop Duplication spike");
+    println!("=========================================");
+
+    let mut qpf = 0i64;
+    unsafe { QueryPerformanceFrequency(&mut qpf) }.context("QueryPerformanceFrequency failed")?;
+
+    let target = resolve_output(monitor_index)?;
+    println!("\n[target]");
+    println!(
+        "  monitor {monitor_index}: {} — {}x{} at ({}, {})",
+        target.output_name, target.width, target.height, target.left, target.top
+    );
+    println!(
+        "  driven by adapter {} ({}), output {}",
+        target.adapter_index, target.adapter_name, target.output_index
+    );
+    println!("  QPC frequency: {qpf} Hz");
+
+    let device = create_device(&target.adapter)?;
+    let mut dupl = duplicate(&target.output, &device)?;
+
+    println!("\n[duplication]");
+    println!("  opened OK");
+    println!("  running for {seconds} s — LOOK AT YOUR SCREEN NOW.");
+    println!("  Is there a yellow border around it? That is the whole question.");
+    println!();
+
+    let mut stats = Stats::default();
+    let mut described = false;
+    let mut previous_present: Option<i64> = None;
+    let started = Instant::now();
+    let run_for = Duration::from_secs(seconds);
+    let mut last_report = started;
+
+    while started.elapsed() < run_for {
+        let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
+        let mut resource: Option<IDXGIResource> = None;
+        let acquired =
+            unsafe { dupl.AcquireNextFrame(ACQUIRE_TIMEOUT_MS, &mut info, &mut resource) };
+
+        match acquired {
+            Ok(()) => {
+                if let Some(resource) = &resource
+                    && !described
+                {
+                    // Cast, read, and finish with the texture entirely inside
+                    // this arm. It belongs to DXGI until `ReleaseFrame` below,
+                    // and the real backend's borrowed `SourceFrame<'_>` exists
+                    // to say precisely that.
+                    let texture: ID3D11Texture2D =
+                        resource.cast().context("the acquired frame is not an ID3D11Texture2D")?;
+                    let mut desc = D3D11_TEXTURE2D_DESC::default();
+                    unsafe { texture.GetDesc(&mut desc) };
+                    println!(
+                        "  first frame: {}x{}, DXGI_FORMAT {} — {}",
+                        desc.Width,
+                        desc.Height,
+                        desc.Format.0,
+                        format_name(desc.Format.0)
+                    );
+                    if desc.Width as i32 != target.width || desc.Height as i32 != target.height {
+                        // Not a bug and not a surprise: this process is
+                        // DPI-unaware, so DXGI's desktop rectangle above is
+                        // virtualised by the display's scaling while the
+                        // duplication surface is real pixels. The encoder is
+                        // sized from real pixels today, so this is the number
+                        // that matters — but a reader comparing the two lines
+                        // deserves to be told, not left to guess.
+                        println!(
+                            "  (the {}x{} above is DXGI's DPI-scaled desktop rectangle; the \
+                             duplication delivers real pixels)",
+                            target.width, target.height
+                        );
+                    }
+                    described = true;
+                }
+
+                if info.LastPresentTime == 0 {
+                    stats.mouse_only += 1;
+                } else {
+                    let present = qpc_to_100ns(info.LastPresentTime, qpf);
+                    stats.record_present(previous_present, present);
+                    previous_present = Some(present);
+                }
+
+                unsafe { dupl.ReleaseFrame() }.context("ReleaseFrame failed")?;
+            }
+            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => stats.timeouts += 1,
+            Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
+                stats.access_losses += 1;
+                println!(
+                    "  [{:>5.1}s] ACCESS LOST (#{}) — mode change, UAC prompt, or a fullscreen \
+                     transition; re-duplicating",
+                    started.elapsed().as_secs_f64(),
+                    stats.access_losses
+                );
+                if stats.access_losses >= MAX_ACCESS_LOSSES {
+                    println!(
+                        "  giving up after {MAX_ACCESS_LOSSES} losses — duplication cannot hold \
+                         on this machine in this state"
+                    );
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(REACQUIRE_SETTLE_MS));
+                dupl = duplicate(&target.output, &device)
+                    .context("could not re-open the duplication after access loss")?;
+                previous_present = None;
+            }
+            Err(e) if e.code() == DXGI_ERROR_DEVICE_REMOVED => bail!(
+                "DXGI_ERROR_DEVICE_REMOVED — the graphics device was reset or the driver \
+                 restarted. The real backend would recover by rebuilding the whole session."
+            ),
+            Err(e) => return Err(e).context("AcquireNextFrame failed"),
+        }
+
+        if last_report.elapsed() >= Duration::from_secs(1) {
+            last_report = Instant::now();
+            println!(
+                "  [{:>5.1}s] desktop {}  mouse-only {}  timeouts {}",
+                started.elapsed().as_secs_f64(),
+                stats.desktop,
+                stats.mouse_only,
+                stats.timeouts
+            );
+        }
+    }
+
+    let elapsed = started.elapsed().as_secs_f64().max(f64::EPSILON);
+    println!("\n[result]");
+    println!("  ran for            {elapsed:.1} s");
+    println!("  desktop frames     {}  ({:.1} /s)", stats.desktop, stats.desktop as f64 / elapsed);
+    println!("  mouse-only frames  {}", stats.mouse_only);
+    println!("  wait timeouts      {}", stats.timeouts);
+    println!("  access losses      {}", stats.access_losses);
+    if stats.gaps > 0 {
+        println!(
+            "  present gap        min {:.1} ms  avg {:.1} ms  max {:.1} ms",
+            ms(stats.min_gap_100ns),
+            ms(stats.total_gap_100ns / stats.gaps as i64),
+            ms(stats.max_gap_100ns),
+        );
+    } else {
+        println!("  present gap        no two presents to compare");
+    }
+
+    println!("\n[the question]");
+    if stats.desktop == 0 {
+        println!("  NO desktop frames arrived. The duplication opened but delivered nothing —");
+        println!("  either the screen was completely static, or something blocked it.");
+    } else {
+        println!("  Duplication worked. Was there a yellow border on screen while it ran?");
+        println!("    no border  -> the Desktop Duplication backend is worth building");
+        println!("    border     -> it is not, and this design stops here");
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The conversion Ship 1 inherits. 10 MHz is the QPC frequency on
+    /// essentially every machine this will run on, which makes the numbers
+    /// checkable by eye: at 10 MHz one tick already *is* 100 ns.
+    #[test]
+    fn qpc_ticks_convert_to_hundred_nanosecond_units() {
+        assert_eq!(qpc_to_100ns(0, 10_000_000), 0);
+        assert_eq!(qpc_to_100ns(1, 10_000_000), 1);
+        assert_eq!(qpc_to_100ns(10_000_000, 10_000_000), 10_000_000, "one second");
+
+        // A 3.579545 MHz timer — the old ACPI power-management clock, and the
+        // reason this cannot just assume 10 MHz and multiply.
+        assert_eq!(qpc_to_100ns(3_579_545, 3_579_545), 10_000_000, "one second");
+    }
+
+    /// The reason for the 128-bit intermediate, stated as a test so that
+    /// anyone who "simplifies" it back to `i64` finds out immediately.
+    ///
+    /// `LastPresentTime` counts from boot, so a week of uptime on a 10 MHz
+    /// timer is 6.0e12 ticks — and `6.0e12 * 10_000_000` is far past
+    /// `i64::MAX`. In `i64` that wraps to a negative timestamp on any machine
+    /// that has not been rebooted recently.
+    #[test]
+    fn a_week_of_uptime_does_not_overflow() {
+        const QPF: i64 = 10_000_000;
+        let week = 7 * 24 * 60 * 60 * QPF;
+
+        let converted = qpc_to_100ns(week, QPF);
+        assert_eq!(converted, week, "at 10 MHz a tick is already 100 ns");
+        assert!(converted > 0, "must not wrap negative");
+
+        // The overflow this guards against, made explicit: the naive
+        // expression from the design document does wrap at this scale.
+        assert!(week.checked_mul(10_000_000).is_none(), "i64 arithmetic overflows here");
+    }
+
+    /// Gaps are the presented cadence, so a repeated `LastPresentTime` — which
+    /// DXGI does hand out — must not count as a zero-millisecond frame and
+    /// flatter the average.
+    #[test]
+    fn repeated_present_times_are_not_cadence_samples() {
+        let mut stats = Stats::default();
+        stats.record_present(None, 1_000);
+        stats.record_present(Some(1_000), 1_000);
+        assert_eq!(stats.desktop, 2, "both are frames");
+        assert_eq!(stats.gaps, 0, "neither is a cadence sample");
+    }
+
+    /// The first sample has to seed both extremes. Leaving them at
+    /// `Default::default()` would peg the minimum at zero forever and report a
+    /// 0.0 ms best-case gap on every run.
+    #[test]
+    fn the_first_gap_seeds_both_extremes() {
+        let mut stats = Stats::default();
+        stats.record_present(None, 0);
+        stats.record_present(Some(0), 170_000);
+        assert_eq!(stats.gaps, 1);
+        assert_eq!(stats.min_gap_100ns, 170_000);
+        assert_eq!(stats.max_gap_100ns, 170_000);
+
+        stats.record_present(Some(170_000), 250_000);
+        assert_eq!(stats.min_gap_100ns, 80_000, "the smaller gap must win");
+        assert_eq!(stats.max_gap_100ns, 170_000);
+    }
+}

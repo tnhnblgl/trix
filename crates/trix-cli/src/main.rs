@@ -6,6 +6,10 @@ use anyhow::Context as _;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+/// Phase 0 spike for the Desktop Duplication backend. Temporary by design —
+/// see the module doc for what deleting it looks like.
+mod dd_probe;
+
 #[derive(Parser)]
 #[command(
     name = "trix",
@@ -34,6 +38,22 @@ enum Command {
         /// Capture N seconds of system loopback audio to a WAV file
         #[arg(long, value_name = "SECONDS")]
         audio: Option<u64>,
+    },
+    /// SPIKE: open a DXGI Desktop Duplication and report what it delivers
+    ///
+    /// Throwaway diagnostic. It records nothing and writes no files — it opens
+    /// a duplication of one monitor, counts frames for a few seconds, and
+    /// prints. The question it exists to answer is whether Windows draws its
+    /// yellow capture border while this runs.
+    DdProbe {
+        /// Which monitor, in `trix probe` numbering. Defaults to the one the
+        /// config already captures, so the probe targets the same screen Trix
+        /// would.
+        #[arg(long, value_name = "INDEX")]
+        monitor: Option<u32>,
+        /// How long to hold the duplication open
+        #[arg(long, default_value_t = 20, value_name = "SECONDS")]
+        seconds: u64,
     },
     /// Record the screen to an MP4 file
     Record {
@@ -97,6 +117,12 @@ fn main() -> Result<()> {
             }
             (None, None, None) => probe::run(),
         },
+        // Deliberately outside the single-instance lock: the point of the
+        // spike is to run it *while* Trix is armed, and taking the lock would
+        // make the one interesting case impossible.
+        Command::DdProbe { monitor, seconds } => {
+            dd_probe::run(monitor.unwrap_or(config.monitor_index), seconds)
+        }
         Command::Record { duration, output, no_audio } => {
             let _single = control::acquire_single_instance()?;
             record::run(
@@ -239,6 +265,10 @@ mod tests {
                 .is_ok(),
             "the hidden test flags are how every phase gets verified"
         );
+        assert!(Cli::try_parse_from(["trix", "dd-probe"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["trix", "dd-probe", "--monitor", "1", "--seconds", "30"]).is_ok()
+        );
         assert!(Cli::try_parse_from(["trix", "bogus"]).is_err());
         assert!(
             Cli::try_parse_from(["trix"]).is_err(),
@@ -281,6 +311,28 @@ mod tests {
         };
         assert_eq!(auto_clip, Some(8));
         assert_eq!(exit_after, Some(12));
+    }
+
+    /// A bare `dd-probe` must fall through to the configured monitor rather
+    /// than hard-coding screen 0 — the border is a property of the screen Trix
+    /// actually captures, so probing a different one would answer the wrong
+    /// question on a multi-monitor machine.
+    ///
+    /// Delete this with the subcommand when the spike is retired.
+    #[test]
+    fn dd_probe_defaults_to_the_configured_monitor_and_twenty_seconds() {
+        let cli = Cli::try_parse_from(["trix", "dd-probe"]).unwrap();
+        let Command::DdProbe { monitor, seconds } = cli.command else {
+            panic!("expected DdProbe");
+        };
+        assert_eq!(monitor, None, "no --monitor means the config's monitor_index, not 0");
+        assert_eq!(seconds, 20);
+
+        let cli = Cli::try_parse_from(["trix", "dd-probe", "--monitor", "2"]).unwrap();
+        let Command::DdProbe { monitor, .. } = cli.command else {
+            panic!("expected DdProbe");
+        };
+        assert_eq!(monitor, Some(2), "an explicit --monitor must still win");
     }
 
     /// Guards `crates/trix-cli/Cargo.toml`'s `[[bin]] name = "trix"` — nothing
