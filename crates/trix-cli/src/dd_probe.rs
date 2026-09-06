@@ -411,6 +411,10 @@ struct Stats {
     /// turns on: a recovery that keeps the device is invisible above the seam,
     /// one that does not costs the sink, the encoder and the replay ring.
     recoveries_keeping_device: u32,
+    /// Attempts to reopen that failed outright, rather than opening and then
+    /// losing access. `E_ACCESSDENIED` while the secure desktop is up is the
+    /// one that matters: a UAC prompt must not be able to end a capture.
+    reopen_failures: u32,
     /// Summed across every chain, so the run can say how much of itself was
     /// spent actually capturing.
     live: Duration,
@@ -568,11 +572,55 @@ pub fn run(monitor_index: u32, seconds: u64, warmup: u64) -> Result<()> {
     // comes out above 100%. Both clocks start here instead.
     session.opened = started;
 
+    // The chain is optional from here on, and reopening happens at the top of
+    // the loop rather than inside the loss arm. That is what makes a failed
+    // reopen survivable: `E_ACCESSDENIED` while the secure desktop is up (a UAC
+    // prompt, Ctrl+Alt+Del) is a *temporary* refusal, and treating it as fatal
+    // would kill capture every time Windows asked the user a question.
+    let mut last_device = Some(session.device.clone());
+    let mut session = Some(session);
+
     while started.elapsed() < run_for {
+        if session.is_none() {
+            let reuse = (losses_since_frame <= REUSE_DEVICE_ATTEMPTS)
+                .then(|| last_device.clone())
+                .flatten();
+            match Session::open(monitor_index, reuse) {
+                Ok((rebuilt, _)) => {
+                    last_device = Some(rebuilt.device.clone());
+                    session = Some(rebuilt);
+                    previous_present = None;
+                    described = false;
+                }
+                Err(e) => {
+                    stats.reopen_failures += 1;
+                    if stats.reopen_failures <= LOSSES_LOGGED_IN_FULL
+                        || stats.reopen_failures % 10 == 0
+                    {
+                        println!(
+                            "  [{:>5.1}s] cannot reopen yet (#{}) — {e}",
+                            started.elapsed().as_secs_f64(),
+                            stats.reopen_failures,
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(backoff_ms));
+                    backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+                    continue;
+                }
+            }
+        }
+        let active = session.as_mut().expect("a chain was just ensured above");
+
+        // Set by the access-loss arm. The chain cannot be released from inside
+        // the arm — `session` is borrowed there — and releasing it *before*
+        // building the replacement is the whole fix, so the arm records the
+        // fact and the release happens below.
+        let mut lost = false;
+
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource: Option<IDXGIResource> = None;
         let acquired =
-            unsafe { session.dupl.AcquireNextFrame(ACQUIRE_TIMEOUT_MS, &mut info, &mut resource) };
+            unsafe { active.dupl.AcquireNextFrame(ACQUIRE_TIMEOUT_MS, &mut info, &mut resource) };
 
         match acquired {
             Ok(()) => {
@@ -604,9 +652,9 @@ pub fn run(monitor_index: u32, seconds: u64, warmup: u64) -> Result<()> {
                     stats.record_present(previous_present, present);
                     previous_present = Some(present);
 
-                    if session.last_frame.is_none() && stats.access_losses > 0 {
+                    if active.last_frame.is_none() && stats.access_losses > 0 {
                         stats.recoveries += 1;
-                        if session.reused {
+                        if active.reused {
                             stats.recoveries_keeping_device += 1;
                         }
                         backoff_ms = BACKOFF_START_MS;
@@ -615,20 +663,20 @@ pub fn run(monitor_index: u32, seconds: u64, warmup: u64) -> Result<()> {
                             "  [{:>5.1}s] recovered after {:.1} s dark ({})",
                             started.elapsed().as_secs_f64(),
                             blackout.as_secs_f64(),
-                            if session.reused { "same device" } else { "new device" }
+                            if active.reused { "same device" } else { "new device" }
                         );
                     }
                     losses_since_frame = 0;
-                    session.last_frame = Some(Instant::now());
+                    active.last_frame = Some(Instant::now());
                 }
 
-                unsafe { session.dupl.ReleaseFrame() }.context("ReleaseFrame failed")?;
+                unsafe { active.dupl.ReleaseFrame() }.context("ReleaseFrame failed")?;
             }
             Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => stats.timeouts += 1,
             Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
                 stats.access_losses += 1;
                 losses_since_frame += 1;
-                stats.retire(&session);
+                stats.retire(active);
                 // `get_or_insert`, not a fresh stamp: a fullscreen transition
                 // is a burst of losses, and that is one blackout as far as the
                 // recording is concerned, not six.
@@ -643,7 +691,7 @@ pub fn run(monitor_index: u32, seconds: u64, warmup: u64) -> Result<()> {
                         "  [{:>5.1}s] access lost (#{}) — {}; rebuilding the whole chain",
                         started.elapsed().as_secs_f64(),
                         stats.access_losses,
-                        session.explain_loss()
+                        active.explain_loss()
                     );
                     if stats.access_losses == LOSSES_LOGGED_IN_FULL {
                         println!("  (from here only every tenth loss is printed)");
@@ -658,44 +706,45 @@ pub fn run(monitor_index: u32, seconds: u64, warmup: u64) -> Result<()> {
                     break;
                 }
 
-                std::thread::sleep(Duration::from_millis(backoff_ms));
-                backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
-
-                // Keep the device unless reusing it has stopped working. This
-                // is the tiering described on `Session::open`: tier 1 is
-                // invisible above the seam, tier 2 costs the sink.
-                let reuse =
-                    (losses_since_frame <= REUSE_DEVICE_ATTEMPTS).then(|| session.device.clone());
-                if reuse.is_none() && session.reused {
+                if losses_since_frame == REUSE_DEVICE_ATTEMPTS + 1 && active.reused {
                     println!(
                         "  [{:>5.1}s] reusing the device is not recovering — creating a new one",
                         started.elapsed().as_secs_f64()
                     );
                 }
 
-                // **Release the dead chain before building its replacement.**
-                // Creating the new duplication first left two duplications of
-                // the same output alive in this process, and DXGI hands the
-                // second one back looking valid while every `AcquireNextFrame`
-                // on it fails — which is exactly the 18-losses-0-recoveries
-                // signature this arm could not explain. Confirmed: with the
-                // drop in place the same test recovered 4 of 4 in 0.4 s each.
-                //
-                // The device is cloned out first, so this releases the
-                // duplication without releasing the device with it.
-                drop(session);
-
-                let (rebuilt, _) = Session::open(monitor_index, reuse)
-                    .context("could not rebuild the duplication after access loss")?;
-                session = rebuilt;
-                previous_present = None;
-                described = false;
+                std::thread::sleep(Duration::from_millis(backoff_ms));
+                backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+                lost = true;
             }
-            Err(e) if e.code() == DXGI_ERROR_DEVICE_REMOVED => bail!(
-                "DXGI_ERROR_DEVICE_REMOVED — the graphics device was reset or the driver \
-                 restarted. The real backend would recover by rebuilding the whole session."
-            ),
+            Err(e) if e.code() == DXGI_ERROR_DEVICE_REMOVED => {
+                // Recoverable, but only on a new device — precisely the case
+                // tier 2 exists for. Pushing the counter past the reuse budget
+                // is how this arm says "do not offer the old one".
+                stats.access_losses += 1;
+                losses_since_frame = REUSE_DEVICE_ATTEMPTS + 1;
+                stats.retire(active);
+                stats.blackout_since.get_or_insert_with(Instant::now);
+                println!(
+                    "  [{:>5.1}s] DEVICE REMOVED — the driver reset; rebuilding on a new device",
+                    started.elapsed().as_secs_f64()
+                );
+                std::thread::sleep(Duration::from_millis(backoff_ms));
+                backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+                lost = true;
+            }
             Err(e) => return Err(e).context("AcquireNextFrame failed"),
+        }
+
+        // **Release the dead chain before building its replacement.** Creating
+        // the new duplication first left two duplications of the same output
+        // alive in this process, and DXGI hands the second one back looking
+        // valid while every `AcquireNextFrame` on it fails — the
+        // 18-losses-0-recoveries signature. With this release in place the same
+        // test recovered 4 of 4 in 0.4 s each. `last_device` already holds the
+        // device, so this drops the duplication without dropping the device.
+        if lost {
+            session = None;
         }
 
         if last_report.elapsed() >= Duration::from_secs(1) {
@@ -710,7 +759,9 @@ pub fn run(monitor_index: u32, seconds: u64, warmup: u64) -> Result<()> {
             );
         }
     }
-    stats.retire(&session);
+    if let Some(session) = &session {
+        stats.retire(session);
+    }
     // A run that ends while still dark has a blackout with no known end, so its
     // length is a floor rather than a measurement. Folded in anyway — an
     // outage that outlasted the run is the worst one by definition — but
@@ -761,6 +812,13 @@ pub fn run(monitor_index: u32, seconds: u64, warmup: u64) -> Result<()> {
                 "  {} of those kept the same graphics device, {} needed a new one",
                 stats.recoveries_keeping_device,
                 stats.recoveries - stats.recoveries_keeping_device,
+            );
+        }
+        if stats.reopen_failures > 0 {
+            println!(
+                "  {} reopen attempt(s) were refused outright and retried — a UAC prompt or \
+                 Ctrl+Alt+Del looks like this",
+                stats.reopen_failures
             );
         }
         if ended_dark {
