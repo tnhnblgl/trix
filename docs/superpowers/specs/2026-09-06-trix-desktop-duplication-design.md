@@ -203,8 +203,19 @@ The DD backend converts once per frame with a `QueryPerformanceFrequency`
 cached at construction:
 
 ```rust
-qpc_100ns = last_present_time * 10_000_000 / qpf
+fn qpc_to_100ns(ticks: i64, qpf: i64) -> i64 {
+    ((ticks as i128 * 10_000_000) / qpf as i128) as i64
+}
 ```
+
+**The 128-bit intermediate is required, not defensive.** `LastPresentTime` is
+an *absolute* QPC value counting from boot, so on the 10 MHz timer this machine
+reports it passes 8.6e11 after a day of uptime — and multiplying that by
+10,000,000 overflows `i64`. The obvious one-line version of this expression
+wraps to a negative timestamp on any machine that has not rebooted recently,
+which is the hardest possible bug to reproduce on a developer machine that
+reboots daily. Phase 0 carries the function and the test that pins it; Ship 1
+inherits both verbatim.
 
 Both clocks are QPC-based, so after conversion they are the same timeline the
 audio mixer's `t0` and the encoder's `pts` already use. `LastPresentTime` can
@@ -414,6 +425,23 @@ four things at once:
 
 If the border is still there, this design is dead and two weeks are saved. That
 is the point of it.
+
+**Built**, on `spike/dd-probe`, as `trix dd-probe [--monitor N] [--seconds N]`.
+With no `--monitor` it targets the screen the config already captures, and it
+takes no single-instance lock, because the case worth measuring is running it
+while Trix is armed.
+
+Answered on the developer machine (hybrid GPU, Intel UHD driving the panel):
+
+| Question | Answer here |
+| --- | --- |
+| Does duplication work at all? | Yes — 60–105 desktop frames/s, no access losses, no wait timeouts |
+| Adapter routing on a hybrid GPU | **Resolved correctly.** Monitor 0 → adapter 0, the iGPU driving the output, and `DuplicateOutput` succeeded. The design's largest technical risk, clear on the configuration it was worried about |
+| What format does it deliver? | `B8G8R8A8_UNORM` — the same format `VideoConverter` already takes from WGC, so nothing downstream changes |
+| How many frames are mouse-only? | Over half, in a run with an active pointer. Confirms skipping `LastPresentTime == 0` rather than timestamping those |
+
+Still needs the reporting user, and is the only question that matters: **does
+the border go away.** That cannot be answered on a machine that never had one.
 
 ## Effort
 
