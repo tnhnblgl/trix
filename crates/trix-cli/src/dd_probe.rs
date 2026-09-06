@@ -71,14 +71,18 @@ const ACQUIRE_TIMEOUT_MS: u32 = 100;
 /// The backoff resets the moment a session delivers a frame, so an ordinary
 /// transition costs one short pause rather than a growing one.
 const BACKOFF_START_MS: u64 = 100;
-const MAX_BACKOFF_MS: u64 = 1_500;
+// Capped low. The first alt-tab run spent its backoff at 1.5 s and got only
+// fifteen attempts across twenty-three dark seconds, which is too coarse to
+// tell "recovers after four seconds" from "never recovers" — and those are
+// different verdicts for the product.
+const MAX_BACKOFF_MS: u64 = 500;
 
 /// Stops rebuilding rather than scrolling forever.
 ///
 /// The real backend surfaces loss as session death and lets `run_driven_inner`
 /// rebuild on its own budget; this cap exists only so a machine where
 /// duplication cannot hold at all prints a verdict the user can read back.
-const MAX_ACCESS_LOSSES: u32 = 40;
+const MAX_ACCESS_LOSSES: u32 = 300;
 
 /// Losses reported in full before the log switches to counting them.
 ///
@@ -302,7 +306,47 @@ impl Session {
             Ok(()) => "device fine".to_string(),
             Err(e) => format!("device removed: {}", e.code().0),
         };
-        format!("factory current: {current}, {removed}")
+        format!("factory current: {current}, {removed}, {}", foreground_note())
+    }
+}
+
+/// What owns the screen at the moment access was lost.
+///
+/// This is the evidence that separates the two surviving explanations for a
+/// duplication that opens and then refuses to deliver. If a window covering the
+/// whole monitor is in front at every loss, the game is holding the output and
+/// duplication is locked out for as long as it does — a property of the game,
+/// not of the rebuild. If it is not, something else is invalidating it and the
+/// rebuild is still the suspect.
+///
+/// Best-effort throughout: every failure degrades to a note rather than an
+/// error, because this is a diagnostic string and must never be the reason a
+/// probe run ends.
+fn foreground_note() -> String {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowRect, GetWindowTextW,
+    };
+
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd == HWND::default() {
+        return "no foreground window".to_string();
+    }
+
+    let mut title = [0u16; 96];
+    let len = unsafe { GetWindowTextW(hwnd, &mut title) }.max(0) as usize;
+    let title = String::from_utf16_lossy(&title[..len.min(title.len())]);
+
+    let mut rect = RECT::default();
+    match unsafe { GetWindowRect(hwnd, &mut rect) } {
+        Ok(()) => format!(
+            "front {title:?} {}x{} at ({},{})",
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+            rect.left,
+            rect.top
+        ),
+        Err(_) => format!("front {title:?} (no rect)"),
     }
 }
 
@@ -444,10 +488,20 @@ pub fn run(monitor_index: u32, seconds: u64, warmup: u64) -> Result<()> {
         "  driven by adapter {} ({}), output {}",
         target.adapter_index, target.adapter_name, target.output_index
     );
+    // Nothing below this line needs the adapter or the output, and holding COM
+    // references to a monitor for the length of the run is another thing that
+    // could be blamed when a rebuild misbehaves. Let them go here so the
+    // session is the only thing alive that touches DXGI.
+    drop(target);
     println!("  QPC frequency: {qpf} Hz");
 
     println!("\n[duplication]");
     println!("  opened OK — capturing for {seconds} s");
+    // Printed here as well as at every loss, for two reasons: it confirms the
+    // tester actually alt-tabbed into the game during the countdown rather than
+    // watching this window, and it means the one line the diagnosis may hang on
+    // is exercised on every run instead of only on the runs that go wrong.
+    println!("  {}", foreground_note());
     println!("  STAY IN THE GAME and watch for a yellow border around the screen.");
     println!();
 
@@ -524,7 +578,11 @@ pub fn run(monitor_index: u32, seconds: u64, warmup: u64) -> Result<()> {
                 // recording is concerned, not six.
                 stats.blackout_since.get_or_insert_with(Instant::now);
 
-                if stats.access_losses <= LOSSES_LOGGED_IN_FULL {
+                // The first few carry the diagnosis, and then every tenth keeps
+                // a heartbeat going through a long outage — the foreground
+                // window in those lines is how we see whether the screen
+                // changed under it while it was dark.
+                if stats.access_losses <= LOSSES_LOGGED_IN_FULL || stats.access_losses % 10 == 0 {
                     println!(
                         "  [{:>5.1}s] access lost (#{}) — {}; rebuilding the whole chain",
                         started.elapsed().as_secs_f64(),
@@ -532,7 +590,7 @@ pub fn run(monitor_index: u32, seconds: u64, warmup: u64) -> Result<()> {
                         session.explain_loss()
                     );
                     if stats.access_losses == LOSSES_LOGGED_IN_FULL {
-                        println!("  (further losses are counted, not printed)");
+                        println!("  (from here only every tenth loss is printed)");
                     }
                 }
                 if stats.access_losses >= MAX_ACCESS_LOSSES {
@@ -547,8 +605,15 @@ pub fn run(monitor_index: u32, seconds: u64, warmup: u64) -> Result<()> {
                 std::thread::sleep(Duration::from_millis(backoff_ms));
                 backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
 
-                // The whole chain, from a new factory. Reusing any part of the
-                // old one is what made the first version unable to recover.
+                // **Release the dead chain before building its replacement.**
+                // Creating the new duplication first left two duplications of
+                // the same output alive in this process, and DXGI hands the
+                // second one back looking valid while every `AcquireNextFrame`
+                // on it fails — which is exactly the 18-losses-0-recoveries
+                // signature this arm could not explain. The rebuild is only a
+                // rebuild once the old one is actually gone.
+                drop(session);
+
                 let (rebuilt, _) = Session::open(monitor_index)
                     .context("could not rebuild the duplication after access loss")?;
                 session = rebuilt;
