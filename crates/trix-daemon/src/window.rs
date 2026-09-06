@@ -1215,9 +1215,9 @@ mod tests {
 
         match out_rx.recv_timeout(std::time::Duration::from_millis(200)) {
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            other => panic!(
-                "the screenshot hotkey must never broadcast hotkey_pressed, got {other:?}"
-            ),
+            other => {
+                panic!("the screenshot hotkey must never broadcast hotkey_pressed, got {other:?}")
+            }
         }
 
         window.shutdown();
@@ -1301,7 +1301,8 @@ mod tests {
     fn a_disarmed_screenshot_hotkey_broadcasts_an_error_event() {
         use trix_core::config::Config;
 
-        let dir = std::env::temp_dir().join(format!("trix-shot-hotkey-error-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("trix-shot-hotkey-error-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp clip dir");
         let config = Config { clip_dir: dir.to_string_lossy().into_owned(), ..Config::default() };

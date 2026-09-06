@@ -2486,7 +2486,13 @@ mod tests {
     }
 
     fn shot_meta(id: &str) -> ShotMeta {
-        ShotMeta { id: id.to_string(), created: "2026-08-27T14:30:12".into(), bytes: 5, width: 1920, height: 1080 }
+        ShotMeta {
+            id: id.to_string(),
+            created: "2026-08-27T14:30:12".into(),
+            bytes: 5,
+            width: 1920,
+            height: 1080,
+        }
     }
 
     /// A screenshot that reaches disk must reach the clients too -- the same

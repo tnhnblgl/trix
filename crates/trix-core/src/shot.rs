@@ -51,10 +51,7 @@ pub fn allocate_shot_id(shots: &Path) -> Result<String> {
     let stamp = library::now_id_stamp();
     for suffix in 1u32..=10_000 {
         let id = if suffix == 1 { stamp.clone() } else { format!("{stamp}_{suffix}") };
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(image_path(shots, &id))
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(image_path(shots, &id))
         {
             Ok(_) => return Ok(id),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -63,8 +60,7 @@ pub fn allocate_shot_id(shots: &Path) -> Result<String> {
             // for one that is full, and the caller would wait out ten thousand
             // failing opens to be told the wrong thing.
             Err(e) => {
-                return Err(e)
-                    .with_context(|| format!("reserving {id} in {}", shots.display()));
+                return Err(e).with_context(|| format!("reserving {id} in {}", shots.display()));
             }
         }
     }
@@ -200,10 +196,8 @@ pub fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
         let length = usize::from(u16::from_be_bytes([bytes[i], bytes[i + 1]]));
         // SOF0..SOF15, minus the DHT (0xC4), JPG (0xC8) and DAC (0xCC) markers
         // that share the range without being frame headers.
-        let is_sof = (0xC0..=0xCF).contains(&marker)
-            && marker != 0xC4
-            && marker != 0xC8
-            && marker != 0xCC;
+        let is_sof =
+            (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC;
         if is_sof {
             // length(2) + precision(1) + height(2) + width(2)
             if i + 6 >= bytes.len() {
@@ -236,8 +230,7 @@ mod tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("trix-shot-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("trix-shot-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch dir");
         dir
