@@ -13,6 +13,22 @@ pub enum RateControl {
     Cbr,
 }
 
+/// Which API frames are taken off the screen with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureMethod {
+    /// Let Trix choose. In this release that is always [`Self::Wgc`] --
+    /// Desktop Duplication earns its way to being a default by holding up in
+    /// real use first, and a setting that silently changed how everyone's
+    /// clips are recorded is the one thing this key must not be.
+    Auto,
+    /// Windows Graphics Capture: the shipped behaviour. Composites the cursor,
+    /// routes hybrid-GPU output for us, and can rate-limit delivery.
+    Wgc,
+    /// DXGI Desktop Duplication: not subject to the capture border, and has no
+    /// cursor.
+    Duplication,
+}
+
 /// Engine configuration, loaded from `%APPDATA%\trix\config.toml`.
 /// Missing file or missing keys fall back to defaults; a malformed file is
 /// reported and ignored rather than aborting the daemon.
@@ -42,6 +58,19 @@ pub struct Config {
     /// fps) or `"normal"` (equal footing — smoother capture on a saturated
     /// GPU, at some game-fps cost). Unknown values fall back to `"low"`.
     pub gpu_priority: String,
+    /// How frames are taken off the screen: `"auto"` (the default), `"wgc"`
+    /// (Windows Graphics Capture) or `"dd"` (DXGI Desktop Duplication).
+    ///
+    /// Exists because Windows can paint its yellow capture border over a game
+    /// while WGC is running and Trix cannot suppress it — the property is a
+    /// property of the *display*, and a `true` from any other app beats Trix's
+    /// `false`. Desktop Duplication is not subject to it. It also cannot
+    /// capture the mouse cursor, which is why the Settings row says so.
+    ///
+    /// `"auto"` is Windows Graphics Capture, always. Desktop Duplication is
+    /// opt-in until it has held up in real use — nobody's recording changes
+    /// unless they choose it. Unknown values fall back to `"auto"`.
+    pub capture_method: String,
     /// Seconds between performance self-reports (working set, CPU-vs-GPU
     /// memory split, per-frame latency). 0 (the default) disables the
     /// periodic line; a final summary is always logged at shutdown.
@@ -157,6 +186,7 @@ impl Default for Config {
             monitor_index: 0,
             clip_hotkey: "alt+f10".into(),
             gpu_priority: "low".into(),
+            capture_method: "auto".into(),
             stats_seconds: 0,
             clip_dir: String::new(),
             max_library_gb: 0,
@@ -205,6 +235,19 @@ impl Config {
             other => {
                 tracing::warn!(gpu_priority = other, "unknown gpu_priority, using low");
                 true
+            }
+        }
+    }
+
+    /// Which capture backend to use (defaults to `Auto` on an unknown value).
+    pub fn capture_method(&self) -> CaptureMethod {
+        match self.capture_method.trim().to_ascii_lowercase().as_str() {
+            "auto" => CaptureMethod::Auto,
+            "wgc" => CaptureMethod::Wgc,
+            "dd" => CaptureMethod::Duplication,
+            other => {
+                tracing::warn!(capture_method = other, "unknown capture_method, using auto");
+                CaptureMethod::Auto
             }
         }
     }
@@ -326,6 +369,34 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The default must be `Auto`, and `Auto` must be WGC. Desktop Duplication
+    /// has no mouse cursor, so a release that made it anybody's default without
+    /// them asking would silently take the pointer out of their clips.
+    #[test]
+    fn capture_method_defaults_to_auto() {
+        assert_eq!(Config::default().capture_method(), CaptureMethod::Auto);
+    }
+
+    /// `config.toml` is hand-editable, so every value here is something a user
+    /// can actually type. An unrecognised one must start on the shipped
+    /// backend rather than refuse to arm -- the same contract `rate_control`
+    /// and `gpu_priority` already keep.
+    #[test]
+    fn an_unreadable_capture_method_falls_back_to_auto_rather_than_failing() {
+        let method =
+            |raw: &str| Config { capture_method: raw.into(), ..Config::default() }.capture_method();
+        assert_eq!(method("wgc"), CaptureMethod::Wgc);
+        assert_eq!(method("dd"), CaptureMethod::Duplication);
+        assert_eq!(method("  DD  "), CaptureMethod::Duplication, "trimmed and case-folded");
+        assert_eq!(
+            method("duplication"),
+            CaptureMethod::Auto,
+            "a plausible guess is still unknown"
+        );
+        assert_eq!(method(""), CaptureMethod::Auto);
+        assert_eq!(method("dxgi"), CaptureMethod::Auto);
+    }
 
     #[test]
     fn clip_dir_defaults_under_the_user_profile() {

@@ -18,18 +18,11 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
-use windows_capture::{
-    capture::{CaptureControl, Context, GraphicsCaptureApiHandler},
-    frame::Frame,
-    graphics_capture_api::InternalCaptureControl,
-    monitor::Monitor,
-    settings::{
-        ColorFormat, CursorCaptureSettings, DirtyRegionSettings, SecondaryWindowSettings, Settings,
-    },
-};
+use windows::Win32::Graphics::Direct3D11::ID3D11Device;
 
 use crate::{
     capture::audio::{AudioGains, AudioMixer, SAMPLE_RATE, SILENCE_GRACE_100NS, frames_to_100ns},
+    capture::source::{CaptureHandle, Flow, FrameSink, SourceFrame},
     config::{Config, RateControl},
     encode::mf::{MfRecorder, RecorderSettings},
     stats::{LatencyHistogram, StatsReporter, mb},
@@ -166,16 +159,14 @@ impl RecordSession {
     }
 }
 
-impl GraphicsCaptureApiHandler for RecordSession {
+impl FrameSink for RecordSession {
     type Flags = RecordFlags;
-    type Error = anyhow::Error;
 
-    fn new(ctx: Context<Self::Flags>) -> Result<Self> {
-        let flags = ctx.flags;
+    fn new(device: &ID3D11Device, flags: RecordFlags) -> Result<Self> {
         let with_audio = flags.mixer.active();
         let recorder = MfRecorder::new(
             &flags.output,
-            &ctx.device,
+            device,
             &RecorderSettings {
                 width: flags.width,
                 height: flags.height,
@@ -187,7 +178,7 @@ impl GraphicsCaptureApiHandler for RecordSession {
             },
         )
         .map_err(|e| anyhow!("failed to create encoder: {e}"))?;
-        let stats = StatsReporter::new(&ctx.device, flags.stats_seconds);
+        let stats = StatsReporter::new(device, flags.stats_seconds);
 
         tracing::info!(
             width = flags.width,
@@ -217,40 +208,29 @@ impl GraphicsCaptureApiHandler for RecordSession {
         })
     }
 
-    fn on_frame_arrived(
-        &mut self,
-        frame: &mut Frame,
-        capture_control: InternalCaptureControl,
-    ) -> Result<()> {
+    fn on_frame(&mut self, frame: SourceFrame<'_>) -> Result<Flow> {
         if self.started.elapsed() >= self.deadline {
             self.finish();
-            capture_control.stop();
-            return Ok(());
+            return Ok(Flow::Stop);
         }
 
-        let frame_qpc = match frame.timestamp() {
-            Ok(t) => t.Duration,
-            Err(e) => {
-                tracing::warn!("frame without timestamp, skipped: {e}");
-                return Ok(());
-            }
-        };
+        let frame_qpc = frame.qpc_100ns;
 
         // Pace to the configured fps: half-frame tolerance absorbs vsync
         // jitter at matching rates while skipping the surplus frames a
         // high-refresh monitor delivers — before any GPU work is issued.
         if frame_qpc + self.frame_duration_100ns / 2 < self.next_encode_qpc {
             self.frames_paced += 1;
-            return Ok(());
+            return Ok(Flow::Continue);
         }
 
-        if (frame.width(), frame.height()) != self.input_size {
+        if (frame.width, frame.height) != self.input_size {
             tracing::info!(
                 from = ?self.input_size,
-                to = ?(frame.width(), frame.height()),
+                to = ?(frame.width, frame.height),
                 "capture input resized — scaling into fixed encoder resolution"
             );
-            self.input_size = (frame.width(), frame.height());
+            self.input_size = (frame.width, frame.height);
         }
 
         let callback_start = Instant::now();
@@ -258,7 +238,7 @@ impl GraphicsCaptureApiHandler for RecordSession {
             // Timeline zero = first frame's QPC (so the first sample lands at 0).
             let t0 = *self.t0_qpc.get_or_insert(frame_qpc);
             self.mixer.start(t0);
-            match recorder.write_frame(frame.as_raw_texture(), frame_qpc - t0) {
+            match recorder.write_frame(frame.texture, frame_qpc - t0) {
                 Ok(true) => {
                     self.frames += 1;
                     // Advance one nominal period; the clamp resnaps the
@@ -270,15 +250,14 @@ impl GraphicsCaptureApiHandler for RecordSession {
                 Ok(false) => {} // pool exhausted — dropped, counted by the recorder
                 Err(e) => {
                     let _ = self.done.send(Err(anyhow!("encoder rejected frame: {e}")));
-                    capture_control.stop();
-                    return Ok(());
+                    return Ok(Flow::Stop);
                 }
             }
             self.last_frame_qpc = frame_qpc;
             self.pump_audio(frame_qpc - SILENCE_GRACE_100NS);
             self.frame_latency.record(callback_start.elapsed());
         }
-        Ok(())
+        Ok(Flow::Continue)
     }
 
     fn on_closed(&mut self) -> Result<()> {
@@ -291,11 +270,8 @@ pub fn run(config: &Config, options: RecordOptions) -> Result<()> {
     if config.gpu_priority_low() {
         crate::capture::lower_gpu_priority();
     }
-    let monitor = Monitor::from_index(config.monitor_index as usize + 1)
-        .map_err(|e| anyhow!("monitor {} not available: {e}", config.monitor_index))?;
-    // Physical pixels — WGC frames come in native resolution, not DPI-scaled.
-    let width = monitor.width().map_err(|e| anyhow!("monitor width: {e}"))?;
-    let height = monitor.height().map_err(|e| anyhow!("monitor height: {e}"))?;
+    let monitor = crate::capture::source::monitor_info(config.monitor_index)?;
+    let (width, height) = (monitor.width, monitor.height);
 
     // `--no-audio` means no audio at all: both sources off, and no audio
     // stream in the MP4.
@@ -333,19 +309,12 @@ pub fn run(config: &Config, options: RecordOptions) -> Result<()> {
         stats_seconds: config.stats_seconds,
     };
 
-    let settings = Settings::new(
-        monitor,
-        CursorCaptureSettings::WithCursor,
-        crate::capture::border_settings(),
-        SecondaryWindowSettings::Default,
-        crate::capture::min_update_interval(config.fps),
-        DirtyRegionSettings::Default,
-        ColorFormat::Bgra8,
+    let control = crate::capture::source::start::<RecordSession>(
+        config.capture_method(),
+        config.monitor_index,
+        Some(config.fps),
         flags,
-    );
-
-    let control = RecordSession::start_free_threaded(settings)
-        .map_err(|e| anyhow!("failed to start capture: {e}"))?;
+    )?;
 
     // Normal path: the handler finishes itself when the deadline passes;
     // Ctrl+C finalizes early with what was captured so the MP4 stays valid
@@ -354,8 +323,8 @@ pub fn run(config: &Config, options: RecordOptions) -> Result<()> {
     // frames), in which case we stop the session and finalize from here.
     let grace = Duration::from_secs(options.duration_secs) + Duration::from_secs(5);
     let wait_started = Instant::now();
-    let stop_and_finish = |control: CaptureControl<RecordSession, anyhow::Error>| -> Result<()> {
-        let handler = control.callback();
+    let stop_and_finish = |control: CaptureHandle<RecordSession>| -> Result<()> {
+        let handler = control.sink();
         control.stop().map_err(|e| anyhow!("failed to stop capture: {e}"))?;
         handler.lock().finish();
         Ok(())
@@ -368,7 +337,7 @@ pub fn run(config: &Config, options: RecordOptions) -> Result<()> {
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 {
-                    let handler = control.callback();
+                    let handler = control.sink();
                     let mut session = handler.lock();
                     session.idle_pump();
                     session.report_if_due();

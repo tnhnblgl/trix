@@ -5,13 +5,37 @@ describe('FIELDS', () => {
   it('covers every config key the daemon has today', () => {
     const shipped = [
       'fps', 'bitrate_kbps', 'max_bitrate_kbps', 'rate_control', 'replay_seconds',
-      'monitor_index', 'clip_hotkey', 'gpu_priority', 'stats_seconds', 'clip_dir',
+      'monitor_index', 'clip_hotkey', 'gpu_priority', 'capture_method', 'stats_seconds', 'clip_dir',
       'max_library_gb', 'autostart', 'system_volume', 'mic_volume', 'check_for_updates',
       'clip_sound', 'clip_sound_path', 'discord_presence',
       'screenshot_hotkey', 'screenshot_sound',
     ];
     const covered = FIELDS.map((f) => f.key);
     for (const key of shipped) expect(covered).toContain(key);
+  });
+
+  /**
+   * Desktop Duplication cannot capture the mouse cursor, and the spec commits
+   * to saying so in *both* places: the label is what a user reads while
+   * choosing, the help is what they read afterwards when wondering where their
+   * pointer went. A user who picks this and only then discovers their clips
+   * have no cursor files a bug, and is right to.
+   *
+   * When the cursor lands on this backend, both warnings come out in the same
+   * commit -- and this test is what fails until they do.
+   */
+  it('discloses what Desktop Duplication costs, in the label and the help', () => {
+    const field = FIELDS.find((f) => f.key === 'capture_method');
+    expect(field, 'capture_method must be a rendered field').toBeDefined();
+    const dd = field!.options?.find((o) => o.value === 'dd');
+    expect(dd, 'Desktop Duplication must be offered').toBeDefined();
+    expect(dd!.label.toLowerCase()).toContain('cursor');
+    expect(field!.help.toLowerCase()).toContain('cursor');
+    // The symptom, not the API: a user picks this because of what they can see.
+    expect(field!.help.toLowerCase()).toContain('yellow border');
+    // Measured at roughly 44 fps against 57 on the developer machine, and it
+    // is a cost the user is choosing, so it is theirs to know about.
+    expect(field!.help.toLowerCase()).toContain('frames per second');
   });
 
   it('renders both levels as sliders in the Audio section', () => {

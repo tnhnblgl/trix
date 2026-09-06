@@ -217,7 +217,7 @@ pub struct ArmOutcome {
 /// rather than requiring a re-arm. `screenshot_sound` is read fresh by
 /// `record_saved_shot` on every screenshot, the same way `clip_sound` already
 /// is for clips.
-pub(crate) const REQUIRES_REARM: [&str; 7] = [
+pub(crate) const REQUIRES_REARM: [&str; 8] = [
     "fps",
     "bitrate_kbps",
     "max_bitrate_kbps",
@@ -225,6 +225,9 @@ pub(crate) const REQUIRES_REARM: [&str; 7] = [
     "replay_seconds",
     "monitor_index",
     "gpu_priority",
+    // How frames come off the screen is decided when the session opens: the
+    // sink's converter and encoder are built on the backend's own device.
+    "capture_method",
 ];
 
 /// The two capture levels, which follow a different re-arm rule from every
@@ -2486,7 +2489,13 @@ mod tests {
     }
 
     fn shot_meta(id: &str) -> ShotMeta {
-        ShotMeta { id: id.to_string(), created: "2026-08-27T14:30:12".into(), bytes: 5, width: 1920, height: 1080 }
+        ShotMeta {
+            id: id.to_string(),
+            created: "2026-08-27T14:30:12".into(),
+            bytes: 5,
+            width: 1920,
+            height: 1080,
+        }
     }
 
     /// A screenshot that reaches disk must reach the clients too -- the same
@@ -2603,6 +2612,21 @@ mod tests {
         let (daemon, dir) = writable("refused");
         let error = daemon.set_config(&one("mic_volume", 101)).expect_err("101 is out of range");
         assert!(format!("{error}").contains("0 to 100"), "unexpected message: {error}");
+        cleanup(&dir);
+    }
+
+    /// How frames come off the screen is chosen when the session opens: the
+    /// sink's converter and encoder are built on the backend's own D3D11
+    /// device, and a texture cannot cross devices. Without the re-arm the
+    /// dropdown would move, the file would save, and the running capture would
+    /// carry on using the backend the user just switched away from.
+    #[test]
+    fn switching_capture_method_needs_a_rearm() {
+        let (daemon, dir) = writable("capture-method");
+        let mut values = Map::new();
+        values.insert("capture_method".into(), Value::from("dd"));
+        let update = daemon.set_config(&values).expect("dd is one of the offered values");
+        assert_eq!(update.requires_rearm, vec!["capture_method".to_string()]);
         cleanup(&dir);
     }
 

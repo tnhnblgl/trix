@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use trix_core::config::{Config, RateControl};
+use trix_core::config::{CaptureMethod, Config, RateControl};
 use trix_core::record::RecordOptions;
 use trix_core::replay::ReplayOptions;
 
@@ -15,6 +15,11 @@ fn config_is_publicly_constructible() {
     assert_eq!(config.stats_seconds, 0, "stats must stay off by default");
     assert_eq!(config.rate_control(), RateControl::PeakVbr);
     assert!(config.gpu_priority_low(), "gpu priority must default to low");
+    assert_eq!(
+        config.capture_method(),
+        CaptureMethod::Auto,
+        "capture method must default to auto, which is WGC"
+    );
 }
 
 #[test]
@@ -92,9 +97,11 @@ fn engine_entry_points_are_public() {
     // process-wide side effect and this test must stay a pure type-check.
     let _: fn() -> anyhow::Result<()> = trix_core::encode::mf::ensure_mf_started;
 
-    // `capture`: bound, not called — calling this would start a real WGC
-    // capture session.
-    let _: fn(u32, std::path::PathBuf) -> anyhow::Result<()> = trix_core::capture::video::snapshot;
+    // `capture`: bound, not called — calling this would start a real capture
+    // session. The leading `CaptureMethod` is the seam: every capture entry
+    // point takes the backend rather than assuming one.
+    let _: fn(CaptureMethod, u32, std::path::PathBuf) -> anyhow::Result<()> =
+        trix_core::capture::video::snapshot;
 }
 
 /// Guards the command-driven engine the daemon (plan 3) arms, polls, clips

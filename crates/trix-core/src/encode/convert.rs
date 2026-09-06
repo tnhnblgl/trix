@@ -67,10 +67,9 @@ impl VideoConverter {
             // what every H.264 consumer expects for HD content.
             let input_cs = D3D11_VIDEO_PROCESSOR_COLOR_SPACE::default();
             video_context.VideoProcessorSetStreamColorSpace(&processor, 0, &input_cs);
-            let mut output_cs = D3D11_VIDEO_PROCESSOR_COLOR_SPACE::default();
             // bitfield: YCbCr_Matrix (bit 2) = 1 → BT.709,
             //           Nominal_Range (bits 4-5) = 1 → 16..235
-            output_cs._bitfield = (1 << 2) | (1 << 4);
+            let output_cs = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: (1 << 2) | (1 << 4) };
             video_context.VideoProcessorSetOutputColorSpace(&processor, &output_cs);
         }
 

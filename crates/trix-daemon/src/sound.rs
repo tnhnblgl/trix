@@ -66,10 +66,8 @@ pub fn play(custom: Option<&Path>) {
 /// own ding when the file cannot be played -- without it, a broken sound is
 /// indistinguishable from a working one to anybody debugging this.
 fn play_embedded(wav: &[u8]) -> bool {
-    unsafe {
-        PlaySoundW(PCWSTR(wav.as_ptr().cast()), None, SND_MEMORY | SND_ASYNC | SND_NODEFAULT)
-    }
-    .as_bool()
+    unsafe { PlaySoundW(PCWSTR(wav.as_ptr().cast()), None, SND_MEMORY | SND_ASYNC | SND_NODEFAULT) }
+        .as_bool()
 }
 
 /// Plays the screenshot blip.

@@ -1,6 +1,14 @@
 # Desktop Duplication capture backend — design
 
-**Status:** proposed. Nothing started.
+**Status:** **Phase 0 complete. Ship 1 in progress** — the `FrameSink` seam
+and the WGC re-wrap are built and hand-verified on `feat/frame-sink-seam`; the
+Desktop Duplication backend and the `capture_method` setting are next.
+No open questions.
+Desktop Duplication clears the border — proven from a Trix process on the
+reporting user's own machine — survives repeated alt-tabs (4 of 4 recovered,
+0.4 s), survives the secure desktop (3 of 3 recovered, 0.1 s unobstructed), and
+recovers **without recreating the D3D11 device**, which is what lets the sink,
+encoder, mixer and replay ring live through a transition. See **Phase 0**.
 **Date:** 2026-09-06
 
 ## Goal
@@ -171,6 +179,34 @@ becomes `frame.qpc_100ns`, `capture_control.stop()` becomes
 `min_update_interval()` all stay exactly where they are, used only by this
 backend.
 
+**Built, on `feat/frame-sink-seam`.** `capture/source.rs` is the seam,
+`capture/wgc.rs` is the backend, and all three sinks are through it —
+`border_settings` and `min_update_interval` are now private to the capture
+module, which is the check that nothing else reaches WGC. Verified on this
+machine, not just compiled: a full-resolution PNG snapshot, a 6 s recording
+(357 frames, 0 dropped, audio in sync), and an 8 s replay clip with its
+thumbnail.
+
+Four things the design did not anticipate, all small:
+
+- **`CaptureControl::callback()` hands back a `parking_lot::Mutex`,** which
+  cannot be named without a new direct dependency. So `CaptureHandle` owns the
+  sink itself, behind a `std::sync::Mutex` whose guard recovers from poisoning
+  — a sink that panics mid-frame must still be reachable, or `record.rs` can
+  never call `finish()` and the MP4 keeps no `moov` atom.
+- **The probe could not come along for free.** `Frame::save_as_image` is a
+  windows-capture method, so the snapshot needed its own PNG writer;
+  `thumb.rs`'s WIC encoder was parameterised by container to provide one, and
+  `ReplaySession::stage_thumbnail` moved out to `capture::stage::stage_bgra` so
+  both callers share the copy out of VRAM.
+- **The seam owns monitor lookup** (`source::monitor_info`), so `replay.rs` and
+  `record.rs` no longer import `windows_capture::monitor::Monitor` for their
+  encoder dimensions. Desktop Duplication takes its geometry from
+  `DXGI_OUTPUT_DESC` instead, and nothing above the seam has to care.
+- **A frame with no readable timestamp is now skipped for all three sinks.**
+  The ring and the recorder already did; the probe used to save its snapshot
+  anyway. A frame that cannot be placed on the timeline cannot be encoded.
+
 ### Backend 2: Desktop Duplication (new)
 
 Owns its own thread and its own D3D11 device, and runs an acquire loop:
@@ -191,6 +227,78 @@ so the borrowed `SourceFrame` lifetime already expresses this correctly and
 nothing needs to change in the sinks. This is the single most important
 invariant in the backend and must be stated in the module doc.
 
+### Throughput — measured, and not yet at parity
+
+Desktop Duplication delivers fewer encoded frames than WGC on the same screen,
+on the developer machine (Intel UHD driving the panel, RTX 5060 idle, 1920x1200,
+60 fps target, a scrolling console as the moving content). Both backends
+select the same encoder — `Intel Quick Sync Video H.264 Encoder MFT` — so this
+is the capture path, not the encoder choice.
+
+| Build | Delivered/s | Encoded | Dropped | Effective |
+| --- | --- | --- | --- | --- |
+| WGC | 75 | 358 | 0 | **57.9 fps** |
+| DD, first working version | 133 | 228 | 599 | 36.8 fps |
+| DD, + delivery gate | 53 | 169 | 151 | 27.3 fps |
+| DD, + copy before release | 53 | 230 | 94 | **37.7 fps** |
+
+Repeated later on the recorder, the same build measured 45.8 and 42.5 fps
+gated. Run-to-run spread is wide because the test content is a scrolling
+console; **treat the gap as roughly 44 against 57, not a single figure.**
+
+Two causes were found and fixed, and one remains.
+
+**Fixed: no delivery cut.** WGC's `MinUpdateInterval` was doing more than
+saving DWM some copies. Desktop Duplication has no OS-side equivalent and
+delivered 133 frames a second into an encoder that sustains about 58, and the
+sink's own QPC pacer cannot absorb that: it re-anchors its schedule to the last
+frame it *encoded*, and a dropped frame never advances it, so once the encoder
+starts refusing the pacer stops pacing entirely (4 paced, 599 dropped). The
+backend now makes the same three-quarters-of-a-frame-period cut itself.
+
+A/B runs since show this does not raise throughput — 45.8 and 42.5 fps gated
+against 44.1 and 46.7 ungated, all inside the noise. What it removes is waste:
+68 and 81 dropped frames gated against 634 and 381 ungated, each one an
+acquire, a copy and a converter call spent on a frame nothing could accept.
+Worth keeping for that alone.
+
+**Fixed: encoding before releasing.** Handing DXGI's own surface to the sink
+puts a frame of GPU work between `AcquireNextFrame` and `ReleaseFrame` every
+frame. Copying into a texture the backend owns — one blit, reallocated only on
+a resolution change — and releasing immediately took the effective rate from
+27.3 to 37.7 fps.
+
+**Open: the encoder grants input credits more slowly on this path.** Every
+remaining drop is `ready_for_input() == false` with the converter pool nearly
+empty, so it is not pool depth.
+
+Two candidate causes have been eliminated by measurement:
+
+- **Pump frequency.** `pump()` is only called from `on_frame`, so how often the
+  MFT's event queue is drained is coupled to how often frames arrive. Ruled
+  out: with the gate off, 894 pump calls in six seconds — 149 a second — still
+  produced only 214 credits. WGC, at 337 pumps, got 337. Draining faster is
+  not what WGC is doing differently.
+- **A different grant rule.** `need_input` equals `frames` exactly on both
+  backends, so the MFT asks for input precisely once per input it accepts. The
+  difference is purely how long it takes to ask again: about 56 times a second
+  fed from WGC, about 44 fed from duplication.
+
+What is left is GPU-side work per frame. Duplication costs one extra
+full-frame copy (9.2 MB at 1920x1200) on the same device and the same shared
+memory the encoder is using, and this machine's panel hangs off an Intel UHD
+with 128 MB of VRAM. Removing that copy while keeping the early release needs
+the sink to signal "done with the texture" separately from "done with the
+frame" — an addition to the seam, not a tweak.
+
+**What this means for shipping.** Desktop Duplication is correct — right
+colours, right resolution, timestamps that measure the same cadence as WGC's
+to within a millisecond, and audio in sync — but on this machine it records at
+roughly two thirds of WGC's frame rate. That is a real cost to state in the
+option's help text, or to close before the setting is offered. It is not a
+reason to withhold the backend from someone whose alternative is a yellow
+border across their game, and it is a reason not to make it anybody's default.
+
 ### Timestamps
 
 Not interchangeable, and getting this wrong desynchronises audio.
@@ -203,8 +311,19 @@ The DD backend converts once per frame with a `QueryPerformanceFrequency`
 cached at construction:
 
 ```rust
-qpc_100ns = last_present_time * 10_000_000 / qpf
+fn qpc_to_100ns(ticks: i64, qpf: i64) -> i64 {
+    ((ticks as i128 * 10_000_000) / qpf as i128) as i64
+}
 ```
+
+**The 128-bit intermediate is required, not defensive.** `LastPresentTime` is
+an *absolute* QPC value counting from boot, so on the 10 MHz timer this machine
+reports it passes 8.6e11 after a day of uptime — and multiplying that by
+10,000,000 overflows `i64`. The obvious one-line version of this expression
+wraps to a negative timestamp on any machine that has not rebooted recently,
+which is the hardest possible bug to reproduce on a developer machine that
+reboots daily. Phase 0 carries the function and the test that pins it; Ship 1
+inherits both verbatim.
 
 Both clocks are QPC-based, so after conversion they are the same timeline the
 audio mixer's `t0` and the encoder's `pts` already use. `LastPresentTime` can
@@ -257,12 +376,66 @@ same commit. A stale warning is its own defect.
 prompts, mode changes, and fullscreen transitions. This is routine, not
 exceptional — a game launching is one of the causes.
 
-Trix already has the right structure for it: `run_driven_inner` in `replay.rs`
-is a rebuild loop with a 2 s settle, a failure budget, and a ring that restarts
-empty. **Surface access loss as session death and let the existing loop
-rebuild**, rather than re-acquiring inside the backend. One recovery path, one
-place where the "replay ring restarts empty" warning is emitted, and the
-behaviour a user sees is identical to what a display change already does today.
+**The backend recovers internally. It does not surface access loss as session
+death.** An earlier draft of this section said the opposite — reuse
+`run_driven_inner`'s rebuild loop, one recovery path for everything — and that
+is wrong for this backend, badly enough to make it unusable.
+
+`run_driven_inner` ([replay.rs:899](../../../crates/trix-core/src/replay.rs))
+is built for display topology changes, which are rare. It adds a **2 s settle**,
+**restarts the replay ring empty**, drops queued clip requests, and charges a
+failure-budget slot against any session that dies within 10 seconds — thirty of
+those and capture stops permanently. On WGC that is right. On Desktop
+Duplication, **every alt-tab is two access losses**, so that policy would empty
+a user's replay buffer twice each time they tabbed out to Discord and back, and
+a few rapid alt-tabs could exhaust the budget outright. Phase 0 measured the
+actual outage at **0.4 s**.
+
+So the acquire loop absorbs the loss itself, and only genuine death — device
+removed, monitor gone, repeated failure to reopen — escalates to session death
+and the existing loop.
+
+**Recovery must keep the D3D11 device wherever it can.** This is the constraint
+that makes internal recovery possible at all: the sink's `VideoConverter` is
+built against the capture device and blits every frame into its own NV12 pool,
+and a texture from one device cannot be used on another. A recovery that
+recreates the device therefore invalidates the sink, and with it the encoder,
+the audio mixer and the ring — which is session death by another name. Keeping
+the device makes the whole thing invisible above the seam.
+
+So the recovery is tiered:
+
+1. Release the duplication, re-enumerate from a fresh factory, and re-duplicate
+   **onto the existing device**. Ride out a burst this way — a transition
+   produces several losses in a row.
+2. Only if that keeps failing, create a new device. Correct when the adapter
+   itself has changed, and honest about its cost: this tier takes the sink down.
+
+**A refused reopen is temporary.** `DuplicateOutput` returns `E_ACCESSDENIED`
+while the secure desktop is up — a UAC prompt, Ctrl+Alt+Del, the lock screen —
+because no user process may duplicate it. That is correct and expected, and it
+must be a backed-off retry, never a failure that ends the capture. Phase 0's
+probe treated it as fatal and exited on the first Ctrl+Alt+Del; a backend that
+did the same would die on every UAC prompt, which users see far more often.
+`DXGI_ERROR_DEVICE_REMOVED` is the same kind of event with a different answer:
+recoverable, but only on a new device, so it goes straight to tier 2.
+
+**Release before rebuilding, always.** Both failing Phase 0 versions created the
+replacement duplication while the dead one was still alive, leaving two
+duplications of one output open in the process — and DXGI returns the second
+looking valid while every `AcquireNextFrame` on it fails, permanently. 37 losses
+in one run and 18 in the next, zero recoveries in either. With the ordering
+fixed, the same test recovered 4 of 4.
+
+**A stale factory is not the cause, and the diagnosis that said so was wrong.**
+`IDXGIFactory1::IsCurrent` returned **true** at every one of those 18 losses and
+`GetDeviceRemovedReason` reported the device healthy. Re-enumerating from a
+fresh factory is cheap and is what the spike does, but it fixes nothing on its
+own; the ordering is what matters.
+
+The stale state itself is real, though — `IsCurrent` came back **false** on a
+Ctrl+Alt+Del. So re-enumerating on every reopen stays, on its own merits rather
+than as a fix for something it never fixed.
 
 ### Adapter selection (hybrid GPU)
 
@@ -415,6 +588,100 @@ four things at once:
 If the border is still there, this design is dead and two weeks are saved. That
 is the point of it.
 
+**Built**, on `spike/dd-probe`, as `trix dd-probe [--monitor N] [--seconds N]`.
+With no `--monitor` it targets the screen the config already captures, and it
+takes no single-instance lock, because the case worth measuring is running it
+while Trix is armed.
+
+Answered on the developer machine (hybrid GPU, Intel UHD driving the panel):
+
+| Question | Answer here |
+| --- | --- |
+| Does duplication work at all? | Yes — 60–105 desktop frames/s, no access losses, no wait timeouts |
+| Adapter routing on a hybrid GPU | **Resolved correctly.** Monitor 0 → adapter 0, the iGPU driving the output, and `DuplicateOutput` succeeded. The design's largest technical risk, clear on the configuration it was worried about |
+| What format does it deliver? | `B8G8R8A8_UNORM` — the same format `VideoConverter` already takes from WGC, so nothing downstream changes |
+| How many frames are mouse-only? | Over half, in a run with an active pointer. Confirms skipping `LastPresentTime == 0` rather than timestamping those |
+
+### Answered: no border
+
+**2026-09-06, on the reporting user's machine: Desktop Duplication produced no
+yellow border.** The run behind that sentence is worth stating precisely,
+because the first attempt at it was void:
+
+| | |
+| --- | --- |
+| Run length | 30.0 s, of which **30.0 s actually capturing** |
+| Access losses | 0 |
+| Frames | 1802 desktop (60.0/s), 884 mouse-only |
+| Present gap | min 14.4 ms, avg 16.7 ms, max 19.0 ms — a hard 60 Hz lock |
+| Surface | 1920x1080 `B8G8R8A8_UNORM`, on the RTX 3060 driving the display |
+| Border | **none** |
+
+The cadence is better than expected: ±2 ms of jitter against a 16.7 ms period,
+with no `MinUpdateInterval` equivalent needed to get there.
+
+**The first attempt was void and is not evidence.** It began capturing the
+instant it launched, the tester spent the first ten seconds alt-tabbing, and
+the duplication was dead by the time they were looking at the game — so their
+"no border" described a period when nothing was capturing at all. The probe now
+counts the tester in before opening anything, measures how long it was actually
+live, and refuses to call a run below two thirds an answer. **A remote test that
+cannot detect that it measured nothing will hand you a confident wrong answer.**
+
+### Not yet tested: recovery from a transition
+
+The clean run is also a blind spot. It had zero access losses because the
+tester was already in the game before duplication opened, so no fullscreen
+transition ever happened — which means **the rebuild path above never
+executed.** Armed Trix runs continuously while people alt-tab in and out of
+games, so that transition is not an edge case, it is the normal case.
+
+Two probe runs covered it. The first **failed** — three alt-tabs, 18 access
+losses, **zero recoveries**, dark for 23 of 31 seconds — and the cause was the
+rebuild ordering described in **Access loss** above. With that fixed:
+
+| | |
+| --- | --- |
+| Run length | 40.0 s, of which **38.4 s capturing** (96%) |
+| Alt-tabs | three, out and back |
+| Access losses | 4 — one per transition, in each direction |
+| Recovered | **4 of 4** |
+| Worst blackout | **0.4 s** |
+| Longest unbroken | 19.9 s |
+
+The log identifies the losses precisely: the foreground window is empty at the
+moment of each outbound transition and back to `"Rainbow Six" 1920x1080` on the
+return. These are the alt-tabs and nothing else.
+
+**0.4 s is the number the design turns on.** It is small enough to absorb inside
+the backend and far too small to justify taking the session down for — see
+**Access loss** for what that policy would have cost.
+
+### Confirmed: recovery keeps the device, so the sink survives
+
+Tested on the developer machine with Ctrl+Alt+Del, which is a harder event than
+an alt-tab — the secure desktop refuses duplication to everyone while it is up.
+
+| | |
+| --- | --- |
+| Access losses | 3 |
+| Recovered | **3 of 3** |
+| Kept the D3D11 device | **3 of 3** — none needed a new one |
+| Reopens refused and retried | 12, all `E_ACCESSDENIED` |
+| Recovery latency, unobstructed | **0.1 s** |
+| Worst blackout | 2.7 s |
+
+**Read the 2.7 s correctly.** That is how long the secure desktop was up, not
+how long recovery took. While Windows holds that desktop nothing may capture it
+— WGC included — so it is not a cost this backend imposes, and the shortest
+recovery, with nothing blocking, was 0.1 s. The probe's own verdict line does
+not draw that distinction; a reader of a future log should.
+
+**Every Phase 0 question is now closed**, including the one Ship 1's
+architecture depends on: recovery is invisible above the seam, so the sink, the
+encoder, the mixer and the replay ring all survive a transition. Internal
+recovery is viable as specified.
+
 ## Effort
 
 **Ship 1, cursor-less: around a week** after the spike. The seam and the WGC
@@ -434,8 +701,11 @@ on anything else shipping first.
 1. ~~Does Windows 10 draw the border for display capture?~~ **Answered:** not
    every time. Recorded above; Ship 2 is no longer urgent because of it.
 2. ~~Does Desktop Duplication clear the border on the reporting user's
-   machine?~~ **OBS says yes.** Phase 0 confirms it from Trix's own process
-   before the backend is built.
+   machine?~~ **Answered 2026-09-06: no border**, measured from Trix's own
+   process over 30 s of verified-live capture. See **Phase 0**. This was the
+   question the whole design rested on.
+   *Still open beneath it:* does the backend recover from a fullscreen
+   transition? The run that answered the border question never had one.
 3. Should `Automatic` prefer Desktop Duplication when another app is forcing
    the border? There is no API to query that, so no — the setting stays the
    only way, and the help text carries the diagnosis.

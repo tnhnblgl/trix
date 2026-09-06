@@ -1,5 +1,9 @@
 pub mod audio;
+mod duplication;
+pub mod source;
+pub mod stage;
 pub mod video;
+mod wgc;
 
 use std::time::{Duration, Instant};
 
@@ -31,7 +35,7 @@ use windows_capture::{
 /// before it acts on the property, and withholds it silently — see
 /// [`request_borderless_consent`], which is why asking for it happens here,
 /// on the way to every session rather than once per launch.
-pub fn border_settings() -> DrawBorderSettings {
+pub(super) fn border_settings() -> DrawBorderSettings {
     match GraphicsCaptureApi::is_border_settings_supported() {
         Ok(true) => {
             request_borderless_consent();
@@ -118,7 +122,7 @@ fn request_borderless_consent() {
 /// deliberately 3/4 of a frame period — a full period would beat against the
 /// compositor's own cadence and halve the delivery rate; exact pacing to the
 /// target fps is done by the sessions' QPC pacer instead.
-pub fn min_update_interval(fps: u32) -> MinimumUpdateIntervalSettings {
+pub(super) fn min_update_interval(fps: u32) -> MinimumUpdateIntervalSettings {
     match GraphicsCaptureApi::is_minimum_update_interval_supported() {
         Ok(true) => {
             let interval = Duration::from_micros(u64::from(750_000 / fps.max(1)));

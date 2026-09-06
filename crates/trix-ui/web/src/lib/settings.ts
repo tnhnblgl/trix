@@ -114,6 +114,11 @@ export const FIELDS: Field[] = [
       { value: 'low', label: 'Low - never cost game fps' },
       { value: 'normal', label: 'Normal - smoother capture' },
     ], help: 'Low drops capture frames under contention instead of taking frames from the game.' },
+  { key: 'capture_method', label: 'Capture method', kind: 'select', section: 'Capture', options: [
+      { value: 'auto', label: 'Automatic' },
+      { value: 'wgc', label: 'Windows Graphics Capture' },
+      { value: 'dd', label: 'Desktop Duplication - no mouse cursor' },
+    ], help: 'If Windows draws a yellow border around your screen while Trix is armed, choose Desktop Duplication -- it is not subject to that border. It cannot record the mouse cursor, in clips or in screenshots, and on some PCs it captures fewer frames per second than Windows Graphics Capture does. Automatic is Windows Graphics Capture.' },
 
   { key: 'system_volume', label: 'PC sound', kind: 'slider', section: 'Audio', ...span('system_volume'), help: 'How loud your PC\'s own sound is in the clip. Affects the recording only, never your Windows volume. 0 turns it off.' },
   { key: 'mic_volume', label: 'Microphone', kind: 'slider', section: 'Audio', ...span('mic_volume'), help: 'How loud your voice is in the clip. 0 closes the microphone entirely, so Windows stops showing Trix as using it.' },

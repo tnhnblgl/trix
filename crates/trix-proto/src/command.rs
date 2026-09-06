@@ -357,11 +357,7 @@ mod tests {
     }
 
     fn req(cmd: &str, args: serde_json::Value) -> Request {
-        Request {
-            id: 1,
-            cmd: cmd.to_string(),
-            args: args.as_object().cloned().unwrap_or_default(),
-        }
+        Request { id: 1, cmd: cmd.to_string(), args: args.as_object().cloned().unwrap_or_default() }
     }
 
     #[test]
