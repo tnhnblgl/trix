@@ -20,22 +20,28 @@
 //!    (see [`qpc_to_100ns`], the one function here worth keeping).
 //! 3. The acquired texture must not outlive `ReleaseFrame`.
 //!
-//! # What the first run taught it
+//! # What the runs taught it
 //!
-//! The first version recovered from `DXGI_ERROR_ACCESS_LOST` by re-calling
-//! `DuplicateOutput` on the output it had resolved at startup. On the reporting
-//! user's machine that produced 37 consecutive losses and nine seconds of zero
-//! frames: `DuplicateOutput` kept *succeeding* and every first `AcquireNextFrame`
-//! kept failing. That is the signature of a **stale DXGI factory** — after a
-//! mode change `IDXGIFactory1::IsCurrent` goes false and every adapter and
-//! output it handed out is dead, so re-duplicating a cached output re-opens
-//! nothing. Recovery here is now a full teardown: new factory, new adapter, new
-//! output, new device, new duplication (see [`Session::open`]).
+//! Two versions failed to recover from `DXGI_ERROR_ACCESS_LOST` — 37 losses in
+//! one run, 18 in the next, **zero recoveries in either**, with
+//! `DuplicateOutput` succeeding every time and the first `AcquireNextFrame`
+//! failing every time.
 //!
-//! It also learned to distrust its own result. A run where duplication was dead
-//! for half its length cannot answer a question about an indicator that is only
-//! painted while something is capturing, so the probe measures how long it was
-//! actually live and refuses to call an unhealthy run an answer.
+//! The first explanation offered for that was a stale DXGI factory, and it was
+//! **wrong**: `IDXGIFactory1::IsCurrent` returned true at every one of those
+//! losses and the device reported healthy, and rebuilding from a fresh factory
+//! changed nothing. The cause was ordering, in this file. Both versions created
+//! the replacement duplication while the dead one was still alive, so the
+//! process held two duplications of one output — and DXGI returns the second
+//! looking valid while every acquire on it fails. Release, *then* rebuild.
+//! Confirmed: 4 losses, 4 recoveries, 0.4 s each.
+//!
+//! The probe also learned to distrust its own result. A run where duplication
+//! was dead for half its length cannot answer a question about an indicator
+//! that is only painted while something is capturing, so it measures how long
+//! it was actually live and refuses to call an unhealthy run an answer. The
+//! run that made that necessary had reported a confident, meaningless "no
+//! border".
 
 use std::time::{Duration, Instant};
 
@@ -79,9 +85,9 @@ const MAX_BACKOFF_MS: u64 = 500;
 
 /// Stops rebuilding rather than scrolling forever.
 ///
-/// The real backend surfaces loss as session death and lets `run_driven_inner`
-/// rebuild on its own budget; this cap exists only so a machine where
-/// duplication cannot hold at all prints a verdict the user can read back.
+/// Deliberately high, and the run's own length is what normally ends it. This
+/// cap exists only so a machine where duplication cannot hold at all prints a
+/// verdict the user can read back instead of scrolling forever.
 const MAX_ACCESS_LOSSES: u32 = 300;
 
 /// Losses reported in full before the log switches to counting them.
@@ -89,6 +95,16 @@ const MAX_ACCESS_LOSSES: u32 = 300;
 /// The first run printed 37 identical lines and buried its own numbers. The
 /// first few carry the diagnosis; the rest are a count.
 const LOSSES_LOGGED_IN_FULL: u32 = 5;
+
+/// Consecutive losses to spend trying to recover on the existing device before
+/// giving up and creating a new one.
+///
+/// Three is enough to ride out the burst a fullscreen transition produces — the
+/// confirmed run recovered on the first attempt every time — without spending
+/// so long on a device that is genuinely the wrong one that the escalation
+/// never gets a turn. See [`Session::open`] for why the two tiers are not
+/// interchangeable.
+const REUSE_DEVICE_ATTEMPTS: u32 = 3;
 
 /// Below this share of the run spent actually capturing, the probe declines to
 /// treat what the user saw as an answer.
@@ -270,6 +286,10 @@ struct Session {
     factory: IDXGIFactory1,
     device: ID3D11Device,
     dupl: IDXGIOutputDuplication,
+    /// Whether this chain was opened on an existing device. Recorded so the
+    /// report can say which recovery tier actually worked, which is the answer
+    /// Ship 1 needs — see [`Session::open`].
+    reused: bool,
     /// When this chain was built, for the healthy-time accounting.
     opened: Instant,
     /// The last moment this chain delivered a desktop frame. `None` means it
@@ -278,13 +298,35 @@ struct Session {
 }
 
 impl Session {
-    fn open(monitor_index: u32) -> Result<(Self, Target)> {
+    /// Opens a chain, optionally on a device that already exists.
+    ///
+    /// `reuse` is the design question this probe exists to settle, not a
+    /// micro-optimisation. In the real backend the sink's `VideoConverter` is
+    /// built against the capture device and blits every frame into its own NV12
+    /// pool — and **a texture from one D3D11 device cannot be used on
+    /// another**. So a recovery that recreates the device invalidates the whole
+    /// sink, which means the encoder, the audio mixer and the replay ring have
+    /// to go down with it. A recovery that keeps the device is invisible above
+    /// the seam: the ring keeps its frames and the user loses a fraction of a
+    /// second instead of their entire buffer.
+    ///
+    /// Recreating the device is still the correct escalation when reusing it
+    /// stops working — an adapter change is exactly the case where the old
+    /// device is the wrong one to duplicate onto.
+    fn open(monitor_index: u32, reuse: Option<ID3D11Device>) -> Result<(Self, Target)> {
         let factory: IDXGIFactory1 =
             unsafe { CreateDXGIFactory1() }.context("CreateDXGIFactory1 failed")?;
         let target = resolve_output(&factory, monitor_index)?;
-        let device = create_device(&target.adapter)?;
+        let reused = reuse.is_some();
+        let device = match reuse {
+            Some(device) => device,
+            None => create_device(&target.adapter)?,
+        };
         let dupl = duplicate(&target.output, &device)?;
-        Ok((Self { factory, device, dupl, opened: Instant::now(), last_frame: None }, target))
+        Ok((
+            Self { factory, device, dupl, reused, opened: Instant::now(), last_frame: None },
+            target,
+        ))
     }
 
     /// How long this chain was actually delivering, measured to its last frame
@@ -365,6 +407,10 @@ struct Stats {
     /// that separates "recovers from a fullscreen transition" from "never
     /// comes back", which is the whole reason this version exists.
     recoveries: u32,
+    /// Of those, how many kept the D3D11 device. This is the number Ship 1
+    /// turns on: a recovery that keeps the device is invisible above the seam,
+    /// one that does not costs the sink, the encoder and the replay ring.
+    recoveries_keeping_device: u32,
     /// Summed across every chain, so the run can say how much of itself was
     /// spent actually capturing.
     live: Duration,
@@ -478,7 +524,7 @@ pub fn run(monitor_index: u32, seconds: u64, warmup: u64) -> Result<()> {
 
     count_in(warmup);
 
-    let (mut session, target) = Session::open(monitor_index)?;
+    let (mut session, target) = Session::open(monitor_index, None)?;
     println!("\n[target]");
     println!(
         "  monitor {monitor_index}: {} — {}x{} at ({}, {})",
@@ -509,6 +555,10 @@ pub fn run(monitor_index: u32, seconds: u64, warmup: u64) -> Result<()> {
     let mut described = false;
     let mut previous_present: Option<i64> = None;
     let mut backoff_ms = BACKOFF_START_MS;
+    // Consecutive losses with no frame in between. Drives the recovery tier:
+    // a burst is ridden out on the existing device, a persistent failure
+    // escalates to a new one.
+    let mut losses_since_frame = 0u32;
     let started = Instant::now();
     let run_for = Duration::from_secs(seconds);
     let mut last_report = started;
@@ -556,14 +606,19 @@ pub fn run(monitor_index: u32, seconds: u64, warmup: u64) -> Result<()> {
 
                     if session.last_frame.is_none() && stats.access_losses > 0 {
                         stats.recoveries += 1;
+                        if session.reused {
+                            stats.recoveries_keeping_device += 1;
+                        }
                         backoff_ms = BACKOFF_START_MS;
                         let blackout = stats.close_blackout();
                         println!(
-                            "  [{:>5.1}s] recovered after {:.1} s dark",
+                            "  [{:>5.1}s] recovered after {:.1} s dark ({})",
                             started.elapsed().as_secs_f64(),
-                            blackout.as_secs_f64()
+                            blackout.as_secs_f64(),
+                            if session.reused { "same device" } else { "new device" }
                         );
                     }
+                    losses_since_frame = 0;
                     session.last_frame = Some(Instant::now());
                 }
 
@@ -572,6 +627,7 @@ pub fn run(monitor_index: u32, seconds: u64, warmup: u64) -> Result<()> {
             Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => stats.timeouts += 1,
             Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
                 stats.access_losses += 1;
+                losses_since_frame += 1;
                 stats.retire(&session);
                 // `get_or_insert`, not a fresh stamp: a fullscreen transition
                 // is a burst of losses, and that is one blackout as far as the
@@ -605,16 +661,31 @@ pub fn run(monitor_index: u32, seconds: u64, warmup: u64) -> Result<()> {
                 std::thread::sleep(Duration::from_millis(backoff_ms));
                 backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
 
+                // Keep the device unless reusing it has stopped working. This
+                // is the tiering described on `Session::open`: tier 1 is
+                // invisible above the seam, tier 2 costs the sink.
+                let reuse =
+                    (losses_since_frame <= REUSE_DEVICE_ATTEMPTS).then(|| session.device.clone());
+                if reuse.is_none() && session.reused {
+                    println!(
+                        "  [{:>5.1}s] reusing the device is not recovering — creating a new one",
+                        started.elapsed().as_secs_f64()
+                    );
+                }
+
                 // **Release the dead chain before building its replacement.**
                 // Creating the new duplication first left two duplications of
                 // the same output alive in this process, and DXGI hands the
                 // second one back looking valid while every `AcquireNextFrame`
                 // on it fails — which is exactly the 18-losses-0-recoveries
-                // signature this arm could not explain. The rebuild is only a
-                // rebuild once the old one is actually gone.
+                // signature this arm could not explain. Confirmed: with the
+                // drop in place the same test recovered 4 of 4 in 0.4 s each.
+                //
+                // The device is cloned out first, so this releases the
+                // duplication without releasing the device with it.
                 drop(session);
 
-                let (rebuilt, _) = Session::open(monitor_index)
+                let (rebuilt, _) = Session::open(monitor_index, reuse)
                     .context("could not rebuild the duplication after access loss")?;
                 session = rebuilt;
                 previous_present = None;
@@ -685,6 +756,13 @@ pub fn run(monitor_index: u32, seconds: u64, warmup: u64) -> Result<()> {
             stats.longest_blackout.as_secs_f64(),
             if ended_dark { " (and it never came back)" } else { "" },
         );
+        if stats.recoveries > 0 {
+            println!(
+                "  {} of those kept the same graphics device, {} needed a new one",
+                stats.recoveries_keeping_device,
+                stats.recoveries - stats.recoveries_keeping_device,
+            );
+        }
         if ended_dark {
             println!("  NEVER RECOVERED — this is the failure the backend cannot ship with.");
         } else if stats.longest_blackout > Duration::from_secs(3) {
