@@ -1,11 +1,10 @@
 # Desktop Duplication capture backend — design
 
-**Status:** Phase 0 half answered. **Desktop Duplication clears the border** —
-proven from a Trix process on the reporting user's own machine, and that was
-the question the whole design rested on. **But it has not yet survived an
-alt-tab**, and that now gates Ship 1: a backend that dies at the first
-fullscreen transition is unusable for the person it exists for. Cause found,
-fix written, confirmation pending. See **Phase 0**.
+**Status:** **Phase 0 answered. Ship 1 is unblocked.** Desktop Duplication
+clears the border, proven from a Trix process on the reporting user's own
+machine, and survives repeated alt-tabs with a 0.4 s blackout and full
+recovery. One implementation detail remains unconfirmed — whether recovery can
+keep the D3D11 device — and it is answerable locally. See **Phase 0**.
 **Date:** 2026-09-06
 
 ## Goal
@@ -273,32 +272,53 @@ same commit. A stale warning is its own defect.
 prompts, mode changes, and fullscreen transitions. This is routine, not
 exceptional — a game launching is one of the causes.
 
-Trix already has the right structure for it: `run_driven_inner` in `replay.rs`
-is a rebuild loop with a 2 s settle, a failure budget, and a ring that restarts
-empty. **Surface access loss as session death and let the existing loop
-rebuild**, rather than re-acquiring inside the backend. One recovery path, one
-place where the "replay ring restarts empty" warning is emitted, and the
-behaviour a user sees is identical to what a display change already does today.
+**The backend recovers internally. It does not surface access loss as session
+death.** An earlier draft of this section said the opposite — reuse
+`run_driven_inner`'s rebuild loop, one recovery path for everything — and that
+is wrong for this backend, badly enough to make it unusable.
 
-**Release the old duplication before creating its replacement.** Phase 0 paid
-for this twice. Both of its failing versions rebuilt while the dead
-`IDXGIOutputDuplication` was still alive, so the process briefly held two
-duplications of the same output — and DXGI hands the second one back looking
-valid while every `AcquireNextFrame` on it fails. The signature is
-unmistakable and was identical in both runs: `DuplicateOutput` succeeding every
-time, the first acquire failing every time, permanently. 37 losses in one run,
-18 in the next, zero recoveries in either.
+`run_driven_inner` ([replay.rs:899](../../../crates/trix-core/src/replay.rs))
+is built for display topology changes, which are rare. It adds a **2 s settle**,
+**restarts the replay ring empty**, drops queued clip requests, and charges a
+failure-budget slot against any session that dies within 10 seconds — thirty of
+those and capture stops permanently. On WGC that is right. On Desktop
+Duplication, **every alt-tab is two access losses**, so that policy would empty
+a user's replay buffer twice each time they tabbed out to Discord and back, and
+a few rapid alt-tabs could exhaust the budget outright. Phase 0 measured the
+actual outage at **0.4 s**.
 
-**A stale factory is not the cause, and the first diagnosis that said so was
-wrong.** `IDXGIFactory1::IsCurrent` returned **true** at every one of those 18
-losses, and `GetDeviceRemovedReason` reported the device healthy. Rebuilding
-from a fresh factory is harmless and is what the spike does, but it fixes
-nothing on its own — the ordering is what matters. Recording the wrong
-diagnosis here would have cost Ship 1 the same two days it cost the spike.
+So the acquire loop absorbs the loss itself, and only genuine death — device
+removed, monitor gone, repeated failure to reopen — escalates to session death
+and the existing loop.
 
-*Status: the ordering fix is written and unverified.* It cannot be exercised on
-the developer machine, which has no non-disruptive way to lose access on
-demand. Confirmation is one probe run away and must land before Ship 1.
+**Recovery must keep the D3D11 device wherever it can.** This is the constraint
+that makes internal recovery possible at all: the sink's `VideoConverter` is
+built against the capture device and blits every frame into its own NV12 pool,
+and a texture from one device cannot be used on another. A recovery that
+recreates the device therefore invalidates the sink, and with it the encoder,
+the audio mixer and the ring — which is session death by another name. Keeping
+the device makes the whole thing invisible above the seam.
+
+So the recovery is tiered:
+
+1. Release the duplication, re-enumerate from a fresh factory, and re-duplicate
+   **onto the existing device**. Ride out a burst this way — a transition
+   produces several losses in a row.
+2. Only if that keeps failing, create a new device. Correct when the adapter
+   itself has changed, and honest about its cost: this tier takes the sink down.
+
+**Release before rebuilding, always.** Both failing Phase 0 versions created the
+replacement duplication while the dead one was still alive, leaving two
+duplications of one output open in the process — and DXGI returns the second
+looking valid while every `AcquireNextFrame` on it fails, permanently. 37 losses
+in one run and 18 in the next, zero recoveries in either. With the ordering
+fixed, the same test recovered 4 of 4.
+
+**A stale factory is not the cause, and the diagnosis that said so was wrong.**
+`IDXGIFactory1::IsCurrent` returned **true** at every one of those 18 losses and
+`GetDeviceRemovedReason` reported the device healthy. Re-enumerating from a
+fresh factory is cheap and is what the spike does, but it fixes nothing on its
+own; the ordering is what matters.
 
 ### Adapter selection (hybrid GPU)
 
@@ -499,21 +519,31 @@ transition ever happened — which means **the rebuild path above never
 executed.** Armed Trix runs continuously while people alt-tab in and out of
 games, so that transition is not an edge case, it is the normal case.
 
-One probe run covered it, and **it failed**: three alt-tabs, 18 access losses,
-**zero recoveries**, dark for 23 of 31 seconds. The cause is in **Access loss**
-above — the rebuild held two duplications of the same output at once — and the
-fix is written but not yet confirmed on the machine that reproduces it.
+Two probe runs covered it. The first **failed** — three alt-tabs, 18 access
+losses, **zero recoveries**, dark for 23 of 31 seconds — and the cause was the
+rebuild ordering described in **Access loss** above. With that fixed:
 
-**This, not the border, is now the gate on Ship 1.** A backend that dies at the
-first alt-tab is unusable for the person it exists for: armed Trix lives
-through that transition constantly, and a permanent death means a replay ring
-that never refills. The border question is answered; this one is not.
+| | |
+| --- | --- |
+| Run length | 40.0 s, of which **38.4 s capturing** (96%) |
+| Alt-tabs | three, out and back |
+| Access losses | 4 — one per transition, in each direction |
+| Recovered | **4 of 4** |
+| Worst blackout | **0.4 s** |
+| Longest unbroken | 19.9 s |
 
-The number to watch is the blackout, not the loss count — how long the screen
-was dark, measured from the first loss of a burst to the next delivered frame.
-A blackout is a hole in the replay ring at the exact moment somebody wants to
-clip, so recovering in 200 ms and recovering in four seconds are different
-products.
+The log identifies the losses precisely: the foreground window is empty at the
+moment of each outbound transition and back to `"Rainbow Six" 1920x1080` on the
+return. These are the alt-tabs and nothing else.
+
+**0.4 s is the number the design turns on.** It is small enough to absorb inside
+the backend and far too small to justify taking the session down for — see
+**Access loss** for what that policy would have cost.
+
+*Still unconfirmed:* whether recovery works while **keeping the D3D11 device**,
+which is what decides whether the sink survives. The tiering is written; one
+local run with Ctrl+Alt+Del exercises it without spending the tester's
+patience again.
 
 ## Effort
 
