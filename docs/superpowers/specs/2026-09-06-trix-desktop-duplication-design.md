@@ -61,6 +61,8 @@ border, not a fix being pushed at everyone.
 - Changing the encoder, the ring buffer, the clip format, or anything
   downstream of the frame. This work ends at the texture.
 - Automatic fallback between backends at runtime. The setting is explicit.
+- Cursor capture on the Desktop Duplication backend, in Ship 1. Decided and
+  deferred — see **Cursor** below.
 
 ## Architecture
 
@@ -209,31 +211,45 @@ audio mixer's `t0` and the encoder's `pts` already use. `LastPresentTime` can
 be 0 when only the mouse moved — those frames carry no new desktop content and
 are skipped rather than timestamped from the wall clock.
 
-### Cursor
+### Cursor — deliberately absent in Ship 1
 
-This is the biggest single work item, and the one place the two backends are
-not equivalent.
+**Decided: Desktop Duplication ships without a cursor.** It is the single
+largest work item in this document, it is entirely separable, and it is the
+difference between one ship and two.
 
 WGC composites the cursor for us (`CursorCaptureSettings::WithCursor`).
 Desktop Duplication does not: it delivers the pointer **position** in
 `DXGI_OUTDUPL_FRAME_INFO::PointerPosition` and the pointer **shape**
-separately via `GetFramePointerShape`, and expects the application to draw it.
+separately via `GetFramePointerShape`, and expects the application to draw it
+itself.
 
-Required work:
+The trade is honest for who this backend is for. Somebody selects it because
+Windows is drawing a yellow border across their game; a missing mouse pointer
+in a shooter — where the cursor is hidden anyway — is a small price, and the
+default backend still has one. **But it is only honest if it is disclosed**,
+which is why the option label and help text below both carry it. A user who
+picks this and later finds their clips have no cursor, with nothing having
+warned them, files a bug and is right to.
+
+This applies to screenshots too: Trix takes them from the capture that is
+already running, so a screenshot on this backend has no cursor either.
+
+**Deferred work, for the follow-up ship:**
 
 - Cache the pointer shape; it is only re-sent when it changes
   (`PointerShapeBufferSize > 0`), so a backend that only reads it when present
-  will lose the cursor entirely on most frames.
+  loses the cursor on almost every frame.
 - Handle all three shape types: `MONOCHROME` (1-bpp AND/XOR mask, needs real
   masking), `COLOR` (BGRA, straightforward), `MASKED_COLOR` (per-pixel choice
-  between copy and XOR).
+  between copy and XOR). Monochrome is rare in games but is what Windows falls
+  back to.
+- Skip compositing when `PointerPosition.Visible` is false — another output
+  owns the pointer.
 - Composite into a copy of the frame, never into the duplication texture —
   writing into the surface DXGI handed us is not ours to do.
 
-`PointerPosition.Visible` is false when another output owns the pointer; skip
-compositing then. Monochrome cursors are rare in games but are what Windows
-falls back to, and a backend that ignores them shows no cursor exactly when a
-user is most likely to file a bug about it.
+When it lands, the option label and help text lose their cursor warning in the
+same commit. A stale warning is its own defect.
 
 ### Access loss
 
@@ -289,14 +305,19 @@ existing descriptor pattern:
 { key: 'capture_method', label: 'Capture method', kind: 'select', section: 'Quality', options: [
     { value: 'auto', label: 'Automatic' },
     { value: 'wgc', label: 'Windows Graphics Capture' },
-    { value: 'dd', label: 'Desktop Duplication' },
+    { value: 'dd', label: 'Desktop Duplication - no mouse cursor' },
   ], help: '...' },
 ```
 
 The help text has to earn its place, because this is the one setting where a
-user must self-diagnose. It should name the symptom, not the API: something to
-the effect of *"If Windows draws a yellow border around your screen while Trix
-is armed, choose Desktop Duplication."*
+user must self-diagnose, and the one where choosing it costs them something.
+It should name the symptom rather than the API, and state the cost plainly —
+to the effect of: *"If Windows draws a yellow border around your screen while
+Trix is armed, choose Desktop Duplication. It cannot record the mouse cursor."*
+
+The cursor warning belongs in **both** places. The label is what a user reads
+while choosing; the help is what they read afterwards when wondering why the
+pointer is gone.
 
 Add the key to `settings.test.ts`'s shipped-keys list, or `unknownKeys` shows
 every user the "this daemon has settings this app does not render yet" banner.
@@ -343,7 +364,7 @@ today, which is exactly why it does not ship first.
 | Risk | Severity | Mitigation |
 | --- | --- | --- |
 | Hybrid-GPU adapter routing | Low, was High | Not solved — avoided. Automatic picks WGC on any battery-powered machine with 2+ adapters, as OBS does. A user who forces Desktop Duplication there gets a clear failure, not a wrong-adapter capture |
-| Cursor compositing wrong or missing | High | All three shape types, shape caching; visual check against the WGC backend |
+| No cursor on this backend | Medium, accepted | Out of scope for Ship 1 by decision. Disclosed in the option label *and* the help text, so it is a stated trade rather than a surprise |
 | Exclusive fullscreen behaves differently | Medium | Test R6 in all three display modes; access loss is expected on transitions and the rebuild loop absorbs it |
 | No `MinUpdateInterval` equivalent | Medium | The QPC pacer in `on_frame_arrived` already discards surplus frames before any GPU work; DD simply loses the earlier cut |
 | Timestamp unit mix-up | Medium | Convert once at the backend boundary; assert the two backends agree on a known-cadence capture |
@@ -362,7 +383,8 @@ Unit-testable without hardware:
 Hand verification, both backends, same machine:
 
 1. Clip on each backend; compare file size, duration, and audio sync
-2. Cursor present and correct in both, including a monochrome cursor
+2. Cursor present on WGC, absent on Desktop Duplication, and the settings row
+   said so before the user chose it
 3. Launch a game, confirm the rebuild path recovers (log shows the loss and the
    new session)
 4. Hybrid GPU: capture with the game on the dGPU and the display on the iGPU
@@ -395,10 +417,17 @@ is the point of it.
 
 ## Effort
 
-A week or two of focused work after the spike. The seam and the WGC re-wrap are
-the easy half and could land on their own with no behaviour change at all.
-Cursor compositing is now the only item that can eat several days on its own,
-and it is the one the automated gates cannot catch.
+**Ship 1, cursor-less: around a week** after the spike. The seam and the WGC
+re-wrap are the easy half and could land on their own with no behaviour change
+at all; the duplication backend without cursor compositing is an acquire loop,
+a timestamp conversion, and a config key.
+
+Deferring the cursor takes roughly a third off, and takes the whole of the
+`GetFramePointerShape` masking work — the part with no automated gate — out of
+the first release entirely.
+
+**Cursor follow-up: several days**, whenever it is wanted, with no dependency
+on anything else shipping first.
 
 ## Open questions
 
@@ -410,7 +439,6 @@ and it is the one the automated gates cannot catch.
 3. Should `Automatic` prefer Desktop Duplication when another app is forcing
    the border? There is no API to query that, so no — the setting stays the
    only way, and the help text carries the diagnosis.
-4. Does the cursor need to reach parity with WGC before Ship 1, or can Desktop
-   Duplication ship cursor-less behind an opt-in setting and gain it after? A
-   user choosing this backend to escape a border may well accept no cursor;
-   nobody has been asked.
+4. ~~Does the cursor need parity with WGC before Ship 1?~~ **Answered: no.**
+   Desktop Duplication ships cursor-less behind the opt-in setting and gains
+   the cursor in a follow-up. Disclosed in the option label and the help text.
