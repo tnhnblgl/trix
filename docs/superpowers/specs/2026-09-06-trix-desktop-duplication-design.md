@@ -1,6 +1,8 @@
 # Desktop Duplication capture backend — design
 
-**Status:** proposed. Nothing started.
+**Status:** Phase 0 answered — **Desktop Duplication clears the border**, proven
+from a Trix process on the reporting user's own machine. Ship 1 is unblocked.
+See **Phase 0** below for the evidence and the one thing it did not test.
 **Date:** 2026-09-06
 
 ## Goal
@@ -275,6 +277,17 @@ rebuild**, rather than re-acquiring inside the backend. One recovery path, one
 place where the "replay ring restarts empty" warning is emitted, and the
 behaviour a user sees is identical to what a display change already does today.
 
+**The rebuild must go all the way down to a new `CreateDXGIFactory1`.** Phase 0
+learned this the expensive way: its first version re-called `DuplicateOutput`
+on the output it had resolved at startup, and never recovered — 37 consecutive
+losses in which `DuplicateOutput` *succeeded* every time and the first
+`AcquireNextFrame` failed every time. After a mode change `IDXGIFactory1::IsCurrent`
+goes false and every adapter and output that factory produced is dead, so
+re-duplicating a cached output re-opens nothing. Factory, adapter, output,
+device, duplication: all five, every time. A backend that caches any of them
+across a rebuild will look correct on a developer machine and die permanently
+the first time a game goes fullscreen.
+
 ### Adapter selection (hybrid GPU)
 
 The largest technical risk. Desktop Duplication must be created on the adapter
@@ -440,8 +453,44 @@ Answered on the developer machine (hybrid GPU, Intel UHD driving the panel):
 | What format does it deliver? | `B8G8R8A8_UNORM` — the same format `VideoConverter` already takes from WGC, so nothing downstream changes |
 | How many frames are mouse-only? | Over half, in a run with an active pointer. Confirms skipping `LastPresentTime == 0` rather than timestamping those |
 
-Still needs the reporting user, and is the only question that matters: **does
-the border go away.** That cannot be answered on a machine that never had one.
+### Answered: no border
+
+**2026-09-06, on the reporting user's machine: Desktop Duplication produced no
+yellow border.** The run behind that sentence is worth stating precisely,
+because the first attempt at it was void:
+
+| | |
+| --- | --- |
+| Run length | 30.0 s, of which **30.0 s actually capturing** |
+| Access losses | 0 |
+| Frames | 1802 desktop (60.0/s), 884 mouse-only |
+| Present gap | min 14.4 ms, avg 16.7 ms, max 19.0 ms — a hard 60 Hz lock |
+| Surface | 1920x1080 `B8G8R8A8_UNORM`, on the RTX 3060 driving the display |
+| Border | **none** |
+
+The cadence is better than expected: ±2 ms of jitter against a 16.7 ms period,
+with no `MinUpdateInterval` equivalent needed to get there.
+
+**The first attempt was void and is not evidence.** It began capturing the
+instant it launched, the tester spent the first ten seconds alt-tabbing, and
+the duplication was dead by the time they were looking at the game — so their
+"no border" described a period when nothing was capturing at all. The probe now
+counts the tester in before opening anything, measures how long it was actually
+live, and refuses to call a run below two thirds an answer. **A remote test that
+cannot detect that it measured nothing will hand you a confident wrong answer.**
+
+### Not yet tested: recovery from a transition
+
+The clean run is also a blind spot. It had zero access losses because the
+tester was already in the game before duplication opened, so no fullscreen
+transition ever happened — which means **the rebuild path above never
+executed.** Armed Trix runs continuously while people alt-tab in and out of
+games, so that transition is not an edge case, it is the normal case.
+
+One more probe run covers it: alt-tab out and back during capture, and measure
+whether every loss recovers and how long the blackout lasts. That number is the
+product question — a blackout is a hole in the replay ring at the exact moment
+someone wants to clip.
 
 ## Effort
 
@@ -462,8 +511,11 @@ on anything else shipping first.
 1. ~~Does Windows 10 draw the border for display capture?~~ **Answered:** not
    every time. Recorded above; Ship 2 is no longer urgent because of it.
 2. ~~Does Desktop Duplication clear the border on the reporting user's
-   machine?~~ **OBS says yes.** Phase 0 confirms it from Trix's own process
-   before the backend is built.
+   machine?~~ **Answered 2026-09-06: no border**, measured from Trix's own
+   process over 30 s of verified-live capture. See **Phase 0**. This was the
+   question the whole design rested on.
+   *Still open beneath it:* does the backend recover from a fullscreen
+   transition? The run that answered the border question never had one.
 3. Should `Automatic` prefer Desktop Duplication when another app is forcing
    the border? There is no API to query that, so no — the setting stays the
    only way, and the help text carries the diagnosis.
