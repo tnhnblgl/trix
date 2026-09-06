@@ -242,16 +242,25 @@ is the capture path, not the encoder choice.
 | DD, + delivery gate | 53 | 169 | 151 | 27.3 fps |
 | DD, + copy before release | 53 | 230 | 94 | **37.7 fps** |
 
+Repeated later on the recorder, the same build measured 45.8 and 42.5 fps
+gated. Run-to-run spread is wide because the test content is a scrolling
+console; **treat the gap as roughly 44 against 57, not a single figure.**
+
 Two causes were found and fixed, and one remains.
 
 **Fixed: no delivery cut.** WGC's `MinUpdateInterval` was doing more than
-saving DWM some copies — it was the only thing keeping the sink's frame rate
-near the target. Desktop Duplication has no OS-side equivalent and delivered
-133 frames a second into an encoder that sustains about 58. The sink's own QPC
-pacer cannot absorb that: it re-anchors its schedule to the last frame it
-*encoded*, and a dropped frame never advances it, so once the encoder starts
-refusing frames the pacer stops pacing entirely (4 paced, 599 dropped). The
+saving DWM some copies. Desktop Duplication has no OS-side equivalent and
+delivered 133 frames a second into an encoder that sustains about 58, and the
+sink's own QPC pacer cannot absorb that: it re-anchors its schedule to the last
+frame it *encoded*, and a dropped frame never advances it, so once the encoder
+starts refusing the pacer stops pacing entirely (4 paced, 599 dropped). The
 backend now makes the same three-quarters-of-a-frame-period cut itself.
+
+A/B runs since show this does not raise throughput — 45.8 and 42.5 fps gated
+against 44.1 and 46.7 ungated, all inside the noise. What it removes is waste:
+68 and 81 dropped frames gated against 634 and 381 ungated, each one an
+acquire, a copy and a converter call spent on a frame nothing could accept.
+Worth keeping for that alone.
 
 **Fixed: encoding before releasing.** Handing DXGI's own surface to the sink
 puts a frame of GPU work between `AcquireNextFrame` and `ReleaseFrame` every
@@ -259,13 +268,28 @@ frame. Copying into a texture the backend owns — one blit, reallocated only on
 a resolution change — and releasing immediately took the effective rate from
 27.3 to 37.7 fps.
 
-**Open: the encoder grants input credits more slowly on this path.** Every one
-of the 94 remaining drops is `ready_for_input() == false` with the converter
-pool nearly empty, so it is not pool depth and not a one-line fix. `pump()` is
-only called from `on_frame`, which couples how often the MFT's event queue is
-drained to how often frames arrive — but raising the delivery rate does not
-help either (133/s delivered gave 36.8 fps against 53/s giving 37.7), so
-pump frequency is not the whole story.
+**Open: the encoder grants input credits more slowly on this path.** Every
+remaining drop is `ready_for_input() == false` with the converter pool nearly
+empty, so it is not pool depth.
+
+Two candidate causes have been eliminated by measurement:
+
+- **Pump frequency.** `pump()` is only called from `on_frame`, so how often the
+  MFT's event queue is drained is coupled to how often frames arrive. Ruled
+  out: with the gate off, 894 pump calls in six seconds — 149 a second — still
+  produced only 214 credits. WGC, at 337 pumps, got 337. Draining faster is
+  not what WGC is doing differently.
+- **A different grant rule.** `need_input` equals `frames` exactly on both
+  backends, so the MFT asks for input precisely once per input it accepts. The
+  difference is purely how long it takes to ask again: about 56 times a second
+  fed from WGC, about 44 fed from duplication.
+
+What is left is GPU-side work per frame. Duplication costs one extra
+full-frame copy (9.2 MB at 1920x1200) on the same device and the same shared
+memory the encoder is using, and this machine's panel hangs off an Intel UHD
+with 128 MB of VRAM. Removing that copy while keeping the early release needs
+the sink to signal "done with the texture" separately from "done with the
+frame" — an addition to the seam, not a tweak.
 
 **What this means for shipping.** Desktop Duplication is correct — right
 colours, right resolution, timestamps that measure the same cadence as WGC's

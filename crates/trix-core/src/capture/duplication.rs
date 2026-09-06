@@ -94,13 +94,18 @@ const MAX_BACKOFF_MS: u64 = 500;
 /// rate, so the gate sits at three quarters of one and the sink's QPC pacer
 /// does the fine work.
 ///
-/// Measured, not assumed. Without it Desktop Duplication handed the sink **133
-/// frames a second** on a 60 fps target, where WGC's `MinUpdateInterval` was
-/// delivering 75 — and the encoder, which sustains about 58, dropped 599 of
-/// 827 frames and produced a *worse* clip than WGC's: 36.8 fps against 57.6.
-/// The sink's pacer cannot rescue that on its own, because it re-anchors its
-/// schedule to the last frame it actually encoded and a dropped frame never
-/// advances it.
+/// Measured, and it earns its place for a different reason than expected.
+/// Without it Desktop Duplication hands the sink **133 frames a second** on a
+/// 60 fps target, where WGC's `MinUpdateInterval` delivers 75. A/B runs put
+/// the *throughput* either side of the noise — 45.8 and 42.5 fps gated against
+/// 44.1 and 46.7 ungated — so this does not make the encoder faster. What it
+/// removes is waste: 68 and 81 dropped frames gated, against 634 and 381
+/// ungated. Every one of those was an acquire, a copy and a converter call
+/// spent on a frame nothing could accept.
+///
+/// The sink's own pacer cannot do this job, which is why it belongs here: it
+/// re-anchors its schedule to the last frame it actually *encoded*, so once
+/// the encoder starts refusing, the pacer stops pacing altogether.
 const DELIVERY_GATE_NUMERATOR_100NS: i64 = 7_500_000;
 
 /// Consecutive reopen failures that are **not** the secure desktop, before the
