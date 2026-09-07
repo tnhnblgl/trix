@@ -16,21 +16,27 @@ describe('FIELDS', () => {
   });
 
   /**
-   * Desktop Duplication cannot capture the mouse cursor, and the spec commits
-   * to saying so in *both* places: the label is what a user reads while
-   * choosing, the help is what they read afterwards when wondering where their
-   * pointer went. A user who picks this and only then discovers their clips
-   * have no cursor files a bug, and is right to.
+   * Desktop Duplication cannot capture the mouse cursor, and a user who picks
+   * it and only then finds their clips have no pointer files a bug, and is
+   * right to. So it must be disclosed before they choose.
    *
-   * When the cursor lands on this backend, both warnings come out in the same
-   * commit -- and this test is what fails until they do.
+   * It used to be disclosed twice -- in the option label and in the help --
+   * and the label half was dropped deliberately on 2026-09-07: the labels had
+   * grown long enough to run off the side of the window. (`Select.svelte`'s
+   * popup no longer overflows either way, so if the label warning is ever
+   * wanted back it can come back safely.) The help is now the only place that
+   * says it, which makes this assertion the whole of the disclosure rather
+   * than one of two, and is why it is worth keeping even though it looks
+   * like a spot check on wording.
+   *
+   * When the cursor lands on this backend, this comes out in the same commit
+   * -- and this test is what fails until it does.
    */
-  it('discloses what Desktop Duplication costs, in the label and the help', () => {
+  it('discloses what Desktop Duplication costs', () => {
     const field = FIELDS.find((f) => f.key === 'capture_method');
     expect(field, 'capture_method must be a rendered field').toBeDefined();
     const dd = field!.options?.find((o) => o.value === 'dd');
     expect(dd, 'Desktop Duplication must be offered').toBeDefined();
-    expect(dd!.label.toLowerCase()).toContain('cursor');
     expect(field!.help.toLowerCase()).toContain('cursor');
     // The symptom, not the API: a user picks this because of what they can see.
     expect(field!.help.toLowerCase()).toContain('yellow border');

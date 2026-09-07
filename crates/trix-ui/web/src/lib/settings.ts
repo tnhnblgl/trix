@@ -128,7 +128,7 @@ export const FIELDS: Field[] = [
   { key: 'capture_method', label: 'Capture method', kind: 'select', section: 'Capture', options: [
       { value: 'auto', label: 'Automatic' },
       { value: 'wgc', label: 'Windows Graphics Capture' },
-      { value: 'dd', label: 'Desktop Duplication - no mouse cursor' },
+      { value: 'dd', label: 'Desktop Duplication' },
     ], help: 'If Windows draws a yellow border around your screen while Trix is armed, choose Desktop Duplication -- it is not subject to that border. It cannot record the mouse cursor, in clips or in screenshots. Automatic is Windows Graphics Capture.' },
 
   { key: 'system_volume', label: 'PC sound', kind: 'slider', section: 'Audio', ...span('system_volume'), help: 'How loud your PC\'s own sound is in the clip. Affects the recording only, never your Windows volume. 0 turns it off.' },
@@ -148,7 +148,7 @@ export const FIELDS: Field[] = [
   { key: 'screenshot_hotkey', label: 'Screenshot hotkey', kind: 'hotkey', section: 'Trix', boundKey: 'screenshot_hotkey_bound', help: 'Saves a picture of the screen and copies it to your clipboard. Only works while Trix is armed, because the picture comes from the recording that is already running.' },
   { key: 'hotkey_mode', label: 'Hotkey detection', kind: 'select', section: 'Trix', options: [
       { value: 'standard', label: 'Standard' },
-      { value: 'low_level', label: 'Low level - sees keys other programs have taken' },
+      { value: 'low_level', label: 'Low Level - Detection Guarantee' },
     ], help: 'Applies to both hotkeys above. If your hotkey does nothing in a game, this is the setting to try. Standard asks Windows to reserve the combination: that is refused outright when another program already owns it, and even when it succeeds some games and overlays take the key before Windows hands it over -- confirmed in Euro Truck Simulator 2, where Trix held the key and never saw a press. Low level watches the keyboard directly, so it sees the key either way, and passes the key on so whatever else uses it keeps working. Some anti-cheat software is wary of programs that watch the keyboard; OBS, Discord and Steam all do it, but Trix cannot promise how yours reads it. Neither mode helps if the game runs as administrator and Trix does not.' },
   { key: 'screenshot_sound', label: 'Screenshot sound', kind: 'bool', section: 'Trix', help: 'A short blip when a screenshot is saved, different from the clip sound so you can tell them apart without looking.' },
   { key: 'clip_sound', label: 'Clip sound', kind: 'bool', section: 'Trix', help: 'Plays a sound when a clip is saved, even when the Trix window is closed.' },
