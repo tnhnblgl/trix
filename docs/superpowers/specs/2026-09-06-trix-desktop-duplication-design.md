@@ -9,9 +9,11 @@ backend, and `auto` adopting the OBS policy. Two hand-verification items are
 also outstanding because they need a real game session — Testing #3 (rebuild
 across a fullscreen transition, on the merged backend rather than the spike)
 and #4 (hybrid GPU with the game on the dGPU).
-One limitation shipped knowingly: Desktop Duplication records **fewer frames
-per second** than WGC on this machine — see **Throughput**. Disclosed in the
-setting's help text. No open questions.
+The throughput gap is **closed** (2026-09-07): the backend acquired a frame on
+every present and discarded the surplus, which starved the encoder. Fixed on
+`fix/dd-acquire-rate` — 20 fps to 55.6 here, and confirmed by the reporting
+user on his own machine. The help text's frame-rate warning is gone with it.
+The remaining stated cost is the cursor. No open questions.
 Desktop Duplication clears the border — proven from a Trix process on the
 reporting user's own machine — survives repeated alt-tabs (4 of 4 recovered,
 0.4 s), survives the secure desktop (3 of 3 recovered, 0.1 s unobstructed), and
@@ -235,7 +237,7 @@ so the borrowed `SourceFrame` lifetime already expresses this correctly and
 nothing needs to change in the sinks. This is the single most important
 invariant in the backend and must be stated in the module doc.
 
-### Throughput — measured, and not yet at parity
+### Throughput — found, and at parity
 
 Desktop Duplication delivers fewer encoded frames than WGC on the same screen,
 on the developer machine (Intel UHD driving the panel, RTX 5060 idle, 1920x1200,
@@ -336,14 +338,40 @@ on the same adapter. Nothing above explains that, and it is the only question
 left worth asking. The difference is the device itself, not the copy, the
 pacing, or the seam.
 
+### The cause, found 2026-09-07: we acquired on every present
+
+Everything above measured the *symptom*. The cause is that
+`AcquireNextFrame`/`ReleaseFrame` ran at the rate the desktop *presents*, not
+at the rate we record — 165/s on this laptop's panel — and 217 of every 330
+frames were then thrown away at the delivery gate. That traffic runs on the
+same D3D11 device as the converter and the encoder, and it starved the encoder
+of input credits: it refused two thirds of what it was offered.
+
+The fix is to apply the gate *before* the acquire as well as after it. Two
+separately built binaries, alternating on identical animated content:
+
+| Build | Encoded | Frames accepted |
+| --- | --- | --- |
+| master, DD | 20.1, 20.8 fps | 36% |
+| fix, DD | **55.8, 55.4 fps** | **99.9%** |
+| WGC, same session | 58.9 fps | 100% |
+
+The backend delivered ~56 frames a second to the sink in *both* DD arms. Only
+the number of acquires changed. **Confirmed on the reporting user's machine**,
+where the same mechanism was milder — his 60 Hz panel was a red herring, since
+with vsync off and no frame cap his game presents ~130 times a second, which is
+why he saw 39.8 fps where this 165 Hz laptop saw 20.
+
+Two hypotheses died on the way, both recorded so they are not retried. **DXGI
+coalescing**: `AccumulatedFrames` was 1 in every window at the old acquire
+rate, so nothing was being merged and the loop was never too slow. **GPU
+scheduling priority**: 22.3 fps on `low` against 22.6 on `normal`, no effect.
+
 **What this means for shipping.** Desktop Duplication is correct — right
-colours, right resolution, timestamps that measure the same cadence as WGC's
-to within a millisecond, and audio in sync — but on this machine it records at
-roughly half of WGC's frame rate: 30 against 59 on controlled content, worse
-than the 44-against-57 measured earlier on a scrolling console. That is a real cost to state in the
-option's help text, or to close before the setting is offered. It is not a
-reason to withhold the backend from someone whose alternative is a yellow
-border across their game, and it is a reason not to make it anybody's default.
+colours, right resolution, timestamps that measure the same cadence as WGC's to
+within a millisecond, audio in sync — and now within 5% of WGC's frame rate.
+The cursor is the one remaining stated cost, and the reason `auto` is still
+WGC.
 
 ### Timestamps
 
@@ -759,28 +787,21 @@ on anything else shipping first.
    Desktop Duplication ships cursor-less behind the opt-in setting and gains
    the cursor in a follow-up. Disclosed in the option label and the help text.
 
-5. **OPEN, awaiting a decision — why is the encoder half as fast on our
-   device?** The same `VideoConverter` and the same Intel QSV encoder sustain
-   ~59 fps fed from WGC's device and ~30 fps fed from the duplication
-   backend's: same adapter, same creation flags, same resolution, same
-   content. The copy, the pacing, a per-frame rescale and the seam have all
-   been eliminated by measurement (see **Throughput**), so the difference is
-   the device itself. Nothing here explains it.
+5. ~~Why is the encoder half as fast on our device?~~ **Answered 2026-09-07:
+   it was never the device.** The backend called
+   `AcquireNextFrame`/`ReleaseFrame` at the rate the desktop *presents* rather
+   than the rate we record, then discarded the surplus at the delivery gate —
+   217 of every 330 on this 165 Hz panel. That traffic shares the D3D11 device
+   with the converter and the encoder and starved the encoder of input
+   credits, which is why the drops all looked like `ready_for_input() ==
+   false`. Applying the gate before the acquire as well as after it took this
+   machine from 20 fps to 55.6 against WGC's 58.9, with 99.9% of frames
+   accepted. See **Throughput**.
 
-   **The cheapest next experiment**, and the one to run first: force the
-   duplication device onto the discrete RTX instead of the Intel that drives
-   the panel, and re-measure. `resolve_output` already enumerates every
-   adapter, so this is a few lines behind a temporary flag.
-   - If the gap **closes** on the dGPU, the cause is hybrid-GPU output
-     routing — exactly the case OBS refuses to use duplication for — and the
-     single-adapter desktops this backend exists for are probably unaffected.
-     That would also mean the shipped warning is pessimistic for its actual
-     audience.
-   - If the gap **stays** at ~30 on both adapters, the cause is in our own
-     duplication path and will follow every user home, which makes the
-     backend's value much narrower and is an argument for withdrawing the
-     option until it is fixed.
+   The dGPU experiment proposed here was **not needed and was not run**. The
+   hybrid-GPU theory was wrong: the reporting user's single-adapter desktop had
+   the same disease at a milder dose, because with vsync off and no frame cap
+   his game presents ~130 times a second regardless of his 60 Hz panel. His
+   refresh rate was a red herring; the *present* rate is what matters.
 
-   Either answer changes what the setting should say and whether it should be
-   offered at all, which is why it is worth running before any further work on
-   this backend.
+   Confirmed by the reporting user on his own machine, which is what closed it.

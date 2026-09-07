@@ -106,6 +106,33 @@ const MAX_BACKOFF_MS: u64 = 500;
 /// The sink's own pacer cannot do this job, which is why it belongs here: it
 /// re-anchors its schedule to the last frame it actually *encoded*, so once
 /// the encoder starts refusing, the pacer stops pacing altogether.
+///
+/// The gate is also applied *before* `AcquireNextFrame`, and that is where the
+/// throughput turned out to be.
+///
+/// Duplication signals on every present, not on the monitor's refresh: a game
+/// running uncapped with vsync off presents far faster than anyone wants to
+/// record. This backend used to acquire every one of those and throw the
+/// surplus away at this gate -- 217 of every 330 on a 165 Hz panel.
+/// Acquiring is not free, and it is not free *in the wrong place*:
+/// `AcquireNextFrame` and `ReleaseFrame` run on the same D3D11 device as the
+/// converter and the encoder, and that traffic starves the encoder of input
+/// credits.
+///
+/// Measured here, alternating runs on identical animated content:
+///
+/// | acquire policy          | encoded        | dropped  |
+/// | ----------------------- | -------------- | -------- |
+/// | every present (165/s)   | 22.5, 24.4 fps | 617, 597 |
+/// | wait the gate out first | 56.4, 57.0 fps | 0, 0     |
+/// | WGC, same session       | 58.3 fps       | 0        |
+///
+/// The backend delivered ~56 frames a second to the sink either way. Only the
+/// number of acquires changed. That is the whole difference between this
+/// backend running at half speed and it matching WGC.
+///
+/// The gate below stays: sleeping is not exact, and a frame that still arrives
+/// early has to be refused.
 const DELIVERY_GATE_NUMERATOR_100NS: i64 = 7_500_000;
 
 /// Consecutive reopen failures that are **not** the secure desktop, before the
@@ -515,6 +542,11 @@ fn run_frames<S: FrameSink>(
     let mut losses = 0u64;
     let mut dark_since: Option<Instant> = None;
     let mut last_delivered_100ns: Option<i64> = None;
+    // Wall-clock twin of `last_delivered_100ns`: when DXGI may next be asked
+    // for a frame. The probe's gate is zero, so its schedule is always already
+    // due and it still sees every present.
+    let acquire_gap = Duration::from_nanos((delivery_gate_100ns.max(0) * 100) as u64);
+    let mut next_acquire_at: Option<Instant> = None;
 
     while !halt.load(Ordering::Relaxed) {
         let active = match &mut chain {
@@ -561,17 +593,26 @@ fn run_frames<S: FrameSink>(
             }
         };
 
+        let wait = wait_before_acquire(next_acquire_at, Instant::now());
+        if !wait.is_zero() {
+            std::thread::sleep(wait);
+        }
+
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource: Option<IDXGIResource> = None;
         let acquired =
             unsafe { active.dupl.AcquireNextFrame(ACQUIRE_TIMEOUT_MS, &mut info, &mut resource) };
+        let acquired_at = Instant::now();
 
         match acquired {
             Ok(()) => {
-                // Copy out, release, *then* encode. DXGI's surface is handed
-                // back before any of our own GPU work is queued against it,
-                // which is what keeps the acquire loop and the encoder from
-                // serialising against each other every frame.
+                // Copy out, release, *then* encode, so DXGI's own surface is
+                // handed back before any of our GPU work is queued against it.
+                // Worth 27.3 -> 37.7 fps when it was measured. It does *not*
+                // decouple the loop from the encoder: the next acquire still
+                // waits for `on_frame` to return, on this one thread. Reading
+                // it as if it did is what hid the acquire rate for two
+                // sessions.
                 let frame = claim(
                     active,
                     resource.as_ref(),
@@ -584,6 +625,9 @@ fn run_frames<S: FrameSink>(
                 let frame = frame?;
                 released.context("ReleaseFrame failed")?;
                 if let Some((texture, present_100ns)) = frame {
+                    // Anchored to the acquire, not to the end of the encode:
+                    // the encode's own duration must not stretch the interval.
+                    next_acquire_at = Some(acquired_at + acquire_gap);
                     let mut desc = D3D11_TEXTURE2D_DESC::default();
                     unsafe { texture.GetDesc(&mut desc) };
                     let flow = sink.lock().on_frame(SourceFrame {
@@ -670,6 +714,18 @@ fn claim(
     Ok(Some((texture, present_100ns)))
 }
 
+/// How long to wait before asking DXGI for another frame.
+///
+/// Zero whenever there is no schedule yet (the first frame, or after a reopen)
+/// or the moment has already passed, so the loop only ever sleeps when it
+/// would otherwise collect a frame it intends to discard.
+fn wait_before_acquire(next_at: Option<Instant>, now: Instant) -> Duration {
+    match next_at {
+        Some(at) if at > now => at - now,
+        _ => Duration::ZERO,
+    }
+}
+
 /// The minimum gap between delivered frames, in 100 ns units.
 ///
 /// `None` — the cadence probe — asks for everything the desktop produces,
@@ -752,5 +808,53 @@ mod tests {
             resolve_output(&factory, listed.len() as u32).is_err(),
             "one past the end must be an error, not the last monitor again"
         );
+    }
+
+    /// The pre-acquire wait. What matters is that the loop never sleeps
+    /// without a reason: a needless sleep on this thread is capture latency.
+    #[test]
+    fn no_schedule_means_no_wait() {
+        let now = Instant::now();
+        assert_eq!(
+            wait_before_acquire(None, now),
+            Duration::ZERO,
+            "the first frame after a start or a reopen must not be delayed"
+        );
+    }
+
+    #[test]
+    fn a_passed_deadline_means_no_wait() {
+        let now = Instant::now();
+        assert_eq!(
+            wait_before_acquire(Some(now - Duration::from_millis(5)), now),
+            Duration::ZERO,
+            "an encode that overran the gap must not then sleep on top of it"
+        );
+    }
+
+    #[test]
+    fn a_future_deadline_waits_out_the_remainder() {
+        let now = Instant::now();
+        assert_eq!(
+            wait_before_acquire(Some(now + Duration::from_millis(4)), now),
+            Duration::from_millis(4)
+        );
+    }
+
+    /// The probe measures what the desktop really produces, so it must keep
+    /// seeing every present.
+    #[test]
+    fn the_cadence_probe_never_waits() {
+        let gap = Duration::from_nanos((delivery_gate_100ns(None).max(0) * 100) as u64);
+        assert_eq!(gap, Duration::ZERO);
+        let acquired = Instant::now();
+        assert_eq!(wait_before_acquire(Some(acquired + gap), acquired), Duration::ZERO);
+    }
+
+    /// The wait mirrors the gate exactly: three quarters of a frame period.
+    #[test]
+    fn the_wait_mirrors_the_gate() {
+        let gap = Duration::from_nanos((delivery_gate_100ns(Some(60)).max(0) * 100) as u64);
+        assert_eq!(gap, Duration::from_micros(12_500));
     }
 }
