@@ -3,7 +3,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { call, onDaemonEvent } from '../lib/ipc';
   import { app, updates } from '../lib/state.svelte';
-  import { FIELDS, SECTIONS, unknownKeys, validate } from '../lib/settings';
+  import { FIELDS, SECTIONS, hotkeyProblem, unknownKeys, validate } from '../lib/settings';
   import Field from '../components/Field.svelte';
   import Button from '../components/ui/Button.svelte';
   import Icon from '../components/ui/Icon.svelte';
@@ -26,8 +26,16 @@
   // its own `hotkey_pressed` listener, which is per-row rather than
   // page-level -- see its doc comment for why.)
   const unlisten = onDaemonEvent((event) => {
-    if (event.event === 'hotkey_rebound' && event.data['registered'] === false) {
-      app.toast('error', `Windows would not give Trix ${event.data['spec']}. Another app already owns it.`);
+    if (event.event === 'hotkey_rebound') {
+      if (event.data['registered'] === false) {
+        app.toast('error', `Windows would not give Trix ${event.data['spec']}. Another app already owns it.`);
+      }
+      // The toast is the alert; `status` is the record. Re-read it either way,
+      // because a rebind that *succeeded* is what clears a warning left over
+      // from the combination before it -- a page that only refreshed on
+      // failure would keep telling a user their hotkey is taken after they
+      // had already fixed it.
+      void app.refreshStatus();
     }
     if (event.event === 'config_changed') {
       // The sound dialog and the tray change config behind this page's back;
@@ -42,6 +50,10 @@
 
   async function load() {
     try {
+      // Before the fields render, because a hotkey row's warning is read off
+      // `status` and this page can be opened long after the connect that last
+      // fetched one.
+      await app.refreshStatus();
       config = await call<Record<string, unknown>>('config.get');
       extras = unknownKeys(config);
       const list = await call<{ monitors: Monitor[] }>('monitors.list');
@@ -166,6 +178,7 @@
       {#each FIELDS.filter((f) => f.section === section) as field (field.key)}
         <Field
           {field} {config} {monitors}
+          problem={hotkeyProblem(field, field.boundKey ? app.status?.[field.boundKey] : null, config)}
           onset={set}
           onpickfolder={pickFolder}
           onpicksound={pickSound}

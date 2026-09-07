@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BITRATE_TIERS, CUSTOM_TIER, FIELDS, READ_ONLY_EXTRAS, SECTIONS, hotkeySaveTarget, hotkeySeed, tierFor, tierOptions, unknownKeys, validate } from './settings';
+import { BITRATE_TIERS, CUSTOM_TIER, FIELDS, READ_ONLY_EXTRAS, SECTIONS, hotkeyProblem, hotkeySaveTarget, hotkeySeed, tierFor, tierOptions, unknownKeys, validate } from './settings';
 
 describe('FIELDS', () => {
   it('covers every config key the daemon has today', () => {
@@ -9,6 +9,7 @@ describe('FIELDS', () => {
       'max_library_gb', 'autostart', 'system_volume', 'mic_volume', 'check_for_updates',
       'clip_sound', 'clip_sound_path', 'discord_presence',
       'screenshot_hotkey', 'screenshot_sound',
+      'hotkey_mode',
     ];
     const covered = FIELDS.map((f) => f.key);
     for (const key of shipped) expect(covered).toContain(key);
@@ -42,6 +43,34 @@ describe('FIELDS', () => {
     // the yellow border for nothing.
     expect(field!.help.toLowerCase()).not.toContain('frame rate');
     expect(field!.help.toLowerCase()).not.toContain('fewer frames');
+  });
+
+  /**
+   * The low-level hotkey mode is a trade, not an upgrade, and the copy has to
+   * read that way. It sees a combination another program has taken; it does
+   * that by watching every keystroke on the machine, which is a shape some
+   * anti-cheat software distrusts. That risk lands on the user, and a user who
+   * gets banned because a dropdown implied this was the better setting has
+   * been failed by the wording, not by the code.
+   *
+   * So: the anti-cheat caveat must be present, and the words that would sell
+   * it as an improvement must not be.
+   */
+  it('offers the low-level hotkey mode as a trade rather than an upgrade', () => {
+    const field = FIELDS.find((f) => f.key === 'hotkey_mode');
+    expect(field, 'hotkey_mode must be a rendered field').toBeDefined();
+    expect(field!.options?.map((o) => o.value)).toEqual(['standard', 'low_level']);
+
+    const help = field!.help.toLowerCase();
+    expect(help, 'the anti-cheat caveat is the whole reason this is opt-in').toContain('anti-cheat');
+    // The symptom that sends someone here, in their words, not the API's.
+    expect(help).toContain('does nothing');
+    // Elevation is the failure this mode does NOT fix, and saying so is what
+    // stops it being the next thing a stuck user blames.
+    expect(help).toContain('administrator');
+    for (const sell of ['better', 'recommended', 'improved']) {
+      expect(help, `"${sell}" would read as an endorsement`).not.toContain(sell);
+    }
   });
 
   it('renders both levels as sliders in the Audio section', () => {
@@ -274,5 +303,78 @@ describe('hotkeySeed', () => {
 
   it('falls back to an empty string when the config has no value yet', () => {
     expect(hotkeySeed(FIELDS.find((f) => f.key === 'clip_hotkey')!, {})).toBe('');
+  });
+});
+
+describe('hotkeyProblem', () => {
+  const clip = FIELDS.find((f) => f.key === 'clip_hotkey')!;
+  const shot = FIELDS.find((f) => f.key === 'screenshot_hotkey')!;
+  const standard = { clip_hotkey: 'alt+f10', screenshot_hotkey: 'alt+f8', hotkey_mode: 'standard' };
+
+  /**
+   * The whole point of the daemon reporting a tri-state. `null` is what every
+   * client sees for the moment between the daemon answering the socket and
+   * the pump binding the keys, and forever in any build with no window --
+   * rendering that as "your hotkey is taken" would put a false alarm on
+   * screen at every launch, and a warning that cries wolf at launch is one
+   * nobody reads on the launch that matters.
+   */
+  it('says nothing until the daemon has actually tried', () => {
+    expect(hotkeyProblem(clip, null, standard)).toBeNull();
+    expect(hotkeyProblem(clip, undefined, standard)).toBeNull();
+  });
+
+  it('says nothing about a hotkey that bound', () => {
+    expect(hotkeyProblem(clip, true, standard)).toBeNull();
+  });
+
+  /**
+   * The sentence a stuck user reads. It has to name the combination they
+   * chose -- "a hotkey failed" is not actionable -- and it has to name both
+   * ways out, because picking a free key and switching mechanism are
+   * genuinely different answers with different costs.
+   */
+  it('names the combination and both ways out when Windows refused it', () => {
+    const problem = hotkeyProblem(clip, false, standard)!;
+    expect(problem).toContain('ALT+F10');
+    expect(problem.toLowerCase()).toContain('another program');
+    expect(problem.toLowerCase()).toContain('pick a different combination');
+    expect(problem).toContain('Low level');
+  });
+
+  /**
+   * The advice has to invert with the mode. In low-level mode nothing was
+   * "taken" -- the hook itself would not install -- so telling this user to
+   * switch to Low level is advice they have already taken, and would read as
+   * the setting page not knowing what it is looking at.
+   */
+  it('gives the opposite advice when it is the hook that failed', () => {
+    const problem = hotkeyProblem(clip, false, { ...standard, hotkey_mode: 'low_level' })!;
+    expect(problem.toLowerCase()).toContain('watch the keyboard');
+    expect(problem).toContain('Standard');
+    expect(problem.toLowerCase()).not.toContain('another program');
+  });
+
+  it('reads each row own combination, not the clip one', () => {
+    expect(hotkeyProblem(shot, false, standard)).toContain('ALT+F8');
+  });
+
+  it('has nothing to say about a setting that is not a hotkey', () => {
+    const method = FIELDS.find((f) => f.key === 'capture_method')!;
+    expect(hotkeyProblem(method, false, standard)).toBeNull();
+  });
+
+  /**
+   * The wiring this depends on: a hotkey row with no `boundKey` gets its
+   * `bound` argument hard-coded to null by `Settings.svelte`, so it can never
+   * warn about anything. That is the safe default, and this is what notices
+   * a row that was meant to be wired and was not.
+   */
+  it('every hotkey row declares which status field answers for it', () => {
+    const rows = FIELDS.filter((f) => f.kind === 'hotkey');
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(row.boundKey, `${row.key} has no boundKey`).toBe(`${row.key}_bound`);
+    }
   });
 });

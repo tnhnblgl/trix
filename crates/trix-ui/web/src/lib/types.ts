@@ -39,6 +39,17 @@ export type Status = {
   ring_seconds_total: number;
   version: string;
   clip_dir: string;
+  /**
+   * Whether each hotkey is actually listening. `null` means the daemon has
+   * not tried to bind it yet -- a real answer, and not the same as `false`.
+   * Only `false` is worth putting on screen; see `hotkeyProblem` in
+   * `settings.ts`.
+   *
+   * Optional so a status from a daemon older than this field still typechecks
+   * rather than being read as `undefined` where a boolean was promised.
+   */
+  clip_hotkey_bound?: boolean | null;
+  screenshot_hotkey_bound?: boolean | null;
 };
 
 export type Monitor = {

@@ -1,12 +1,78 @@
 # Hotkey capture modes — feasibility note
 
-**Status: not decided, not started.** Written 2026-08-26 at v0.8.0, in answer
-to "some games need a low-level `SetWindowsHookEx` keybind, but some games
-wrongly understand it — could that be a setting, and how hard is it?". Like
-`2026-08-22-discord-rich-presence.md`, this is deliberately **not** in
-`docs/superpowers/specs/`: nothing here has been brainstormed or approved, and
-a plan must not be generated from it as though it were a spec. The open
-decisions at the bottom have to be settled first.
+**Status: built, 2026-09-07, on `feat/hotkey-modes`.** Written 2026-08-26 at
+v0.8.0, in answer to "some games need a low-level `SetWindowsHookEx` keybind,
+but some games wrongly understand it — could that be a setting, and how hard is
+it?". It was a feasibility note, never a spec; the section below records how
+each of its open decisions was actually settled, and the rest of the file is
+left as written so the reasoning that led here is still readable.
+
+## How it shipped
+
+One `hotkey_mode` config key covering **both** hotkeys — clip and screenshot —
+because the choice is about the mechanism, not about a key, and two settings
+would only invite the half-configured state where the answer is yes for clips
+and no for screenshots. `"standard"` (`RegisterHotKey`, the shipped behaviour)
+is the default; `"low_level"` (`WH_KEYBOARD_LL`) is opt-in. It applies live,
+with no re-arm, exactly like a rebind of either combination.
+
+The estimate held: the pump thread was already there, so the work was a
+`hook.rs`, two accessors on `Hotkey`, one config key, one Settings row, and one
+shared registration path in `window.rs` replacing the two that had drifted
+apart. Both `wnd_proc` hotkey arms collapsed into one, so the two mechanisms
+cannot diverge in what a press *does*.
+
+The open decisions, as settled:
+
+1. **Did step 1 (visibility) happen first?** No — the mode landed first, and
+   step 1 followed immediately after in the same branch, so both shipped
+   together. It is now built end to end:
+   - `window.rs` records every bind outcome in a **tri-state** — untried,
+     bound, taken. Three states rather than a bool because `spawn` returns
+     before the pump binds, and a `status` answered in that window has
+     genuinely not been told yet; reported as `false` it would flash "your
+     hotkey is taken" at every launch.
+   - `status` carries `clip_hotkey_bound` and `screenshot_hotkey_bound`, each
+     `true`/`false`/`null`. Adding keys to that published set is safe;
+     renaming or dropping one is not, and the wire-shape test still guards it.
+   - The `hotkey_rebound` event gained `key`, so a page with two hotkey rows
+     knows which one an outcome is about instead of comparing spec strings.
+   - Settings prints the reason under the offending row, in `--danger`, from
+     `hotkeyProblem` in `settings.ts` — a pure function so the sentence a
+     stuck user reads is pinned by tests rather than buried in markup. The
+     advice inverts with the mode: standard mode's failure means another
+     program owns the key, low-level mode's means the hook would not install,
+     and telling the second user to "try Low level" would be telling them to
+     do what they already did.
+   - `clip_hotkey`'s help now ends "if the test never lights up, try Hotkey
+     detection below", which is what gets a stuck user to the dropdown at all.
+2. **Are the real-world failures elevated games?** Still unconfirmed, and the
+   note's warning stands: a hook does not bypass UIPI. The Settings copy says
+   so in the user's own words ("Neither mode helps if the game runs as
+   administrator and Trix does not"), and a test asserts that sentence stays
+   there — so if elevation *is* the real cause, the user finds that out from
+   the setting instead of from a mode that quietly does nothing.
+3. **Pass through or swallow?** **Pass through**, decided by the user. The hook
+   calls `CallNextHookEx` on every event without exception, including the ones
+   it acts on. The reasoning: this mode is an escape hatch someone reaches for
+   when their key is broken, so it must only ever *add* behaviour — never
+   silently take a shortcut away from another program or from the game. The
+   accepted cost is double-firing on a contested combination (NVIDIA's replay
+   *and* a Trix clip on Alt+F10), which is visible and explicable in a way a
+   broken overlay shortcut would not be.
+4. **Default and wording.** Off by default. `Config::hotkey_mode`'s fallback
+   direction is a safety property, not a convenience: a typo in config.toml
+   must never be what installs a keyboard hook. The Settings help states the
+   anti-cheat caveat plainly, and `settings.test.ts` fails the build if the
+   words "better", "recommended" or "improved" ever appear in it.
+
+Two things deliberately **not** built. There is no liveness check for a hook
+Windows removed for overrunning `LowLevelHooksTimeout`: the callback does a
+few integer comparisons and one `PostMessageW`, and `window.rs`'s standing
+rule that the pump never blocks is what keeps it that way — if silent death is
+ever observed, that is the moment to add one, not before. And `trix replay`
+(`control::start_hotkey`) is still `RegisterHotKey`-only; it runs its own
+thread and pump, and the daemon is what users actually run.
 
 ## What was asked for
 

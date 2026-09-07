@@ -29,6 +29,26 @@ pub enum CaptureMethod {
     Duplication,
 }
 
+/// How the daemon listens for the clip and screenshot combinations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotkeyMode {
+    /// `RegisterHotKey`: ask Windows to reserve the combination. The shipped
+    /// behaviour, and the default.
+    ///
+    /// Reserving it is also what makes it fail: the call is refused outright
+    /// when another program already holds the combination, and Trix then never
+    /// sees that key again until it is rebound.
+    Standard,
+    /// `WH_KEYBOARD_LL`: watch the keyboard instead of reserving anything.
+    ///
+    /// Sees the key even when another program owns it, because there is
+    /// nothing to own — and passes every event on untouched, so whoever else
+    /// is listening keeps working too. Opt-in, because a program that watches
+    /// the keyboard is a shape some anti-cheat software is wary of, and that
+    /// risk lands on the user rather than on us.
+    LowLevel,
+}
+
 /// Engine configuration, loaded from `%APPDATA%\trix\config.toml`.
 /// Missing file or missing keys fall back to defaults; a malformed file is
 /// reported and ignored rather than aborting the daemon.
@@ -173,6 +193,27 @@ pub struct Config {
     /// times a session.
     #[serde(default = "default_true")]
     pub screenshot_sound: bool,
+    /// How both hotkeys are listened for: `"standard"` (the default) or
+    /// `"low_level"`. Unknown values fall back to `"standard"`.
+    ///
+    /// One key for both combinations, not one each. The choice is about the
+    /// *mechanism*, and a user who reaches for it is answering "my hotkey does
+    /// nothing" — a question that has never been asked about one key and not
+    /// the other, and two settings would only invite the half-configured state
+    /// where the answer is yes for clips and no for screenshots.
+    ///
+    /// Deliberately absent from `REQUIRES_REARM`: the pump re-binds both keys
+    /// the moment this changes, exactly as it does for a rebind of either
+    /// combination.
+    ///
+    /// Defaulted to standard and left there. `"low_level"` is not a better
+    /// mode, it is a different trade: it sees a combination another program
+    /// has taken, and it does that by watching every keystroke on the machine,
+    /// which is a shape some anti-cheat software distrusts. A bug we can fix
+    /// in a patch; a ban we cannot undo. So nobody gets it without choosing
+    /// it, and [`HotkeyMode::LowLevel`] carries the rest of the reasoning.
+    #[serde(default = "default_hotkey_mode")]
+    pub hotkey_mode: String,
 }
 
 impl Default for Config {
@@ -199,6 +240,7 @@ impl Default for Config {
             discord_presence: true,
             screenshot_hotkey: default_screenshot_hotkey(),
             screenshot_sound: true,
+            hotkey_mode: default_hotkey_mode(),
         }
     }
 }
@@ -212,6 +254,14 @@ const fn default_true() -> bool {
 
 fn default_screenshot_hotkey() -> String {
     "alt+f8".into()
+}
+
+/// `serde(default)` for a `String` yields `""`, which would read as an unknown
+/// value on every config file written before this key existed. That falls back
+/// to standard anyway, but it would log a warning at every startup for a
+/// choice the user never made.
+fn default_hotkey_mode() -> String {
+    "standard".into()
 }
 
 impl Config {
@@ -248,6 +298,22 @@ impl Config {
             other => {
                 tracing::warn!(capture_method = other, "unknown capture_method, using auto");
                 CaptureMethod::Auto
+            }
+        }
+    }
+
+    /// How the hotkeys are listened for (defaults to `Standard` on an unknown
+    /// value).
+    ///
+    /// The fallback direction is not arbitrary: a typo must never be what
+    /// installs a keyboard hook on somebody's machine.
+    pub fn hotkey_mode(&self) -> HotkeyMode {
+        match self.hotkey_mode.trim().to_ascii_lowercase().as_str() {
+            "standard" => HotkeyMode::Standard,
+            "low_level" => HotkeyMode::LowLevel,
+            other => {
+                tracing::warn!(hotkey_mode = other, "unknown hotkey_mode, using standard");
+                HotkeyMode::Standard
             }
         }
     }
@@ -396,6 +462,22 @@ mod tests {
         );
         assert_eq!(method(""), CaptureMethod::Auto);
         assert_eq!(method("dxgi"), CaptureMethod::Auto);
+    }
+
+    /// The one fallback in this file where the direction is a safety property
+    /// rather than a convenience: standard mode reserves a combination,
+    /// low-level mode watches the whole keyboard, and a value nobody
+    /// recognises must never be what turns the second one on.
+    #[test]
+    fn an_unreadable_hotkey_mode_falls_back_to_standard() {
+        let mode =
+            |raw: &str| Config { hotkey_mode: raw.into(), ..Config::default() }.hotkey_mode();
+        assert_eq!(Config::default().hotkey_mode(), HotkeyMode::Standard);
+        assert_eq!(mode("low_level"), HotkeyMode::LowLevel);
+        assert_eq!(mode("  LOW_LEVEL  "), HotkeyMode::LowLevel, "trimmed and case-folded");
+        assert_eq!(mode("low-level"), HotkeyMode::Standard, "a plausible guess is still unknown");
+        assert_eq!(mode("hook"), HotkeyMode::Standard);
+        assert_eq!(mode(""), HotkeyMode::Standard);
     }
 
     #[test]

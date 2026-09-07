@@ -36,6 +36,17 @@ export type Field = {
    * nothing to get out of sync.
    */
   liveTest?: true;
+  /**
+   * Which `status` field says whether this hotkey is actually listening.
+   *
+   * On the descriptor for the same reason `liveTest` is, and not derived by
+   * building `${key}_bound` at the call site: a name assembled from a string
+   * is a name TypeScript cannot check, and the day the daemon publishes a key
+   * that does not follow the pattern the warning would just quietly stop
+   * appearing. A row that declares nothing here shows no warning, which is
+   * the right default for a row nobody has wired up.
+   */
+  boundKey?: 'clip_hotkey_bound' | 'screenshot_hotkey_bound';
 };
 
 /**
@@ -133,8 +144,12 @@ export const FIELDS: Field[] = [
   { key: 'clip_dir', label: 'Clips folder', kind: 'folder', section: 'Clips', help: 'Where clips are saved. Empty means Videos\\Trix.' },
   { key: 'max_library_gb', label: 'Library limit', kind: 'number', section: 'Clips', ...span('max_library_gb'), help: 'GB. When exceeded the oldest non-favorite clips are deleted. 0 turns the limit off.' },
 
-  { key: 'clip_hotkey', label: 'Clip hotkey', kind: 'hotkey', section: 'Trix', liveTest: true, help: 'Press the combination to test it. Overlays can silently take a hotkey inside games.' },
-  { key: 'screenshot_hotkey', label: 'Screenshot hotkey', kind: 'hotkey', section: 'Trix', help: 'Saves a picture of the screen and copies it to your clipboard. Only works while Trix is armed, because the picture comes from the recording that is already running.' },
+  { key: 'clip_hotkey', label: 'Clip hotkey', kind: 'hotkey', section: 'Trix', liveTest: true, boundKey: 'clip_hotkey_bound', help: 'Press the combination to test it. Overlays can silently take a hotkey inside games -- if the test never lights up, try Hotkey detection below.' },
+  { key: 'screenshot_hotkey', label: 'Screenshot hotkey', kind: 'hotkey', section: 'Trix', boundKey: 'screenshot_hotkey_bound', help: 'Saves a picture of the screen and copies it to your clipboard. Only works while Trix is armed, because the picture comes from the recording that is already running.' },
+  { key: 'hotkey_mode', label: 'Hotkey detection', kind: 'select', section: 'Trix', options: [
+      { value: 'standard', label: 'Standard' },
+      { value: 'low_level', label: 'Low level - sees keys other programs have taken' },
+    ], help: 'Applies to both hotkeys above. Standard asks Windows to reserve your combination, and a program that got there first -- an overlay, usually -- makes that fail silently, which is what a hotkey that does nothing in game usually is. Low level watches the keyboard instead, so it still sees the key, and it passes the key on so whatever else uses it keeps working. Some anti-cheat software is wary of programs that watch the keyboard; OBS, Discord and Steam all do it, but Trix cannot promise how yours reads it. Neither mode helps if the game runs as administrator and Trix does not.' },
   { key: 'screenshot_sound', label: 'Screenshot sound', kind: 'bool', section: 'Trix', help: 'A short blip when a screenshot is saved, different from the clip sound so you can tell them apart without looking.' },
   { key: 'clip_sound', label: 'Clip sound', kind: 'bool', section: 'Trix', help: 'Plays a sound when a clip is saved, even when the Trix window is closed.' },
   { key: 'clip_sound_path', label: 'Sound file', kind: 'sound', section: 'Trix', help: 'Your own sound, or Trix\'s built-in one. mp3, wav, m4a and anything else Windows can play. Only the first 10 seconds are used.' },
@@ -205,6 +220,41 @@ export function validate(key: string, value: unknown): string | null {
  */
 export function hotkeySaveTarget(field: Field, capture: string): { key: string; value: string } {
   return { key: field.key, value: capture };
+}
+
+/**
+ * Why this hotkey row is not working, or null when it is -- or when nobody
+ * knows yet.
+ *
+ * `bound` is the daemon's tri-state (`clip_hotkey_bound` /
+ * `screenshot_hotkey_bound` on `status`): true bound, false refused, and
+ * null/undefined for "the pump has not tried yet", which every client sees
+ * for a moment at startup and forever in a build with no window. Only an
+ * explicit `false` is a problem -- warning on the unknown would put "your
+ * hotkey is taken" on screen at every launch, which is the version of this
+ * warning nobody reads by the third time.
+ *
+ * The advice depends on which mechanism failed, because the two fail for
+ * opposite reasons. Standard mode is refused when another program already
+ * owns the combination, and the answer is a different key or the low-level
+ * mode that does not need to own anything. Low-level mode is refused when
+ * Windows would not install the hook at all, and the answer is the other way
+ * round.
+ *
+ * Pure and exported for the same reason `hotkeySaveTarget` is: the web suite
+ * runs on node with no DOM, so the sentence a user reads can only be pinned
+ * by a test if it is produced by a function rather than by markup.
+ */
+export function hotkeyProblem(
+  field: Field,
+  bound: boolean | null | undefined,
+  config: Record<string, unknown>,
+): string | null {
+  if (field.kind !== 'hotkey' || bound !== false) return null;
+  const combination = String(config[field.key] ?? '').toUpperCase() || 'That combination';
+  return String(config['hotkey_mode'] ?? 'standard') === 'low_level'
+    ? `Windows would not let Trix watch the keyboard for ${combination}. Set Hotkey detection back to Standard, or pick a different combination.`
+    : `${combination} is already taken by another program, so Trix never sees it. Pick a different combination, or set Hotkey detection to Low level to hear it anyway.`;
 }
 
 /**
