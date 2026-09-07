@@ -222,8 +222,24 @@
     margin-bottom: 18px;
     border-radius: var(--r-md);
     font-size: 12.5px;
-    background: color-mix(in srgb, var(--live) 10%, transparent);
+    /* Sticky, not static. The settings list is longer than the window, and
+       the keys that need a re-arm are scattered down it -- so a notice at the
+       top of the document was, in practice, a notice you had to scroll back
+       up to find after changing the thing that raised it. `top: 0` is the top
+       of `.content`'s scrollport (App.svelte), which sits inside that
+       element's padding, so this ends flush with the top of the visible area
+       with nothing peeking above it. Nothing between here and `.content`
+       sets `transform`, `filter` or `contain`, any of which would silently
+       turn this back into a static box. */
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    /* Opaque, over `--bg` rather than `transparent`: the page scrolls
+       underneath this now, and a translucent banner would show the heading
+       sliding through it. */
+    background: color-mix(in srgb, var(--live) 10%, var(--bg));
     border: 1px solid color-mix(in srgb, var(--live) 40%, transparent);
+    box-shadow: 0 8px 16px -12px rgba(0, 0, 0, 0.9);
   }
   .notice :global(svg) { color: var(--live); }
   .spacer { margin-left: auto; }
