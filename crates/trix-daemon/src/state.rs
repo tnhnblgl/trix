@@ -59,6 +59,25 @@ pub struct DaemonStatus {
     pub ring_seconds_used: f64,
     pub ring_seconds_total: u32,
     pub clip_dir: String,
+    /// Whether the clip combination is actually listening — `None` until the
+    /// pump has tried, which is a real answer and not a defaulted one.
+    ///
+    /// Added after the fact, and the key set above is described as frozen, so
+    /// to be exact about what that means: *renaming or dropping* a published
+    /// key breaks a client, adding one cannot. A client that has never heard
+    /// of this field ignores it and behaves as it always did.
+    ///
+    /// It is here because the alternative was nothing. A hotkey Windows
+    /// refuses — another program owning Alt+F10, which NVIDIA's overlay does
+    /// on a great many machines — produced one `tracing::warn!` into a log
+    /// with no file behind it, and the user's whole experience was a key that
+    /// did nothing, forever, with no way to find out why.
+    pub clip_hotkey_bound: Option<bool>,
+    /// The same answer for the screenshot combination. Separate rather than
+    /// one "hotkeys are fine" flag: they are bound independently and either
+    /// can lose to a different program, so a single flag could only ever say
+    /// which is *worse*, and the settings page has to mark one row.
+    pub screenshot_hotkey_bound: Option<bool>,
 }
 
 impl DaemonStatus {
@@ -85,6 +104,22 @@ impl DaemonStatus {
         fields.insert("ring_seconds_total".to_string(), Value::from(self.ring_seconds_total));
         fields.insert("version".to_string(), Value::from(env!("CARGO_PKG_VERSION")));
         fields.insert("clip_dir".to_string(), Value::from(self.clip_dir.as_str()));
+        // `null` for "not tried yet", the same three-way shape `encoder` above
+        // already uses, and for the same reason: a client must be able to tell
+        // "no" from "not known", because only one of them is worth telling the
+        // user about.
+        for (key, bound) in [
+            ("clip_hotkey_bound", self.clip_hotkey_bound),
+            ("screenshot_hotkey_bound", self.screenshot_hotkey_bound),
+        ] {
+            fields.insert(
+                key.to_string(),
+                match bound {
+                    Some(bound) => Value::Bool(bound),
+                    None => Value::Null,
+                },
+            );
+        }
         Value::Object(fields)
     }
 }
@@ -880,6 +915,15 @@ impl Daemon {
     fn status_of(&self, armed: Option<&Armed>) -> DaemonStatus {
         let config = self.lock_config();
         let clip_dir = config.clip_dir_path().to_string_lossy().into_owned();
+        // Read from the pump rather than carried on `Daemon`: the pump is what
+        // binds them and the only thing that knows the outcome, and it is
+        // forbidden from calling into `Daemon` to push it here (see
+        // `window.rs`'s module comment). Both are `None` in a unit test and in
+        // `trix.exe`, neither of which starts a pump — which is the honest
+        // answer for a process that never tried.
+        let clip_hotkey_bound = crate::window::hotkey_bound(crate::window::HotkeyKind::Clip);
+        let screenshot_hotkey_bound =
+            crate::window::hotkey_bound(crate::window::HotkeyKind::Screenshot);
         match armed {
             // Armed: every field comes from the engine, so a `monitor_index`
             // changed in config since arming still reports what is *actually*
@@ -896,9 +940,15 @@ impl Daemon {
                     ring_seconds_used: engine.ring_seconds_used,
                     ring_seconds_total: engine.ring_seconds_total,
                     clip_dir,
+                    clip_hotkey_bound,
+                    screenshot_hotkey_bound,
                 }
             }
             // Idle: the config is the only truth there is.
+            //
+            // Except the hotkeys, which are bound whether or not anything is
+            // armed — clipping is what arming is *for*, so a dead hotkey is
+            // worth reporting to a user who has not armed yet most of all.
             None => DaemonStatus {
                 armed: false,
                 encoder: None,
@@ -906,6 +956,8 @@ impl Daemon {
                 ring_seconds_used: 0.0,
                 ring_seconds_total: config.replay_seconds,
                 clip_dir,
+                clip_hotkey_bound,
+                screenshot_hotkey_bound,
             },
         }
     }
@@ -944,6 +996,16 @@ impl Daemon {
     /// case where it does reach a live pump.
     pub fn clip_hotkey(&self) -> String {
         self.lock_config().clip_hotkey.clone()
+    }
+
+    /// Which mechanism the hotkeys should be listened for through.
+    ///
+    /// Read at startup to tell `window::spawn` how to bind, and again on every
+    /// `config.set` that touches it. Parsed rather than handed over as the raw
+    /// string, so an unreadable value falls back to standard in one place
+    /// (`Config::hotkey_mode`) instead of at each call site.
+    pub fn hotkey_mode(&self) -> trix_core::config::HotkeyMode {
+        self.lock_config().hotkey_mode()
     }
 
     /// Whether Discord presence should be up right now.
@@ -1234,17 +1296,32 @@ impl Daemon {
         // After the write, not before: a rebind that beat a failed write would
         // leave the running hotkey and the saved hotkey disagreeing, and
         // `config.set` is all-or-nothing everywhere else.
-        if values.contains_key("clip_hotkey") {
-            crate::window::rebind_hotkey(crate::window::HotkeyKind::Clip, &config.clip_hotkey);
-        }
-        // Same reasoning, same ordering, for the screenshot key: this is what
-        // makes the `requires_rearm: []` computed above for `screenshot_hotkey`
-        // an honest answer instead of one that is only true after a restart.
-        if values.contains_key("screenshot_hotkey") {
-            crate::window::rebind_hotkey(
-                crate::window::HotkeyKind::Screenshot,
+        //
+        // The mode is checked first and takes the whole branch, because
+        // switching it re-binds *both* combinations by itself — running the
+        // per-key rebinds underneath it would repeat work that was just done,
+        // for the same specs, with the only difference being how many times
+        // the pump is woken to do it.
+        if values.contains_key("hotkey_mode") {
+            crate::window::set_hotkey_mode(
+                config.hotkey_mode(),
+                &config.clip_hotkey,
                 &config.screenshot_hotkey,
             );
+        } else {
+            if values.contains_key("clip_hotkey") {
+                crate::window::rebind_hotkey(crate::window::HotkeyKind::Clip, &config.clip_hotkey);
+            }
+            // Same reasoning, same ordering, for the screenshot key: this is
+            // what makes the `requires_rearm: []` computed above for
+            // `screenshot_hotkey` an honest answer instead of one that is only
+            // true after a restart.
+            if values.contains_key("screenshot_hotkey") {
+                crate::window::rebind_hotkey(
+                    crate::window::HotkeyKind::Screenshot,
+                    &config.screenshot_hotkey,
+                );
+            }
         }
 
         // Read under the same lock the write above just landed into, the same
@@ -2297,10 +2374,12 @@ mod tests {
             [
                 "armed",
                 "clip_dir",
+                "clip_hotkey_bound",
                 "encoder",
                 "monitor_index",
                 "ring_seconds_total",
                 "ring_seconds_used",
+                "screenshot_hotkey_bound",
                 "version",
             ],
             "the status key set is published; a UI binds to exactly these"
@@ -2308,8 +2387,50 @@ mod tests {
 
         assert_eq!(object.get("armed"), Some(&serde_json::Value::Bool(false)));
         assert_eq!(object.get("encoder"), Some(&serde_json::Value::Null));
+        // The two hotkey fields are asserted for presence above and for their
+        // *values* in `the_hotkey_tri_state_survives_the_wire` below, not
+        // here. `status_of` reads them from process-global statics that
+        // `window.rs`'s pump tests write from other threads of this same test
+        // binary, so a value assertion on a live `Daemon` would pass or fail
+        // on test scheduling order.
         assert_eq!(object.get("clip_dir").and_then(|v| v.as_str()), Some(r"D:\Clips"));
         assert_eq!(object.get("version").and_then(|v| v.as_str()), Some(env!("CARGO_PKG_VERSION")));
+    }
+
+    /// The three answers "is this hotkey listening?" can have, as they reach a
+    /// client. Built from a `DaemonStatus` literal rather than from a live
+    /// `Daemon`, deliberately: `status_of` reads process-global statics that
+    /// `window.rs`'s pump tests write from other threads of this binary, so
+    /// only a hand-built struct can pin these values without racing them.
+    ///
+    /// `null` is the one that matters. It is what every client sees between
+    /// the socket answering and the pump binding, and what any process
+    /// without a window reports forever -- and a UI that read it as `false`
+    /// would tell users their hotkey was taken at every single launch.
+    #[test]
+    fn the_hotkey_tri_state_survives_the_wire() {
+        let status = |clip: Option<bool>, shot: Option<bool>| DaemonStatus {
+            armed: false,
+            encoder: None,
+            monitor_index: 0,
+            ring_seconds_used: 0.0,
+            ring_seconds_total: 15,
+            clip_dir: String::new(),
+            clip_hotkey_bound: clip,
+            screenshot_hotkey_bound: shot,
+        };
+        let at = |clip, shot, key: &str| status(clip, shot).to_json()[key].clone();
+        let null = serde_json::Value::Null;
+
+        assert_eq!(at(None, None, "clip_hotkey_bound"), null, "untried is null, never false");
+        assert_eq!(at(None, None, "screenshot_hotkey_bound"), null);
+        assert_eq!(at(Some(true), None, "clip_hotkey_bound"), serde_json::Value::Bool(true));
+        assert_eq!(at(Some(false), None, "clip_hotkey_bound"), serde_json::Value::Bool(false));
+        assert_eq!(
+            at(Some(false), None, "screenshot_hotkey_bound"),
+            null,
+            "the two keys are answered independently"
+        );
     }
 
     /// Nothing is armed, so there are no counters to report and the stats

@@ -23,6 +23,7 @@ pub mod clients;
 pub mod com;
 pub mod dispatch;
 pub mod folder;
+pub mod hook;
 pub mod pipe;
 pub mod presence;
 pub mod reveal;

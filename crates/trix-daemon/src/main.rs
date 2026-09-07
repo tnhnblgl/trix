@@ -226,6 +226,7 @@ fn main() -> anyhow::Result<()> {
         actions_tx,
         &daemon.clip_hotkey(),
         &daemon.screenshot_hotkey(),
+        daemon.hotkey_mode(),
         Arc::clone(&daemon.clients),
     )?);
 

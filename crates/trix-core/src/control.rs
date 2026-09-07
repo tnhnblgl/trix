@@ -104,6 +104,26 @@ pub fn acquire_single_instance() -> Result<SingleInstance> {
     }
 }
 
+/// Which modifier keys a combination requires, as plain booleans.
+///
+/// [`Hotkey`] stores its modifiers as `HOT_KEY_MODIFIERS`, which is a bitfield
+/// the *system hotkey table* understands and nothing else does. A low-level
+/// keyboard hook never sees that bitfield: it is handed one key event at a
+/// time and has to ask the OS which modifiers are physically held, so it needs
+/// the requirement in a shape it can compare that answer against. This is that
+/// shape — plain data, no Windows types — which is what lets the matching rule
+/// in `trix-daemon`'s `hook.rs` be a pure function with tests.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Modifiers {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    /// Either Windows key. `MOD_WIN` does not distinguish them and neither
+    /// does this, so the two mechanisms cannot disagree about what `win+`
+    /// means.
+    pub win: bool,
+}
+
 /// A parsed `mods+key` combination such as `alt+f10` or `ctrl+shift+c`.
 #[derive(Clone, Debug)]
 pub struct Hotkey {
@@ -184,6 +204,28 @@ impl Hotkey {
                 )
             })
     }
+
+    /// The virtual-key code this combination ends in.
+    ///
+    /// Exposed for the low-level hook, which compares it against the `vkCode`
+    /// in a `KBDLLHOOKSTRUCT`. Nothing else needs it: `register` above hands
+    /// the field straight to Windows without anyone outside reading it.
+    pub fn vk(&self) -> u32 {
+        self.vk
+    }
+
+    /// Which modifiers must be held for this combination to count.
+    ///
+    /// Exact, not "at least" — see [`Modifiers`] for why the hook needs this
+    /// instead of the raw bitfield.
+    pub fn required_modifiers(&self) -> Modifiers {
+        Modifiers {
+            ctrl: self.modifiers.0 & MOD_CONTROL.0 != 0,
+            alt: self.modifiers.0 & MOD_ALT.0 != 0,
+            shift: self.modifiers.0 & MOD_SHIFT.0 != 0,
+            win: self.modifiers.0 & MOD_WIN.0 != 0,
+        }
+    }
 }
 
 impl fmt::Display for Hotkey {
@@ -262,5 +304,35 @@ mod tests {
         assert!(Hotkey::parse("meta+f1").is_err());
         assert!(Hotkey::parse("alt+alt+f1").is_err());
         assert!(Hotkey::parse("").is_err());
+    }
+
+    /// The hook's whole view of a combination is these two accessors, so a
+    /// modifier that survives `parse` into the bitfield but not into
+    /// `required_modifiers` is a hotkey that fires on the wrong keys in
+    /// low-level mode and on the right ones in standard mode.
+    #[test]
+    fn the_hook_sees_the_same_combination_the_hotkey_table_does() {
+        let hk = Hotkey::parse("ctrl+shift+c").unwrap();
+        assert_eq!(hk.vk(), u32::from(b'C'));
+        assert_eq!(
+            hk.required_modifiers(),
+            Modifiers { ctrl: true, alt: false, shift: true, win: false }
+        );
+    }
+
+    #[test]
+    fn a_bare_function_key_requires_no_modifiers() {
+        let hk = Hotkey::parse("f10").unwrap();
+        assert_eq!(hk.vk(), 0x79);
+        assert_eq!(hk.required_modifiers(), Modifiers::default());
+    }
+
+    #[test]
+    fn win_is_reported_like_any_other_modifier() {
+        let hk = Hotkey::parse("win+alt+f4").unwrap();
+        assert_eq!(
+            hk.required_modifiers(),
+            Modifiers { ctrl: false, alt: true, shift: false, win: true }
+        );
     }
 }

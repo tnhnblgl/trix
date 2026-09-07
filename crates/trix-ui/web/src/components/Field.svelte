@@ -25,12 +25,23 @@
    * every hotkey row independent instead.
    */
   let {
-    field, config, monitors,
+    field, config, monitors, problem = null,
     onset, onpickfolder, onpicksound, ontestsound,
   }: {
     field: Field;
     config: Record<string, unknown>;
     monitors: Monitor[];
+    /**
+     * Why this setting is not currently working, or null. Rendered under the
+     * help text, in the warning colour.
+     *
+     * A string handed in rather than a condition worked out here: what is
+     * wrong with a setting is something only the page above knows (it holds
+     * `status`), and the sentence itself comes from a pure function in
+     * `settings.ts` so a test can pin the words -- this component only
+     * decides where they sit.
+     */
+    problem?: string | null;
     onset: (key: string, value: unknown) => void;
     onpickfolder: () => void;
     onpicksound: () => void;
@@ -175,6 +186,7 @@
   <div class="lt">
     <b>{field.label}</b>
     <span>{field.help}</span>
+    {#if problem}<span class="problem">{problem}</span>{/if}
   </div>
 
   <div class="rt">
@@ -281,6 +293,10 @@
      copy here would mean maintaining both. Only what is unique to a field's
      control lives here. */
   .pct { min-width: 44px; text-align: right; font-size: 12.5px; color: var(--dim); }
+  /* `!important` for the same reason `.checked` needs it in Settings.svelte:
+     app.css colours every `.lt span` as help text, and this one is not help
+     text. */
+  .problem { color: var(--danger) !important; margin-top: 4px !important; }
   .path {
     display: block;
     max-width: 280px;

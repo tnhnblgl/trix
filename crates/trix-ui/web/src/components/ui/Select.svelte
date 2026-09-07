@@ -176,6 +176,12 @@
     width: 100%;
     padding: 5px;
     display: grid;
+    /* `minmax(0, 1fr)`, not the default `auto`. An auto track is floored at
+       its content's min-content width, and an option's label is `nowrap`, so
+       one long option grew the track past the popup's own width and the text
+       ran off the side of the window. This is the line that makes the popup's
+       width the authority instead of the longest label. */
+    grid-template-columns: minmax(0, 1fr);
     gap: 1px;
     background: var(--overlay);
     border: 1px solid var(--line-strong);
@@ -197,7 +203,13 @@
     text-align: left;
     cursor: pointer;
   }
-  .opt .txt { flex: 1; }
+  /* `min-width: 0` because a flex item's default `min-width: auto` refuses to
+     shrink below its content -- the other half of the overflow above; without
+     it the ellipsis never engages and the option just gets wider. And
+     `white-space: normal` so a label too long for the popup wraps onto a
+     second line rather than being cut off mid-word: a dropdown option the
+     user cannot finish reading is worse than a two-line one. */
+  .opt .txt { flex: 1; min-width: 0; white-space: normal; }
   .opt.active { background: var(--hover); }
   .opt.on { color: var(--text); }
   .opt.on :global(svg) { color: var(--accent); }
