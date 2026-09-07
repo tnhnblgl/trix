@@ -73,6 +73,29 @@ describe('FIELDS', () => {
     }
   });
 
+  /**
+   * The two ways a hotkey dies look identical to the user and are completely
+   * different underneath, and the row has to name both or it sends half its
+   * readers the wrong way.
+   *
+   * Refused: another program already owns the combination, `RegisterHotKey`
+   * fails, and the row's own red warning says so.
+   *
+   * Intercepted: the registration succeeded, Trix really does hold the key,
+   * and something in the game takes the keystroke before Windows' hotkey
+   * table sees it. Confirmed in Euro Truck Simulator 2 -- no warning, the
+   * Test button lights up here, and the key still does nothing in the game.
+   * The first version of this copy said "if the test never lights up", which
+   * is advice the intercepted user reads and correctly concludes does not
+   * apply to them.
+   */
+  it('sends both kinds of dead hotkey to the same setting', () => {
+    const help = FIELDS.find((f) => f.key === 'clip_hotkey')!.help.toLowerCase();
+    expect(help, 'the refused case').toContain('test does nothing');
+    expect(help, 'the intercepted case: it works here and not in the game').toContain('works here');
+    expect(help, 'and where to go about either').toContain('hotkey detection');
+  });
+
   it('renders both levels as sliders in the Audio section', () => {
     for (const key of ['system_volume', 'mic_volume']) {
       const field = FIELDS.find((f) => f.key === key);

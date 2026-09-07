@@ -22,6 +22,44 @@ shared registration path in `window.rs` replacing the two that had drifted
 apart. Both `wnd_proc` hotkey arms collapsed into one, so the two mechanisms
 cannot diverge in what a press *does*.
 
+## Confirmed in the field: Euro Truck Simulator 2, 2026-09-07
+
+The first real case, on the developer's own machine. Standard mode produced no
+clips in ETS2; low-level mode produces them.
+
+**The registration had not failed.** Switching back to standard with the game
+closed produced no error toast and no warning on the row — `RegisterHotKey`
+succeeded, and Trix genuinely held the key. So this is *interception*, not
+refusal: something in or around the game took the keystroke before Windows'
+hotkey table was reached. That is the case step 1 stays silent about, and
+correctly — the daemon reports `clip_hotkey_bound: true` because it is true.
+
+Two things followed from that:
+
+- **The row's copy was wrong for the person it was written for.** It read "if
+  the test never lights up, try Hotkey detection below", and this user's test
+  *would* light up: press it in Settings, with no game in front, and the
+  hotkey table delivers it fine. The help now names both failures — "if the
+  test does nothing, or if it works here but your game ignores the key" — and
+  a test pins both halves.
+- **Elevation is not the cause here.** A low-level hook does not bypass UIPI,
+  so if ETS2 had been the elevated-game case the hook would have been exactly
+  as blind. It was not. Open decision 2 is answered for this instance, and
+  only this one.
+
+**An untested caveat, worth checking after the next reboot.** The likely
+mechanism is another program's `WH_KEYBOARD_LL` hook suppressing the key
+before the hotkey table — the Steam overlay is the obvious candidate, since
+ETS2 runs under it, and a game process does not normally install one itself.
+If that is what is happening, **hook order decides the outcome**: Windows
+calls the most recently installed low-level hook first, and Trix's hook was
+installed at the moment the mode was switched, which was after that program's.
+Reverse the order — daemon autostarted at login, overlay loaded later — and
+the suppressing hook would run first and Trix would be blind again. Nothing
+in the code can fix that; it is a property of the chain. What it means
+practically is that "it works" was established with the hook installed late,
+and the same test after a cold boot is a different test. It has not been run.
+
 The open decisions, as settled:
 
 1. **Did step 1 (visibility) happen first?** No — the mode landed first, and
@@ -46,12 +84,21 @@ The open decisions, as settled:
      do what they already did.
    - `clip_hotkey`'s help now ends "if the test never lights up, try Hotkey
      detection below", which is what gets a stuck user to the dropdown at all.
-2. **Are the real-world failures elevated games?** Still unconfirmed, and the
-   note's warning stands: a hook does not bypass UIPI. The Settings copy says
-   so in the user's own words ("Neither mode helps if the game runs as
-   administrator and Trix does not"), and a test asserts that sentence stays
-   there — so if elevation *is* the real cause, the user finds that out from
-   the setting instead of from a mode that quietly does nothing.
+2. **Are the real-world failures elevated games?** **No** — at least not the
+   first one measured. ETS2 (see above) was fixed by the hook, which it could
+   not have been if elevation were the barrier, since a hook does not bypass
+   UIPI either. The warning still stands for cases nobody has hit yet, so the
+   Settings copy keeps saying so in the user's own words ("Neither mode helps
+   if the game runs as administrator and Trix does not"), and a test asserts
+   that sentence stays there.
+
+   Worth noting what the evidence actually was, because the note asked for
+   exactly this and got it: the failure was **interception**, not refusal and
+   not elevation — a third possibility this note did not list when it was
+   written. It assumed a hotkey that does nothing means a registration that
+   was refused, which is why the "make the failure visible" step was ranked
+   ahead of the mode. On this case, visibility would have reported everything
+   as fine.
 3. **Pass through or swallow?** **Pass through**, decided by the user. The hook
    calls `CallNextHookEx` on every event without exception, including the ones
    it acts on. The reasoning: this mode is an escape hatch someone reaches for
