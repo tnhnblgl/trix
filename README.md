@@ -6,10 +6,10 @@
 
 **A GPU-resident modern game clip recorder for Windows, for people whose PC cannot spare the frames.**
 
-[![Version](https://img.shields.io/badge/version-1.0.0-2b7fff)](https://github.com/tnhnblgl/trix/releases)
+[![Version](https://img.shields.io/badge/version-1.2.0-2b7fff)](https://github.com/tnhnblgl/trix/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6)](#requirements)
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-CE422B)](https://www.rust-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-548%20passing-3fb950)](#verification)
+[![Tests](https://img.shields.io/badge/tests-601%20passing-3fb950)](#verification)
 [![License](https://img.shields.io/badge/license-MIT-3fb950)](LICENSE)
 
 </div>
@@ -168,6 +168,8 @@ invisible but a stalled capture thread back-pressures the compositor and stutter
 - **Audio** — system sound and microphone on independent levels; 0 is a real off switch, not a
   mute, and Trix never opens the device at 0.
 - **GPU priority** defaults to below-normal, so contention costs a capture frame, not your fps.
+- **Two ways to hear a hotkey** — the system hotkey table, or a low-level keyboard hook for the
+  keys a game or an overlay takes first. Trix says which combinations actually bound.
 - **Tray daemon** with a Tauri desktop app over a documented control socket.
 - **Discord presence**, over Discord's local named pipe — no network, no clip data.
 - **In-app updates**, verified against a published `SHA256SUMS.txt`.
@@ -240,7 +242,7 @@ runtime npm dependency (`@tauri-apps/api`). The frontend bundle is 120 KB of JS 
 
 ## Verification
 
-**548 tests pass, none fail** — 365 across the Rust workspace, 183 in the frontend.
+**601 tests pass, none fail** — 401 across the Rust workspace, 200 in the frontend.
 
 ```bash
 cargo test --workspace
@@ -278,6 +280,47 @@ owned by the Discord client on the same PC and sends nothing about you or your c
 
 Exactly one crate in the workspace has an HTTP client at all, and it is reachable from a single
 file — the updater. Everything else Trix does happens on your machine.
+
+## Troubleshooting
+
+Two things that look like Trix being broken, and are not. Both have a setting.
+
+### Windows draws a yellow border around my screen
+
+That border is Windows' capture indicator, and Trix cannot switch it off. It is a property of the
+*display*, not of the recorder: any running application can ask for it, and a `true` from anything
+else beats Trix's `false`. So the border can appear because of a program that is not Trix and stay
+there for as long as Trix is capturing.
+
+**Settings → Capture → Capture method → Desktop Duplication.** A different capture API that is not
+subject to the border at all. It costs the mouse cursor — clips and screenshots taken this way have
+no pointer in them — and that is the whole of the trade. It records at full speed; if you tried it
+before 1.1.1 and found it choppy, that was a bug in Trix and it is fixed.
+
+### I press my clip key in a game and nothing happens
+
+There are two different faults behind this and they need opposite diagnoses.
+
+The combination may already belong to another program — NVIDIA's overlay owns Alt+F10 on a great
+many machines. `RegisterHotKey` is refused outright in that case and Trix never sees the key again.
+Since 1.2.0 the Clip hotkey row says so in red instead of leaving you with a key that quietly does
+nothing, so look there first.
+
+Or the reservation succeeded and something takes the keystroke before Windows' hotkey table is
+reached. This one is harder to spot, because nothing is wrong: no warning appears, and the row's
+Test button still lights up when you press the combination in Settings, where no game is in front.
+Only the game ignores you. Confirmed in Euro Truck Simulator 2, where Trix held the key throughout
+and never saw a single press.
+
+**Settings → Trix → Hotkey detection → Low level.** It watches the keyboard directly rather than
+reserving anything, so it catches the key in both cases, and it passes every key onward, so whatever
+else is bound to that combination keeps working — turning it on can only add behaviour.
+
+It is off by default deliberately. Software that watches every keystroke is a shape some anti-cheat
+programs distrust; OBS, Discord, Steam and Medal all ship one, which is precedent rather than a
+guarantee, and the risk lands on the user rather than on us. A bug we can fix in a patch; a ban we
+cannot undo. Neither setting helps if the game runs as administrator and Trix does not — a low-level
+hook does not bypass UIPI any more than a hotkey does.
 
 ## Known limits
 
