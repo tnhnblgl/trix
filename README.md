@@ -6,7 +6,7 @@
 
 **A GPU-resident modern game clip recorder for Windows, for people whose PC cannot spare the frames.**
 
-[![Version](https://img.shields.io/badge/version-1.2.0-2b7fff)](https://github.com/tnhnblgl/trix/releases)
+[![Version](https://img.shields.io/badge/version-1.2.2-2b7fff)](https://github.com/tnhnblgl/trix/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6)](#requirements)
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-CE422B)](https://www.rust-lang.org/)
 [![Tests](https://img.shields.io/badge/tests-601%20passing-3fb950)](#verification)

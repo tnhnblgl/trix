@@ -7,6 +7,22 @@ a file when you press a key. Capture and encoding run on the GPU, so the
 cost to your game is close to nothing, and the app itself stays out of the
 way while you play.
 
+
+FIXED IN 1.2.2
+--------------
+
+If Trix was set to start with Windows, a black window full of log lines
+opened at every login. That window was the Trix background process, which
+was built as a console program: anything that launches one of those directly
+gets a console with it, and the Windows startup list launches it directly.
+It is built as a windowed program now and starts out of sight.
+
+One thing to check if you unzipped this version into a new folder rather
+than over the old one: the startup list still points at the copy you had
+before, so that is the one Windows keeps opening. Turn "Start with Windows"
+off and on again in Settings and it will point here instead.
+
+
 FIXED IN 1.2.1
 --------------
 
