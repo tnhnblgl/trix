@@ -198,7 +198,7 @@
     <Button variant="primary" onclick={() => (step = 2)}>Next</Button>
   {:else if step === 2}
     <h2>Confirm your clip hotkey</h2>
-    <p class="hint">Press it now. Some overlays quietly take a hotkey inside games, so this checks Trix really gets it. Click the keys to pick a different combination.</p>
+    <p class="hint">Press it now. Some overlays quietly take a hotkey inside games, so this checks Trix really gets it.</p>
     <div class="hkrow">
       <KeycapInput
         combo={capture ?? hotkey}
@@ -227,7 +227,7 @@
       {:else}
         <span class="dot"></span>
       {/if}
-      <span>{problem ?? (heard ? 'Trix received it.' : 'To change the keybind, click on the area above and press a key sequence')}</span>
+      <span>{problem ?? (heard ? 'Trix received it.' : 'Waiting for a press. Click the keys above to pick a different combination.')}</span>
     </p>
     <Button variant="primary" onclick={() => (step = 3)}>Next</Button>
   {:else}

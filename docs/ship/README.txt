@@ -1,4 +1,4 @@
-Trix 1.2.1
+Trix 1.2.2
 ==========
 
 A clip recorder for Windows, for people whose PC cannot spare the frames.

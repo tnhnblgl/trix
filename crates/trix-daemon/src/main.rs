@@ -12,7 +12,11 @@
 //! command line, installing the console-control handler, and the shutdown
 //! watcher that calls `std::process::exit`.
 
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::sync::{Arc, OnceLock};
+
+use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
 
 use trix_core::config::Config;
 use trix_core::control;
@@ -161,7 +165,35 @@ fn disarm_within_budget(daemon: Arc<Daemon>) {
     }
 }
 
+/// Borrows the console of whatever launched this process, when there is one.
+///
+/// The daemon is a windowed binary in release now (the `windows_subsystem`
+/// attribute above). It has to be: autostart registers *this exe* in
+/// `HKCU\...\Run` (`autostart.rs`), Windows launches a Run entry as a bare
+/// command with no creation flags, and a console-subsystem binary launched
+/// that way is handed a console window — so every login opened a black window
+/// full of log lines. `trix-ui` avoids that when it spawns us by passing
+/// `CREATE_NO_WINDOW`; a Run value is a string, with nowhere to put one.
+///
+/// The cost of a windowed binary is that there is no console at all, and
+/// `tracing` writes to stdout — so running `trix-daemon.exe` in a terminal to
+/// find out why something is broken would print nothing, and that output is
+/// the daemon's only diagnostic channel. `ATTACH_PARENT_PROCESS` gets it back:
+/// the parent is a shell when a person ran us, and `winlogon` at login, where
+/// there is no console to attach and this fails. That failure is the normal
+/// case and is why the result is dropped rather than reported.
+///
+/// Must run before [`init_tracing`], which resolves stdout when the subscriber
+/// is installed; attaching afterwards would leave the writer pointed at the
+/// nothing that was there first.
+fn attach_parent_console() {
+    unsafe {
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
 fn main() -> anyhow::Result<()> {
+    attach_parent_console();
     init_tracing();
 
     let config = Config::load();
