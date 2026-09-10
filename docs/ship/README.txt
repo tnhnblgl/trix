@@ -1,4 +1,4 @@
-Trix 1.2.0
+Trix 1.2.1
 ==========
 
 A clip recorder for Windows, for people whose PC cannot spare the frames.
@@ -6,6 +6,11 @@ Trix keeps the last few seconds of your screen in memory and writes them to
 a file when you press a key. Capture and encoding run on the GPU, so the
 cost to your game is close to nothing, and the app itself stays out of the
 way while you play.
+
+FIXED IN 1.2.1
+--------------
+
+Wizard hotkey press not detecting is fixed
 
 
 NEW IN 1.2.0

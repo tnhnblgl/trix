@@ -227,7 +227,7 @@
       {:else}
         <span class="dot"></span>
       {/if}
-      <span>{problem ?? (heard ? 'Trix received it.' : 'Waiting for a press...')}</span>
+      <span>{problem ?? (heard ? 'Trix received it.' : 'To change the keybind, click on the area above and press a key sequence')}</span>
     </p>
     <Button variant="primary" onclick={() => (step = 3)}>Next</Button>
   {:else}
