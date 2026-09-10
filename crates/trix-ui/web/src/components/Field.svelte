@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDaemonEvent } from '../lib/ipc';
-  import { CUSTOM_TIER, hotkeySaveTarget, hotkeySeed, tierFor, tierOptions, type Field } from '../lib/settings';
+  import { CUSTOM_TIER, comboFromEvent, hotkeySaveTarget, hotkeySeed, tierFor, tierOptions, type Field } from '../lib/settings';
   import type { Monitor } from '../lib/types';
   import Button from './ui/Button.svelte';
   import KeycapInput from './ui/KeycapInput.svelte';
@@ -89,16 +89,12 @@
   }
 
   function captureHotkey(e: KeyboardEvent) {
+    // Unconditional, before the combination is worked out: a bare Alt press
+    // still reaches this handler, and letting that one through would move
+    // focus to the window menu mid-recording.
     e.preventDefault();
-    const parts: string[] = [];
-    if (e.ctrlKey) parts.push('ctrl');
-    if (e.altKey) parts.push('alt');
-    if (e.shiftKey) parts.push('shift');
-    if (e.metaKey) parts.push('win');
-    const key = e.key.toLowerCase();
-    if (['control', 'alt', 'shift', 'meta'].includes(key)) return;
-    parts.push(key);
-    capture = parts.join('+');
+    const combo = comboFromEvent(e);
+    if (combo !== null) capture = combo;
   }
 
   /** This row's Save button: commit the captured combo, then clear it so the row falls back to showing the saved value. */

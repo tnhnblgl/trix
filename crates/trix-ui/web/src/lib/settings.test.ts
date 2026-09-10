@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BITRATE_TIERS, CUSTOM_TIER, FIELDS, READ_ONLY_EXTRAS, SECTIONS, hotkeyProblem, hotkeySaveTarget, hotkeySeed, tierFor, tierOptions, unknownKeys, validate } from './settings';
+import { BITRATE_TIERS, CUSTOM_TIER, FIELDS, READ_ONLY_EXTRAS, SECTIONS, clipHotkeyProblem, comboFromEvent, hotkeyProblem, hotkeySaveTarget, hotkeySeed, tierFor, tierOptions, unknownKeys, validate } from './settings';
 
 describe('FIELDS', () => {
   it('covers every config key the daemon has today', () => {
@@ -404,6 +404,76 @@ describe('hotkeyProblem', () => {
     expect(rows.length).toBeGreaterThan(0);
     for (const row of rows) {
       expect(row.boundKey, `${row.key} has no boundKey`).toBe(`${row.key}_bound`);
+    }
+  });
+});
+
+describe('clipHotkeyProblem', () => {
+  const standard = { clip_hotkey: 'alt+f10', hotkey_mode: 'standard' };
+
+  /**
+   * `FirstRun.svelte` renders the clip hotkey row without the settings list
+   * around it, so it has no `Field` to hand in. This exists so it does not
+   * grow a second opinion about which descriptor the clip hotkey is -- the
+   * shape of mistake `liveTest` and `boundKey` were introduced to stop.
+   */
+  it('answers for the clip hotkey without being handed its descriptor', () => {
+    const direct = hotkeyProblem(FIELDS.find((f) => f.key === 'clip_hotkey')!, false, standard);
+    expect(clipHotkeyProblem(false, standard)).toBe(direct);
+    expect(clipHotkeyProblem(false, standard)).toContain('ALT+F10');
+  });
+
+  /**
+   * The setup wizard shows this the moment it loads, before the user has
+   * pressed anything. Warning on the tri-state's unknown would put "your
+   * hotkey is taken" in front of every new user during the seconds before the
+   * pump reports, which is the version of the warning nobody believes.
+   */
+  it('stays quiet while the hotkey works, and while nobody knows yet', () => {
+    expect(clipHotkeyProblem(true, standard)).toBeNull();
+    expect(clipHotkeyProblem(null, standard)).toBeNull();
+    expect(clipHotkeyProblem(undefined, standard)).toBeNull();
+  });
+});
+
+describe('comboFromEvent', () => {
+  /**
+   * Not a real `KeyboardEvent`: the web suite runs on node with no DOM. Only
+   * these five fields are read, which is the reason this function was pulled
+   * out of `Field.svelte`'s handler in the first place.
+   */
+  function press(key: string, held: Partial<KeyboardEvent> = {}): KeyboardEvent {
+    return { key, ctrlKey: false, altKey: false, shiftKey: false, metaKey: false, ...held } as KeyboardEvent;
+  }
+
+  it('spells a combination the way the daemon parses one', () => {
+    expect(comboFromEvent(press('F10', { altKey: true }))).toBe('alt+f10');
+    expect(comboFromEvent(press('F10'))).toBe('f10');
+  });
+
+  /**
+   * `win`, not `meta`: this string is handed straight to `config.set` and
+   * parsed by `control::Hotkey::parse`, which knows the Windows key by the
+   * name the user sees on it.
+   */
+  it('calls the Windows key win', () => {
+    expect(comboFromEvent(press('F10', { metaKey: true }))).toBe('win+f10');
+  });
+
+  /** Fixed order, so the same physical press never saves two different strings. */
+  it('orders the modifiers the same way every time', () => {
+    const all = { ctrlKey: true, altKey: true, shiftKey: true, metaKey: true };
+    expect(comboFromEvent(press('F10', all))).toBe('ctrl+alt+shift+win+f10');
+  });
+
+  /**
+   * The reason this returns null rather than a string. Alt goes down before
+   * F10 does, so a recorder that took every event would save `alt` the
+   * instant the user reached for the combination they meant.
+   */
+  it('names nothing while only a modifier is held', () => {
+    for (const key of ['Control', 'Alt', 'Shift', 'Meta']) {
+      expect(comboFromEvent(press(key, { altKey: true })), key).toBeNull();
     }
   });
 });

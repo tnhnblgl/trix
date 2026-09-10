@@ -258,6 +258,22 @@ export function hotkeyProblem(
 }
 
 /**
+ * `hotkeyProblem` for the clip hotkey, for a caller that renders that one row
+ * without the settings list around it.
+ *
+ * Looks the descriptor up rather than taking one, so `FirstRun.svelte` gets
+ * the warning without also getting a second opinion about which field the
+ * clip hotkey is -- the mistake `liveTest` and `boundKey` exist to prevent.
+ */
+export function clipHotkeyProblem(
+  bound: boolean | null | undefined,
+  config: Record<string, unknown>,
+): string | null {
+  const field = FIELDS.find((f) => f.key === 'clip_hotkey');
+  return field ? hotkeyProblem(field, bound, config) : null;
+}
+
+/**
  * What a `hotkey` field's keycap recorder seeds `capture` with when the user
  * clicks in to arm it -- the field's own current value, not another field's.
  * Companion to `hotkeySaveTarget` above, extracted for the same reason: this
@@ -266,4 +282,31 @@ export function hotkeyProblem(
  */
 export function hotkeySeed(field: Field, config: Record<string, unknown>): string {
   return String(config[field.key] ?? '');
+}
+
+/**
+ * The combination a key event names, or null for an event that names none.
+ *
+ * One definition for both recorders -- the settings row and the setup step.
+ * Two copies would be two chances to disagree about what the Windows key is
+ * called or which keys count as modifiers, and the daemon parses exactly one
+ * grammar (`control::Hotkey::parse`).
+ *
+ * Null while only a modifier is held, which is what lets a recorder keep
+ * waiting rather than save `alt` as a hotkey the instant Alt goes down.
+ *
+ * Pure and exported for the same reason `hotkeySaveTarget` is: the web suite
+ * runs on node with no DOM, so this can only be pinned by a test if it is a
+ * function rather than a handler body inside a component.
+ */
+export function comboFromEvent(e: KeyboardEvent): string | null {
+  const key = e.key.toLowerCase();
+  if (['control', 'alt', 'shift', 'meta'].includes(key)) return null;
+  const parts: string[] = [];
+  if (e.ctrlKey) parts.push('ctrl');
+  if (e.altKey) parts.push('alt');
+  if (e.shiftKey) parts.push('shift');
+  if (e.metaKey) parts.push('win');
+  parts.push(key);
+  return parts.join('+');
 }
