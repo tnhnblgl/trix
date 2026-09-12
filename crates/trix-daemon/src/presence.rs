@@ -526,6 +526,17 @@ mod tests {
         log.lock().expect("the call log").len()
     }
 
+    /// How many activity publishes the log holds so far. Reconnect tests wait
+    /// on this rather than on a connect counter: connecting is what the fake
+    /// records first, publishing is what they actually assert about.
+    fn publishes(log: &Arc<Mutex<Vec<Call>>>) -> usize {
+        log.lock()
+            .expect("the call log")
+            .iter()
+            .filter(|call| matches!(call, Call::Publish(_)))
+            .count()
+    }
+
     /// The happy path: the setting is on, Discord answers, one activity goes
     /// out carrying a real timestamp.
     #[test]
@@ -639,15 +650,15 @@ mod tests {
     fn a_failed_ping_reconnects_and_keeps_the_clock() {
         let log = Arc::new(Mutex::new(Vec::new()));
         let ping_fails = Arc::new(AtomicBool::new(true));
-        let connects = Arc::new(Mutex::new(0usize));
-        let (log_for_connect, connects_for_connect) = (Arc::clone(&log), Arc::clone(&connects));
+        // No connect counter: this test measures publishes, and a second
+        // counter nothing reads is what the assertion below used to wait on.
+        let log_for_connect = Arc::clone(&log);
         let ping_for_connect = Arc::clone(&ping_fails);
 
         spawn_with(
             || Some(true),
             brisk(),
             move || {
-                *connects_for_connect.lock().expect("the connect count") += 1;
                 Ok(Box::new(Fake {
                     log: Arc::clone(&log_for_connect),
                     ping_fails: Arc::clone(&ping_for_connect),
@@ -656,9 +667,17 @@ mod tests {
         )
         .expect("the presence thread");
 
+        // Waits on the publishes, not on `connects`. The connect closure bumps
+        // that counter before it hands back the session, so the reconnect is
+        // counted while the `Publish` this test goes on to assert about has
+        // not been logged yet — a race that failed roughly one run in thirteen
+        // under `--test-threads=8`. The publish count is the thing being
+        // measured, so waiting on it is both correct and what makes the
+        // assertion below a check rather than a second guess at the timing.
         assert!(
-            until(|| *connects.lock().expect("the connect count") >= 2),
-            "a failing ping must be followed by a reconnect"
+            until(|| publishes(&log) >= 2),
+            "a failing ping must be followed by a reconnect that republishes: {:?}",
+            log.lock().expect("the call log")
         );
         ping_fails.store(false, Ordering::SeqCst);
 

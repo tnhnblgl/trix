@@ -61,7 +61,15 @@ fn init_tracing() {
 /// process the moment that handler returns. A 4 s budget plus this watcher's
 /// 100 ms poll would signal at ~4100 ms: the handler has already given up and
 /// the mux dies mid-write, which is the exact loss the disarm was added to
-/// prevent. Three seconds leaves roughly 900 ms of margin.
+/// prevent.
+///
+/// Count the whole path before changing this, not just the budget. The watcher
+/// polls at 100 ms, spends up to this budget on the disarm, and *then* waits up
+/// to 500 ms in `wait_for_exit` for the tray icon to go — `mark_finalized()` is
+/// behind all three. Three seconds puts the worst case at ~3600 ms, so the real
+/// margin is ~400 ms, not the ~900 ms the budget alone suggests. Raising this to
+/// 3.5 s would signal at ~4100 ms and lose the mux, which is why the arithmetic
+/// is written out here.
 const SHUTDOWN_DISARM_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Polls `control::shutdown_requested()`, disarms within a budget, and exits

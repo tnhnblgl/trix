@@ -90,9 +90,19 @@ impl ClientHandler for Daemon {
                 // hotkey path calls `Daemon::screenshot` directly and never comes
                 // through this function, so a screenshot taken with the hotkey
                 // would reach disk without any client being told.
-                Ok(meta) => {
-                    Response::ok(request.id, serde_json::to_value(&meta).unwrap_or_default())
-                }
+                // Matched rather than `unwrap_or_default()`, which answered
+                // `ok` with a `null` payload — a client would read that as a
+                // screenshot it could not find any detail about, rather than
+                // as the failure it is. `ShotMeta` is strings and integers so
+                // this cannot actually happen, which is exactly what the four
+                // sibling arms in this file say before taking the same care.
+                Ok(meta) => match serde_json::to_value(&meta) {
+                    Ok(data) => Response::ok(request.id, data),
+                    Err(e) => {
+                        tracing::error!(error = %e, "could not serialize a saved screenshot");
+                        Response::err(request.id, "the screenshot could not be serialized")
+                    }
+                },
                 // Broadcast the failure too, as `arm` and `clip` do. Like theirs,
                 // this `error` event is socket-only: the success arm above
                 // already explains why a hotkey screenshot never reaches this
