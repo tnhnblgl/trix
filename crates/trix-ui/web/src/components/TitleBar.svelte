@@ -2,6 +2,7 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { app } from '../lib/state.svelte';
   import IconButton from './ui/IconButton.svelte';
+  import Logo from './Logo.svelte';
 
   const win = getCurrentWindow();
   let maximized = $state(false);
@@ -30,7 +31,7 @@
 </script>
 
 <header class="tb">
-  <div class="logo">T</div>
+  <Logo />
   <span class="name">TRIX</span>
 
   <button
@@ -76,17 +77,6 @@
     flex: 0 0 40px;
     background: var(--surface);
     border-bottom: 1px solid var(--line);
-  }
-  .logo {
-    width: 20px;
-    height: 20px;
-    display: grid;
-    place-items: center;
-    border-radius: var(--r-sm);
-    background: var(--accent);
-    color: var(--accent-ink);
-    font-size: 11px;
-    font-weight: 800;
   }
   .name { font-size: 12px; font-weight: 600; letter-spacing: 0.05em; }
   .grab { flex: 1; align-self: stretch; }
