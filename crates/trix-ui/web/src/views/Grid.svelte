@@ -132,6 +132,7 @@
           onopen={() => { app.selected = i; app.view = 'clip'; }}
           onfavorite={() => app.setFavorite(clip.id, !clip.favorite)}
           onrename={(title) => app.rename(clip.id, title)}
+          onreveal={() => app.reveal(clip.id)}
           ondelete={() => { app.selected = i; void app.remove(clip.id); }} />
       {/if}
     {/each}

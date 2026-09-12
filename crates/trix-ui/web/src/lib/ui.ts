@@ -64,6 +64,32 @@ export function pointerRatio(
 }
 
 /**
+ * Where a right-click menu of `width` x `height` goes for a click at `(x, y)`,
+ * in viewport pixels.
+ *
+ * Down and to the right of the pointer, the way Windows opens one, unless that
+ * would run off the window -- then it opens up, or to the left, of the pointer
+ * instead. A menu larger than the window in either direction is pinned to the
+ * `margin` from the top or left edge, so its first items stay reachable.
+ */
+export function placeMenu(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  viewWidth: number,
+  viewHeight: number,
+  margin = 4,
+): { left: number; top: number } {
+  const left = x + width + margin > viewWidth ? x - width : x;
+  const top = y + height + margin > viewHeight ? y - height : y;
+  return {
+    left: clamp(left, margin, Math.max(margin, viewWidth - width - margin)),
+    top: clamp(top, margin, Math.max(margin, viewHeight - height - margin)),
+  };
+}
+
+/**
  * `value` moved `delta` steps.
  *
  * Snapped after moving, not before, so a value the daemon handed back that is

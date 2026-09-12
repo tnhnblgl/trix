@@ -10,13 +10,29 @@
   import TitleBar from './components/TitleBar.svelte';
   import Button from './components/ui/Button.svelte';
   import { app, updates, wireDaemon, wireUpdates } from './lib/state.svelte';
+  import { isTypingTarget } from './lib/keys';
 
   // The same page the Rust side checks every opened URL against.
   const RELEASES_URL = 'https://github.com/tnhnblgl/trix/releases';
 
   wireDaemon();
   wireUpdates();
+
+  /**
+   * No webview right-click menu anywhere in the app.
+   *
+   * Its "Save image as", "Copy image link" and "More tools" belong to a web
+   * page, not to Trix. Clip and screenshot cards open their own menu and call
+   * `preventDefault` themselves; this catches everything else, so right-click
+   * elsewhere does nothing. A text box keeps the native menu -- Cut, Copy and
+   * Paste are what anyone right-clicking inside one is after.
+   */
+  function oncontextmenu(e: MouseEvent) {
+    if (!isTypingTarget(e.target)) e.preventDefault();
+  }
 </script>
+
+<svelte:window {oncontextmenu} />
 
 <div class="app">
   <TitleBar />

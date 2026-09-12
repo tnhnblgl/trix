@@ -4,12 +4,39 @@
   import { formatBytes } from '../lib/clips';
   import type { ShotMeta } from '../lib/types';
   import IconButton from './ui/IconButton.svelte';
+  import Menu, { type MenuItem } from './ui/Menu.svelte';
 
-  let { shot, selected, onopen }: {
+  let { shot, selected, onopen, onselect }: {
     shot: ShotMeta;
     selected: boolean;
     onopen: () => void;
+    onselect: () => void;
   } = $props();
+
+  /** Where the card was right-clicked, while its menu is open. */
+  let menuAt = $state<{ x: number; y: number } | null>(null);
+
+  /** The buttons on the tile, plus Open. */
+  const items: MenuItem[] = [
+    { id: 'open', label: 'Open' },
+    { id: 'copy', label: 'Copy', icon: 'copy' },
+    { id: 'reveal', label: 'Show in folder', icon: 'folder' },
+    { id: 'delete', label: 'Delete', icon: 'trash', danger: true, separatorBefore: true },
+  ];
+
+  function pick(id: string) {
+    menuAt = null;
+    if (id === 'open') onopen();
+    else if (id === 'copy') app.copyShot(shot.id);
+    else if (id === 'reveal') app.revealShot(shot.id);
+    else if (id === 'delete') app.deleteShot(shot.id);
+  }
+
+  function oncontextmenu(e: MouseEvent) {
+    e.preventDefault();
+    onselect();
+    menuAt = { x: e.clientX, y: e.clientY };
+  }
 
   const dir = $derived(app.status?.clip_dir ?? '');
   const taken = $derived(new Date(shot.created).toLocaleString());
@@ -25,7 +52,10 @@
   });
 </script>
 
-<div class="card" class:selected>
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<!-- The right-click is a pointer shortcut to the tile's own buttons, not the
+     only way to reach them, so the card needs no role for it. -->
+<div class="card" class:selected {oncontextmenu}>
   <button type="button" class="hit" onclick={onopen} aria-label={`Open screenshot from ${taken}`}>
     <img {src} alt="" loading="lazy" onerror={() => { if (dir) src = shotUrl(dir, shot.id); }} />
   </button>
@@ -44,6 +74,13 @@
     <IconButton icon="folder" label="Show in folder" onclick={() => app.revealShot(shot.id)} />
     <IconButton icon="trash" label="Delete" onclick={() => app.deleteShot(shot.id)} />
   </div>
+
+  <!-- `fixed`, so the card's `overflow: hidden` does not clip it: only a
+       transform, filter or `will-change` on an ancestor would, and neither
+       this card nor anything above it sets one. -->
+  {#if menuAt}
+    <Menu {items} at={menuAt} onpick={pick} onclose={() => (menuAt = null)} />
+  {/if}
 </div>
 
 <style>

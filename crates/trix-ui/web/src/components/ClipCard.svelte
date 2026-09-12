@@ -3,10 +3,10 @@
   import type { ClipMeta } from '../lib/types';
   import Icon from './ui/Icon.svelte';
   import IconButton from './ui/IconButton.svelte';
-  import Menu from './ui/Menu.svelte';
+  import Menu, { type MenuItem } from './ui/Menu.svelte';
 
   let {
-    clip, clipDir, selected = false, onopen, onselect, onfavorite, onrename, ondelete,
+    clip, clipDir, selected = false, onopen, onselect, onfavorite, onrename, onreveal, ondelete,
   }: {
     clip: ClipMeta;
     clipDir: string;
@@ -15,20 +15,48 @@
     onselect: () => void;
     onfavorite: () => void;
     onrename: (title: string) => void;
+    onreveal: () => void;
     ondelete: () => void;
   } = $props();
 
   let menuOpen = $state(false);
+  /** Where the card was right-clicked, while its right-click menu is open. */
+  let menuAt = $state<{ x: number; y: number } | null>(null);
   let renaming = $state(false);
   let draft = $state('');
 
-  function pick(id: string) {
+  /** One list for the `⋯` menu and the right-click menu, so they cannot drift apart. */
+  const items: MenuItem[] = $derived([
+    { id: 'open', label: 'Open' },
+    { id: 'favorite', label: clip.favorite ? 'Unfavourite' : 'Favourite', icon: clip.favorite ? 'star-filled' : 'star' },
+    { id: 'rename', label: 'Rename', icon: 'pencil' },
+    { id: 'reveal', label: 'Show in folder', icon: 'folder' },
+    { id: 'delete', label: 'Delete', icon: 'trash', danger: true, separatorBefore: true },
+  ]);
+
+  function closeMenus() {
     menuOpen = false;
-    if (id === 'favorite') onfavorite();
+    menuAt = null;
+  }
+
+  function pick(id: string) {
+    closeMenus();
+    if (id === 'open') onopen();
+    else if (id === 'favorite') onfavorite();
     else if (id === 'rename') {
       draft = clip.title;
       renaming = true;
-    } else if (id === 'delete') ondelete();
+    } else if (id === 'reveal') onreveal();
+    else if (id === 'delete') ondelete();
+  }
+
+  function oncontextmenu(e: MouseEvent) {
+    // The rename box keeps the webview's own Cut/Copy/Paste menu.
+    if (renaming) return;
+    e.preventDefault();
+    onselect();
+    menuOpen = false;
+    menuAt = { x: e.clientX, y: e.clientY };
   }
 
   function commit() {
@@ -39,7 +67,11 @@
   }
 </script>
 
-<div class="card" class:selected class:menuOpen>
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<!-- The right-click is a pointer shortcut to the `⋯` menu's own items, not
+     the only way to reach them, so the card needs no role for it. -->
+<div class="card" class:selected class:menuOpen={menuOpen || menuAt !== null} class:rightClicked={menuAt !== null}
+  {oncontextmenu}>
   <!-- `aria-label`, because nothing inside this button can name it: the
        thumbnail is `alt=""` (it is the clip, not a description of it) and the
        only other child is the duration badge, so without this the card
@@ -85,14 +117,7 @@
           <IconButton icon="dots" label="More actions for {clip.title}" size={14}
             onclick={() => (menuOpen = !menuOpen)} />
           {#if menuOpen}
-            <Menu
-              items={[
-                { id: 'favorite', label: clip.favorite ? 'Unfavourite' : 'Favourite', icon: clip.favorite ? 'star-filled' : 'star' },
-                { id: 'rename', label: 'Rename', icon: 'pencil' },
-                { id: 'delete', label: 'Delete', icon: 'trash', danger: true, separatorBefore: true },
-              ]}
-              onpick={pick}
-              onclose={() => (menuOpen = false)} />
+            <Menu {items} onpick={pick} onclose={closeMenus} />
           {/if}
         </span>
       {/if}
@@ -104,6 +129,10 @@
       {formatBytes(clip.bytes)} &middot; {clip.width}x{clip.height}{#if clip.fps} &middot; {clip.fps} fps{/if}
     </span>
   </div>
+
+  {#if menuAt}
+    <Menu {items} at={menuAt} onpick={pick} onclose={closeMenus} />
+  {/if}
 </div>
 
 <style>
@@ -122,6 +151,12 @@
      Ranking the whole card is the fix -- the menu's own z-index never could,
      from inside. Grid items take `z-index` with no `position`. */
   .card.menuOpen { z-index: 1; }
+  /* The right-click menu is `position: fixed` at the pointer, and the hover
+     lift's `transform` would make this card the box `fixed` is measured from
+     -- the menu would open offset by the card's own position in the grid.
+     The transition goes too: easing back down would keep a transform in
+     place for its whole duration, and the menu would jump when it ended. */
+  .card.rightClicked { transform: none; transition: none; }
 
   .thumb {
     position: relative;

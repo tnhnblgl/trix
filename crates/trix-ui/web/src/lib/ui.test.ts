@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clamp, formatCombo, nextIndex, pointerRatio, ratioToValue, resolveStepperInput, snapToStep, stepBy, valueToRatio } from './ui';
+import { clamp, formatCombo, nextIndex, placeMenu, pointerRatio, ratioToValue, resolveStepperInput, snapToStep, stepBy, valueToRatio } from './ui';
 
 describe('clamp', () => {
   it('passes a value already inside the range through', () => {
@@ -63,6 +63,36 @@ describe('valueToRatio', () => {
 
   it('returns 0 for a zero-width range rather than dividing by zero', () => {
     expect(valueToRatio(7, 7, 7)).toBe(0);
+  });
+});
+
+describe('placeMenu', () => {
+  // A 160 x 120 menu in an 800 x 600 window.
+  const place = (x: number, y: number) => placeMenu(x, y, 160, 120, 800, 600);
+
+  it('opens down and to the right of the pointer when there is room', () => {
+    expect(place(100, 100)).toEqual({ left: 100, top: 100 });
+  });
+
+  it('opens to the left of a pointer near the right edge', () => {
+    expect(place(750, 100)).toEqual({ left: 590, top: 100 });
+  });
+
+  it('opens above a pointer near the bottom edge', () => {
+    expect(place(100, 550)).toEqual({ left: 100, top: 430 });
+  });
+
+  it('flips both ways in the bottom-right corner', () => {
+    expect(place(790, 590)).toEqual({ left: 630, top: 470 });
+  });
+
+  it('keeps a menu taller than the window pinned to the top margin', () => {
+    expect(placeMenu(100, 300, 160, 900, 800, 600)).toEqual({ left: 100, top: 4 });
+  });
+
+  it('never lets a flip push the menu off the left or top edge', () => {
+    // Flipping left from x = 100 would put a 160-wide menu at -60.
+    expect(placeMenu(100, 100, 160, 120, 200, 600)).toEqual({ left: 4, top: 100 });
   });
 });
 

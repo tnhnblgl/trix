@@ -88,6 +88,7 @@
         <ShotCard
           {shot}
           selected={i === app.shotSelected}
+          onselect={() => (app.shotSelected = i)}
           onopen={() => { app.shotSelected = i; viewing = true; }} />
       {/each}
     </div>

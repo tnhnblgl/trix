@@ -5,7 +5,7 @@
 
 <script lang="ts">
   import Icon from './Icon.svelte';
-  import { nextIndex } from '../../lib/ui';
+  import { nextIndex, placeMenu } from '../../lib/ui';
   import type { IconName } from '../../lib/icons';
 
   export type MenuItem = {
@@ -18,16 +18,53 @@
 
   let {
     items,
+    at,
     onpick,
     onclose,
   }: {
     items: MenuItem[];
+    /**
+     * A right-click menu: open at this viewport point instead of dropping
+     * down from the parent. Positioned `fixed`, so no ancestor may set a
+     * `transform`, `filter` or `will-change` -- any of those would become the
+     * box `fixed` is measured from, and the menu would land offset by that
+     * ancestor's position. `ClipCard` switches its hover lift off while one is
+     * open for exactly this reason.
+     */
+    at?: { x: number; y: number };
     onpick: (id: string) => void;
     onclose: () => void;
   } = $props();
 
   let active = $state(0);
   let el = $state<HTMLDivElement | null>(null);
+  /** Where a right-click menu settled once its size was known. */
+  let placed = $state<{ left: number; top: number } | null>(null);
+
+  // Measured before it is shown: whether it flips up or left depends on its
+  // own size, which is not known until it has rendered. Until then it is laid
+  // out but invisible, so it never flashes at the unflipped position.
+  $effect(() => {
+    if (!el || !at) return;
+    placed = placeMenu(at.x, at.y, el.offsetWidth, el.offsetHeight, window.innerWidth, window.innerHeight);
+  });
+
+  // A right-click menu belongs to the spot it was opened on. Scrolling moves
+  // the card out from under it and resizing moves the edges it was fitted
+  // to, so either closes it -- as a native context menu does.
+  $effect(() => {
+    if (!at) return;
+    const close = () => onclose();
+    document.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    window.addEventListener('blur', close);
+    return () => {
+      document.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+      window.removeEventListener('blur', close);
+    };
+  });
+
   /**
    * A prefix unique to this menu instance, for the item ids that
    * `aria-activedescendant` points at.
@@ -42,8 +79,14 @@
   // Focus lands on the menu itself, not on an item: one roving `active`
   // index is simpler than moving DOM focus between items, and it keeps
   // every key press arriving at one handler.
+  //
+  // A right-click menu waits until it is placed: while it measures itself it
+  // is `visibility: hidden`, and a hidden element refuses focus -- Escape and
+  // the arrows would then never reach it. Placed, it is `fixed` and already
+  // on screen, so scrolling to it could only move the page out from under it.
   $effect(() => {
-    el?.focus();
+    if (at && !placed) return;
+    el?.focus(at ? { preventScroll: true } : undefined);
   });
 
   // Pointerdown, not click: a click that started inside the menu and ended
@@ -88,6 +131,8 @@
 <div
   bind:this={el}
   class="menu"
+  class:at={!!at}
+  style={at ? (placed ? `left: ${placed.left}px; top: ${placed.top}px` : 'visibility: hidden') : undefined}
   role="menu"
   tabindex="-1"
   aria-orientation="vertical"
@@ -130,6 +175,7 @@
     border-radius: var(--r-md);
     box-shadow: var(--shadow);
   }
+  .menu.at { position: fixed; right: auto; top: 0; left: 0; }
   .menu:focus-visible { outline: none; }
   .item {
     display: flex;
