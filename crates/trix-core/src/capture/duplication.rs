@@ -312,7 +312,7 @@ impl From<OpenError> for anyhow::Error {
     fn from(e: OpenError) -> Self {
         match e {
             OpenError::SecureDesktop => anyhow!(
-                "the Windows secure desktop is up (a UAC prompt, Ctrl+Alt+Del, or the lock                  screen), and no application may duplicate it"
+                "the Windows secure desktop is up (a UAC prompt, Ctrl+Alt+Del, or the lock screen), and no application may duplicate it"
             ),
             OpenError::Fatal(e) => e,
         }

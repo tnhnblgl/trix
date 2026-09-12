@@ -275,13 +275,10 @@ fn named_array(id: u64, key: &str, serialized: serde_json::Result<Value>) -> Res
 
 fn arm(daemon: &Daemon, id: u64) -> Response {
     match daemon.arm() {
-        Ok(outcome) => {
-            let data = outcome.status.to_json();
-            if outcome.newly_armed {
-                daemon.clients.broadcast(&Event::new("armed", data.clone()));
-            }
-            Response::ok(id, data)
-        }
+        // No `armed` broadcast here: `Daemon::arm` emits it, because the tray
+        // menu reaches that function without coming through this one. See the
+        // module doc in `state.rs`.
+        Ok(outcome) => Response::ok(id, outcome.status.to_json()),
         // `{e:#}` so anyhow's context chain survives — this is where
         // "no hardware encoder on the capture adapter" and "another trix
         // capture session … is already running" reach the UI verbatim.
@@ -291,12 +288,8 @@ fn arm(daemon: &Daemon, id: u64) -> Response {
 
 fn disarm(daemon: &Daemon, id: u64) -> Response {
     match daemon.disarm() {
-        Ok(was_armed) => {
-            if was_armed {
-                daemon.clients.broadcast(&Event::new("disarmed", Value::Object(Map::new())));
-            }
-            Response::ok(id, Value::Object(Map::new()))
-        }
+        // No `disarmed` broadcast here either — `Daemon::disarm` emits it.
+        Ok(_) => Response::ok(id, Value::Object(Map::new())),
         // No `error` event here: spec §4.4 broadcasts one for `arm` and `clip`,
         // which are the commands whose failure changes what the other clients
         // can expect to happen next.

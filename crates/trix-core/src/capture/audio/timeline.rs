@@ -35,9 +35,13 @@ pub struct AudioTimeline {
     discontinuity_warned: bool,
 
     // splice diagnostics: how often packet placement cut into real audio
-    pub micro_gap_events: u64, // silence inserts < 10 ms (should be ~0 during sound)
-    pub micro_gap_frames: u64,
-    pub large_gap_events: u64, // genuine idle gaps (> 10 ms)
+    // No micro-gap counters here. They once split fills shorter than 10 ms out
+    // of `large_gap_events`, and widening CONTINUITY_DEAD_BAND_100NS to 20 ms
+    // (to stop the crackle -- see the constant) made a sub-10 ms fill
+    // unreachable: nothing below the dead band ever reaches the filling branch
+    // at all. They survived as two fields that no code could ever increment,
+    // and two log keys that always printed zero.
+    pub large_gap_events: u64, // genuine idle gaps (>= the dead band, 20 ms)
     pub trim_events: u64,      // packets with leading samples dropped
     pub trim_frames: u64,
     pub discontinuity_events: u64, // gaps beyond the sane bound, re-anchored rather than filled
@@ -59,8 +63,6 @@ impl AudioTimeline {
             // 0.5 s of zeroed PCM reused for every silence emission.
             silence: vec![0u8; SAMPLE_RATE / 2 * ENCODER_BLOCK_ALIGN],
             discontinuity_warned: false,
-            micro_gap_events: 0,
-            micro_gap_frames: 0,
             large_gap_events: 0,
             trim_events: 0,
             trim_frames: 0,
@@ -189,8 +191,6 @@ impl AudioTimeline {
     pub fn log_diagnostics(&self, source: &str) {
         tracing::info!(
             source,
-            micro_gap_events = self.micro_gap_events,
-            micro_gap_frames = self.micro_gap_frames,
             large_gap_events = self.large_gap_events,
             trim_events = self.trim_events,
             trim_frames = self.trim_frames,

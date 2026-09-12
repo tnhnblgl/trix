@@ -129,10 +129,13 @@ pub enum Action {
     /// The screenshot hotkey was pressed. Like [`Self::Clip`] this has no tray
     /// menu item, so `WM_HOTKEY` is the only thing that produces it.
     Screenshot,
+    /// Tray menu's arm/disarm item. Which of the two it produces is decided
+    /// where the menu is built, from the same `ARMED_MIRROR` read that chose
+    /// the item's label -- there is deliberately no "toggle" variant, because
+    /// one would have to re-read the mirror on the worker thread and could
+    /// then act on a state the user never saw.
     Arm,
     Disarm,
-    /// Tray menu: toggle depending on current state.
-    ToggleArmed,
     /// Tray menu's "Open Trix" and a left click on the icon: launch the
     /// desktop app, or fall back to the clips folder if it is not installed.
     OpenApp,
@@ -532,13 +535,6 @@ fn bind_hotkey(hwnd: HWND, kind: HotkeyKind, spec: &str) -> bool {
     live
 }
 
-/// Asks the pump for the "choose a clip sound" dialog. Returns immediately.
-///
-/// A no-op when there is no pump — unit tests, and `trix.exe`. The `cfg!(test)`
-/// guard is the same one `rebind_hotkey` carries and for the same reason:
-/// `WINDOW_HWND` is process-global, and a test in this crate could otherwise
-/// read a live pump another test is running and open a real file dialog on the
-/// developer's desktop.
 /// Asks the pump for the "change clips folder" dialog. Returns immediately.
 ///
 /// The settings page's route to the dialog the tray menu already had. Same
@@ -563,6 +559,13 @@ pub fn request_folder_pick() {
     }
 }
 
+/// Asks the pump for the "choose a clip sound" dialog. Returns immediately.
+///
+/// A no-op when there is no pump — unit tests, and `trix.exe`. The `cfg!(test)`
+/// guard is the same one `rebind_hotkey` carries and for the same reason:
+/// `WINDOW_HWND` is process-global, and a test in this crate could otherwise
+/// read a live pump another test is running and open a real file dialog on the
+/// developer's desktop.
 pub fn request_sound_pick() {
     if cfg!(test) {
         return;
@@ -723,7 +726,15 @@ unsafe extern "system" fn wnd_proc(
                     // one thing this thread is allowed to do inline.
                     let armed = ARMED_MIRROR.load(Ordering::Relaxed);
                     match unsafe { tray::show_menu(hwnd, armed) } {
-                        Some(tray::ID_TOGGLE) => Some(Action::ToggleArmed),
+                        // Decided here, from the same read that labelled the
+                        // item, rather than re-read on the worker thread: an
+                        // `arm` from the socket or the UI takes seconds and
+                        // publishes at the end, so it can flip the mirror
+                        // while this menu is open. Deciding later turned a
+                        // click on "Arm" into a disarm.
+                        Some(tray::ID_TOGGLE) => {
+                            Some(if armed { Action::Disarm } else { Action::Arm })
+                        }
                         Some(tray::ID_OPEN_UI) => Some(Action::OpenApp),
                         Some(tray::ID_OPEN_FOLDER) => Some(Action::OpenClipsFolder),
                         Some(tray::ID_CHANGE_FOLDER) => Some(Action::ChangeClipsFolder),
@@ -981,9 +992,6 @@ pub fn handle_action(daemon: &Arc<Daemon>, action: Action) {
                 }),
             ));
         }
-        // The mirror decides what the menu offered, so a toggle does what the
-        // user just read, not what the daemon became a moment later.
-        Action::ToggleArmed => set_armed(daemon, !ARMED_MIRROR.load(Ordering::Relaxed)),
         Action::Arm => set_armed(daemon, true),
         Action::Disarm => set_armed(daemon, false),
         Action::OpenApp => open_app(daemon),

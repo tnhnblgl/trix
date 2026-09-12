@@ -1,18 +1,19 @@
 //! Everything the daemon owns, and the rules for changing it.
 //!
 //! Mostly transport-free: nothing here knows about pipes or requests, and for
-//! every method but two, [`crate::dispatch`] turns the return value into a
-//! response and decides what to broadcast. `record_saved_clip` and
-//! `record_saved_shot` are the exceptions, and deliberately so: a hotkey clip
-//! or a hotkey screenshot calls straight into `Daemon::clip` /
-//! `Daemon::screenshot` and never passes through `dispatch` at all, so the
-//! `clip_saved` and `shot_saved` events have to be broadcast from the one
-//! function both the socket path and the hotkey path actually go through —
-//! see `record_saved_clip`'s comment for the bug that made that structural
-//! rather than a convention to remember. Both broadcasts still happen after
-//! the `armed` lock is released, for the same reason every other event does,
-//! which is what keeps the lock ordering below trivially true regardless of
-//! which module is doing the broadcasting.
+//! most methods [`crate::dispatch`] turns the return value into a response and
+//! decides what to broadcast. `record_saved_clip`, `record_saved_shot`, `arm`
+//! and `disarm` are the exceptions, and deliberately so: each of them is
+//! reached by a path that never passes through `dispatch` at all — a hotkey
+//! clip or screenshot calls straight into `Daemon::clip` / `Daemon::screenshot`,
+//! and the tray menu calls straight into `Daemon::arm` / `Daemon::disarm` — so
+//! `clip_saved`, `shot_saved`, `armed` and `disarmed` have to be broadcast from
+//! the one function every path actually goes through. See `record_saved_clip`'s
+//! comment for the bug that made that structural rather than a convention to
+//! remember, and `arm`'s for the second time the same bug arrived. All four
+//! broadcasts still happen after the `armed` lock is released, for the same
+//! reason every other event does, which is what keeps the lock ordering below
+//! trivially true regardless of which module is doing the broadcasting.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -228,12 +229,13 @@ mod clip_paths {
 use clip_paths::ClipPaths;
 
 /// What [`Daemon::arm`] did.
+///
+/// No `newly_armed` flag: it existed so the dispatcher could broadcast `armed`
+/// only on a real transition, and now that `arm` broadcasts for itself, the
+/// early return for an already-armed daemon *is* that decision — it leaves
+/// before reaching the broadcast. A UI that reconnects and re-arms to sync its
+/// own toggle still makes no other client redraw.
 pub struct ArmOutcome {
-    /// False when the daemon was already armed. `arm` is idempotent, but the
-    /// dispatcher only broadcasts `armed` on a real transition — a UI that
-    /// reconnects and re-arms to sync its own toggle must not make every other
-    /// client redraw.
-    pub newly_armed: bool,
     pub status: DaemonStatus,
 }
 
@@ -570,7 +572,7 @@ impl Daemon {
     pub fn arm(&self) -> Result<ArmOutcome> {
         let mut armed = self.lock_armed();
         if armed.is_some() {
-            return Ok(ArmOutcome { newly_armed: false, status: self.status_of(armed.as_ref()) });
+            return Ok(ArmOutcome { status: self.status_of(armed.as_ref()) });
         }
 
         // Before the slot and before the engine. An unusable clip directory is
@@ -613,7 +615,20 @@ impl Daemon {
         // icon that only tracked its own menu would show "idle" through a
         // UI-initiated recording. A no-op when there is no window.
         crate::window::publish_armed(true);
-        Ok(ArmOutcome { newly_armed: true, status: self.status_of(armed.as_ref()) })
+        let status = self.status_of(armed.as_ref());
+        // Released before the broadcast below, so `clients` is never taken
+        // while `armed` is held — the lock ordering at the top of this file.
+        drop(armed);
+        // Broadcast here rather than in `dispatch::arm`, for the reason
+        // `record_saved_clip` gives: the tray menu calls this function
+        // directly and never passes through `dispatch`, so an event left at
+        // that one call site simply did not happen for the tray. A desktop UI
+        // left open while the user armed from the tray went on showing "idle"
+        // indefinitely — `armed`/`disarmed` are the only signal it gets, and
+        // it does not poll. Emitting from the one function both paths go
+        // through is what makes that structural.
+        self.clients.broadcast(&Event::new("armed", status.to_json()));
+        Ok(ArmOutcome { status })
     }
 
     /// Stops capture and releases the single-instance slot. `Ok(false)` means
@@ -632,8 +647,9 @@ impl Daemon {
         //
         // This does not touch the lock ordering: `clients` is still never taken
         // while `armed` is held. Nothing in here locks `clients` — the
-        // `disarmed` event is broadcast by `dispatch` after this returns — and
-        // `engine.stop()` is `trix-core`, which has no idea the registry exists.
+        // `disarmed` event is broadcast at the end of this function, after the
+        // guard is dropped — and `engine.stop()` is `trix-core`, which has no
+        // idea the registry exists.
         let mut armed = self.lock_armed();
         let Some(state) = armed.take() else { return Ok(false) };
         let Armed { engine, _slot } = state;
@@ -655,6 +671,12 @@ impl Daemon {
         // After the slot is back, so the icon never says "idle" about a daemon
         // that is still holding the encoder. See the note in `arm`.
         crate::window::publish_armed(false);
+        // Same reasoning as the `armed` broadcast in `arm`, and the same
+        // bug without it: disarming from the tray left an open UI showing
+        // "armed", and its own disarm button could not fix it — that call
+        // returns `Ok(false)` for an already-idle daemon, which broadcasts
+        // nothing, so the toggle stayed wrong until the app restarted.
+        self.clients.broadcast(&Event::new("disarmed", Value::Object(Map::new())));
         Ok(true)
     }
 
@@ -2335,6 +2357,27 @@ mod tests {
         let daemon = idle("disarm", Config::default());
         assert!(daemon.disarm().is_ok());
         assert!(!daemon.status().armed);
+    }
+
+    /// `disarm` broadcasts from inside `Daemon` rather than from `dispatch`,
+    /// so the tray menu's disarm reaches an open UI. This pins the half of
+    /// that which needs no capture hardware: the already-idle path must stay
+    /// silent. A `disarmed` event for a daemon that was already idle would
+    /// tell every client to re-read a state that never changed, and moving
+    /// the broadcast above the `armed.take()` check is exactly how that
+    /// happens.
+    #[test]
+    fn disarm_when_idle_broadcasts_nothing() {
+        let daemon = idle("disarm-silent", Config::default());
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        daemon.clients.register(tx);
+
+        assert!(!daemon.disarm().unwrap(), "a daemon that was never armed reports no transition");
+
+        assert!(
+            rx.try_recv().is_err(),
+            "an already-idle disarm must not broadcast; a client saw an event"
+        );
     }
 
     /// The status shape the UI binds to. Arming needs real hardware, so this
