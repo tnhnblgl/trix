@@ -97,14 +97,31 @@
   .meta { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; }
   .when { font-size: 12px; }
   .size { font-size: 10.5px; color: var(--faint); }
+  /* The buttons sit on the screenshot itself, and a screenshot can be any
+     colour -- dim grey glyphs on a transparent ground vanished against a
+     bright one. So they share a dark pill, the way a video player's controls
+     sit over footage, and take full text colour on it. `--scrim-strong` is
+     the same wash the clip card's duration badge uses over a video frame. */
   .actions {
     position: absolute;
     top: 6px;
     right: 6px;
     display: flex;
-    gap: 4px;
+    gap: 2px;
+    padding: 3px;
+    border-radius: var(--r);
+    background: var(--scrim-strong);
+    border: 1px solid var(--line-strong);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
     opacity: 0;
     transition: opacity var(--t-fast) var(--ease);
   }
   .card:hover .actions, .card:focus-within .actions, .card.selected .actions { opacity: 1; }
+  .actions :global(.ib) { width: 28px; height: 28px; color: var(--text); }
+  .actions :global(.ib:hover:not(:disabled)) { background: rgba(255, 255, 255, 0.14); }
+  /* Delete answers the pointer in red before it is pressed. */
+  .actions :global(.ib:last-child:hover:not(:disabled)) {
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 18%, transparent);
+  }
 </style>
