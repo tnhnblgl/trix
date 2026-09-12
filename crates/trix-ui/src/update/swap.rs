@@ -19,8 +19,10 @@ use std::path::{Path, PathBuf};
 /// moved itself.
 pub const BINARIES: [&str; 3] = ["trix.exe", "trix-daemon.exe", "trix-ui.exe"];
 
-/// Shipped alongside, never locked, so these are simply overwritten.
-pub const DOCS: [&str; 2] = ["LICENSE", "README.txt"];
+/// Shipped alongside, never locked, so these are simply overwritten. The zip
+/// carries nothing but the binaries and this README; an install unzipped from
+/// a release before 1.4.0 keeps the LICENSE it came with, untouched.
+pub const DOCS: [&str; 1] = ["README.txt"];
 
 /// Staging lives inside the install directory, not in `%TEMP%`.
 ///
@@ -794,8 +796,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&install);
     }
 
-    /// LICENSE and README.txt are copied, not renamed, and are worth nothing
-    /// next to a working binary. A payload without them must still update Trix.
+    /// README.txt is copied, not renamed, and is worth nothing next to a
+    /// working binary. A payload without it must still update Trix.
     #[test]
     fn a_payload_missing_the_docs_still_swaps_the_binaries() {
         let (install, payload) = install_and_payload("no-docs");

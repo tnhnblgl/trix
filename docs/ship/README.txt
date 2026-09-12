@@ -1,4 +1,4 @@
-Trix 1.3.0
+Trix 1.4.0
 ==========
 
 A clip recorder for Windows, for people whose PC cannot spare the frames.
@@ -8,31 +8,37 @@ cost to your game is close to nothing, and the app itself stays out of the
 way while you play.
 
 
-NEW IN 1.3.0
+NEW IN 1.4.0
 ------------
 
-The two volume sliders now go up to 200. They still start at 100, which
-is the sound exactly as your PC mixed it -- nothing changes unless you
-move them.
+This release is about the app window: finding your way around your clips
+and screenshots.
 
-Anything above 100 makes Trix amplify. This is for the case the old limit
-could not help with: a microphone that comes out too quiet in the clip
-even with Windows already at full input level. Turning Trix up is the
-only thing left that can fix that. Pushed far enough it will distort, the
-same way any recording does, so raise it until your voice sits right and
-no further.
+  * A volume slider for clip playback. Hover the speaker icon under the
+    video and it opens above it. On a clip's page the Up and Down arrow
+    keys change the volume too, and so does the mouse wheel over the
+    speaker. Trix remembers the level for next time; mute does not
+    carry over, so no clip ever opens silent by surprise.
 
-There is also a new setting: "Arm when Trix starts". With it on, Trix
-begins filling the replay buffer the moment it opens, so there is nothing
-to remember to switch on. It is worth pairing with "Start with Windows" --
-together they mean Trix is recording from the time you log in.
+  * Right-click a clip for Favourite, Rename, Show in folder and Delete,
+    or a screenshot for Copy, Show in folder and Delete. Right-clicking
+    anywhere else does nothing.
 
-It is off by default, because arming holds your GPU encoder and the
-buffer's memory for as long as it lasts, and that is not something to
-switch on for you. It takes effect the next time Trix starts, not the
-moment you tick it.
+  * A Favourites button at the top of the Clips page shows only your
+    starred clips. A clip you un-star while it is on stays in view until
+    you switch the filter off and on again, so a misclick is easy to
+    undo. Trix always starts with every clip showing.
 
-Both settings are in Settings -> Audio and Settings -> Trix.
+  * Deleting a clip or a screenshot now asks first, whichever way you do
+    it -- a menu, a button or the Delete key.
+
+  * Moving through clips or screenshots with the arrow keys scrolls the
+    page to keep the selected one in view.
+
+  * New icons throughout, the Trix logo in the title bar, and the
+    buttons under a clip now say what they do. The buttons on a
+    screenshot sit on a dark background, so they show up on bright
+    images.
 
 
 GETTING STARTED
@@ -58,9 +64,7 @@ WHAT IS IN THIS FOLDER
   trix-daemon.exe  The background recorder that lives in the tray. The app
                    starts it, so you do not normally run this yourself.
   trix.exe         A command-line interface, for scripting and diagnostics.
-  LICENSE          MIT.
-  THIRD-PARTY-NOTICES.txt
-                   Licences for material Trix includes (its icons).
+  README.txt       This file.
 
 
 REQUIREMENTS
@@ -192,6 +196,7 @@ KNOWN LIMITS IN THIS RELEASE
 LICENSE
 -------
 
-MIT. See the LICENSE file.
+Trix is MIT licensed; the full text is in the source repository below.
+The icons come from Lucide, whose licence is at the end of this file.
 
 Source, issues and newer releases:  https://github.com/tnhnblgl/trix

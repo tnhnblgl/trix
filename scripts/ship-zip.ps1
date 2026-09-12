@@ -4,9 +4,11 @@
     to build one that cannot be trusted.
 
 .DESCRIPTION
-    Produces trix-v<version>-win-x64.zip containing the three binaries, the
-    LICENSE, THIRD-PARTY-NOTICES.txt (the icon set's licence, which has to
-    travel with every copy), and the user-facing docs\ship\README.txt. There is no installer
+    Produces trix-v<version>-win-x64.zip containing the three binaries and
+    the user-facing docs\ship\README.txt -- nothing else, by decision. The
+    one licence that has to travel with every copy, the icon set's, is
+    appended to the end of that README rather than shipped as a file of its
+    own (see THIRD-PARTY-NOTICES.txt). There is no installer
     yet, so this zip IS the product: whatever it contains is what a stranger
     downloads and runs.
 
@@ -154,6 +156,13 @@ $readmeText = Get-Content -LiteralPath $readmeSrc -Raw
 Require -Name 'the shipping README names this version' -Condition ($readmeText -match [regex]::Escape($Version)) `
     -Detail "docs\ship\README.txt never mentions $Version -- it probably still describes the previous release"
 
+# Appended to the README in the zip. Lucide's ISC licence requires its notice
+# in every copy of the icons, and trix-ui.exe is one, so a zip without it is
+# not one this script will build.
+$noticesSrc = Join-Path $RepoRoot 'THIRD-PARTY-NOTICES.txt'
+Require -Name 'THIRD-PARTY-NOTICES.txt exists' -Condition (Test-Path -LiteralPath $noticesSrc) -Detail $noticesSrc
+$noticesText = Get-Content -LiteralPath $noticesSrc -Raw
+
 Push-Location $RepoRoot
 try { $dirty = @(git status --porcelain) } finally { Pop-Location }
 $isClean = ($dirty.Count -eq 0)
@@ -244,12 +253,14 @@ $stage = Join-Path $work $name
 New-Item -ItemType Directory -Force $stage | Out-Null
 try {
     foreach ($b in $binaries) { Copy-Item (Join-Path $relDir $b) (Join-Path $stage $b) -Force }
-    Copy-Item (Join-Path $RepoRoot 'LICENSE') (Join-Path $stage 'LICENSE') -Force
-    Copy-Item (Join-Path $RepoRoot 'THIRD-PARTY-NOTICES.txt') (Join-Path $stage 'THIRD-PARTY-NOTICES.txt') -Force
+    # The three binaries and README.txt are the whole zip. No LICENSE: the
+    # licence notices that must ship go inside the README, below.
 
     # CRLF and no BOM. This file is opened in Notepad by people who just
-    # unzipped it, and it is the first thing they read.
-    $crlf = ($readmeText -replace "`r`n", "`n") -replace "`n", "`r`n"
+    # unzipped it, and it is the first thing they read. The notices go last,
+    # after everything a reader came for.
+    $shipped = $readmeText.TrimEnd() + "`n`n`n" + $noticesText
+    $crlf = ($shipped -replace "`r`n", "`n") -replace "`n", "`r`n"
     [System.IO.File]::WriteAllText((Join-Path $stage 'README.txt'), $crlf, (New-Object System.Text.UTF8Encoding($false)))
 
     # Run the CLI from the staged copy rather than from target\release, so what
@@ -274,7 +285,7 @@ try {
     # Compress-Archive on PowerShell 5.1 writes backslashes. Both unpack on
     # Windows; only one unpacks cleanly everywhere else. The $true is
     # includeBaseDirectory, which puts everything under one folder so unzipping
-    # into Downloads does not scatter five files across it.
+    # into Downloads does not scatter four files across it.
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [System.IO.Compression.ZipFile]::CreateFromDirectory(
         $stage, $zipPath, [System.IO.Compression.CompressionLevel]::Optimal, $true)

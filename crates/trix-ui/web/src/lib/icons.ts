@@ -4,7 +4,7 @@
  * The shapes are Lucide's (https://lucide.dev), copied in rather than taken
  * as a package so the app gains no dependency. They are ISC licensed; the
  * notice is `THIRD-PARTY-NOTICES.txt` at the repository root, which
- * `scripts/ship-zip.ps1` puts in the release zip. Each icon's elements
+ * `scripts/ship-zip.ps1` appends to the zip's README. Each icon's elements
  * (paths, circles, rects, lines) are flattened into one path string, which is
  * why a circle reads as two arcs here.
  *
