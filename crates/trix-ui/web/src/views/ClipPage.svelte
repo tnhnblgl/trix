@@ -296,21 +296,25 @@
       <Button variant="primary" size="sm" onclick={commitRename}>Save</Button>
       <Button variant="ghost" size="sm" onclick={() => (renaming = false)}>Cancel</Button>
     {:else}
-      <!-- One star on this page, and it is the toggle. A second, non-clickable
-           star beside the title said the same thing in a second colour -- amber
-           against the toggle's accent tint -- two controls apart, against spec
-           4.1's "one glyph, one colour, one meaning". The toggle is the one
-           that has to be here (spec 8.4's action row), it already carries the
-           state in its `active` tint and in its Favourite/Unfavourite name, and
-           a788e20 had no star here at all. -->
+      <!-- Worded buttons, not bare icons. Borderless icons at the text's own
+           dim grey went unnoticed until someone pointed them out, and an icon
+           alone still leaves a guess about what a folder or a pencil does.
+           Same buttons, same words, as the screenshot viewer's bar.
+
+           One star on this page, and it is the toggle. A second, non-clickable
+           star beside the title said the same thing twice, two controls apart,
+           against spec 4.1's "one glyph, one colour, one meaning". A
+           favourited clip's star takes `--fav`, the colour the grid card's
+           star already uses, so the one glyph keeps one colour across pages. -->
       <span class="title">{clip.title}</span>
-      <IconButton
-        icon={clip.favorite ? 'star-filled' : 'star'}
-        label={clip.favorite ? 'Unfavourite' : 'Favourite'}
-        active={clip.favorite}
-        onclick={() => app.setFavorite(clip.id, !clip.favorite)} />
-      <IconButton icon="pencil" label="Rename" onclick={startRename} />
-      <IconButton icon="folder" label="Show in Explorer" onclick={() => app.reveal(clip.id)} />
+      <span class="fav" class:on={clip.favorite}>
+        <Button size="sm" icon={clip.favorite ? 'star-filled' : 'star'}
+          onclick={() => app.setFavorite(clip.id, !clip.favorite)}>
+          {clip.favorite ? 'Favourited' : 'Favourite'}
+        </Button>
+      </span>
+      <Button size="sm" icon="pencil" onclick={startRename}>Rename</Button>
+      <Button size="sm" icon="folder" onclick={() => app.reveal(clip.id)}>Show in folder</Button>
       <span class="sep"></span>
       <Button variant="danger" size="sm" icon="trash"
         onclick={askToDelete}>Delete</Button>
@@ -347,6 +351,8 @@
 
   .actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .actions .title { margin-right: auto; min-width: 0; font-weight: 650; font-size: 13.5px; }
+  .fav { display: contents; }
+  .fav.on :global(svg) { color: var(--fav); }
   .sep { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
   .rn {
     flex: 1;
