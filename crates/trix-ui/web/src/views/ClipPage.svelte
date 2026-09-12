@@ -239,11 +239,11 @@
       Clips
     </Button>
     <span class="spacer"></span>
-    <span class="counter tnum">{counterLabel(app.selected, app.clips.length)}</span>
+    <span class="counter tnum">{counterLabel(app.selected, app.visible.length)}</span>
     <IconButton icon="chevron-left" label="Previous clip"
       disabled={app.selected === 0} onclick={() => app.step(-1)} />
     <IconButton icon="chevron-right" label="Next clip"
-      disabled={app.selected >= app.clips.length - 1} onclick={() => app.step(1)} />
+      disabled={app.selected >= app.visible.length - 1} onclick={() => app.step(1)} />
   </header>
 
   <VideoPlayer

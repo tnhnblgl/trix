@@ -41,6 +41,11 @@ export function trimRangeError(startMs: number, endMs: number): string | null {
   return null;
 }
 
+/** The ids of the favourited clips in `clips`: the favourites filter's snapshot. */
+function favoriteIdsOf(clips: ClipMeta[]): Set<string> {
+  return new Set(clips.filter((c) => c.favorite).map((c) => c.id));
+}
+
 class AppState {
   connected = $state(false);
   status = $state<Status | null>(null);
@@ -51,8 +56,27 @@ class AppState {
   shotTotal = $state(0);
   /** Index into `shots` of the tile the grid has selected. */
   shotSelected = $state(0);
-  /** Index into `clips` of the clip the clip page is showing. */
+  /**
+   * Index into `visible` -- not `clips` -- of the clip the grid has selected
+   * and the clip page is showing. The two lists are the same list unless the
+   * favourites filter is on.
+   */
   selected = $state(0);
+  /**
+   * The favourites filter: the ids of the clips it shows, or null for all.
+   *
+   * A snapshot taken when the filter is switched on, not a live test of each
+   * clip's `favorite`. Unfavouriting a clip while the filter is on leaves it
+   * in place until the filter is next switched on: nothing vanishes from
+   * under the pointer, a misclicked star can be put straight back, and the
+   * clip page is never yanked to a different clip for un-starring the one on
+   * screen -- which a live filter would do, because `selected` is an index and
+   * the list would shrink in front of it.
+   *
+   * Not persisted. Every launch opens on the whole library, so nobody opens
+   * Trix to find most of their clips apparently gone.
+   */
+  favoriteIds = $state<Set<string> | null>(null);
   toasts = $state<Toast[]>([]);
   /** Live ring seconds while armed, from `stats`; falls back to `status`. */
   ringUsed = $state(0);
@@ -86,13 +110,34 @@ class AppState {
     return this.status?.clip_dir ?? '';
   }
 
+  get favoritesOnly(): boolean {
+    return this.favoriteIds !== null;
+  }
+
+  /** The clips the grid shows and the clip page steps through, newest first. */
+  get visible(): ClipMeta[] {
+    const ids = this.favoriteIds;
+    return ids ? this.clips.filter((c) => ids.has(c.id)) : this.clips;
+  }
+
   get current(): ClipMeta | null {
-    return this.clips[this.selected] ?? null;
+    return this.visible[this.selected] ?? null;
   }
 
   step(delta: number) {
     const next = this.selected + delta;
-    if (next >= 0 && next < this.clips.length) this.selected = next;
+    if (next >= 0 && next < this.visible.length) this.selected = next;
+  }
+
+  /**
+   * Switches the favourites filter, keeping the selection on the same clip
+   * when the new list still has it and on the first clip when it does not.
+   */
+  setFavoritesOnly(on: boolean) {
+    const keep = this.current?.id;
+    this.favoriteIds = on ? favoriteIdsOf(this.clips) : null;
+    const index = this.visible.findIndex((c) => c.id === keep);
+    this.selected = index < 0 ? 0 : index;
   }
 
   toast(kind: Toast['kind'], text: string) {
@@ -159,6 +204,9 @@ class AppState {
       });
       this.clips = page.clips;
       this.total = page.total;
+      // A reload after a folder move brings different clips, whose ids the old
+      // snapshot cannot know: re-taken, or the filter would show nothing.
+      if (this.favoriteIds) this.favoriteIds = favoriteIdsOf(this.clips);
       this.selected = 0;
     } catch (e) {
       this.toast('error', String(e));
@@ -326,7 +374,7 @@ class AppState {
   async remove(id: string) {
     try {
       await call('library.delete', { clip_id: id });
-      const index = this.clips.findIndex((c) => c.id === id);
+      const index = this.visible.findIndex((c) => c.id === id);
       this.clips = this.clips.filter((c) => c.id !== id);
       this.total = Math.max(0, this.total - 1);
       // Keep the selection on a real clip: the one that slid into this slot,
@@ -339,8 +387,10 @@ class AppState {
       // selected) would need to recompute `selected` relative to the clip
       // still being looked at, not to the one just removed; this line would
       // silently move the selection to the wrong clip instead.
-      this.selected = Math.min(index < 0 ? 0 : index, Math.max(0, this.clips.length - 1));
-      if (this.clips.length === 0) this.view = 'grid';
+      this.selected = Math.min(index < 0 ? 0 : index, Math.max(0, this.visible.length - 1));
+      // `visible`, not `clips`: deleting the last favourite while filtering
+      // leaves a clip page with nothing to show, library or no library.
+      if (this.visible.length === 0) this.view = 'grid';
     } catch (e) {
       this.toast('error', String(e));
     }
@@ -484,7 +534,7 @@ export function wireDaemon() {
         break;
       case 'clip_saved': {
         const saved = event.data as unknown as ClipMeta;
-        const wasEmpty = app.clips.length === 0;
+        const wasEmpty = app.visible.length === 0;
         // Decide "is this genuinely new" before merging: `mergeSaved` replaces
         // in place when the id is already present (a reconnect's `library.list`
         // racing this same event), and that path must not move the count or
@@ -493,14 +543,15 @@ export function wireDaemon() {
         app.clips = mergeSaved(app.clips, saved);
         if (isNew) {
           app.total += 1;
-          // `selected` is an index into `app.clips`, and a genuine prepend
+          // `selected` is an index into `app.visible`, and a genuine prepend
           // shifts every existing clip down one slot in every view: Grid's
-          // Space previews `app.clips[app.selected]` and Enter opens it, so
+          // Space previews `app.visible[app.selected]` and Enter opens it, so
           // an unshifted index means the user previews or opens a clip they
-          // never picked. Skip the shift only when the list was empty before
-          // this clip arrived -- it then lands at index 0, which is where
-          // `selected` already points.
-          if (!wasEmpty) app.selected += 1;
+          // never picked. Skip the shift when the list was empty before this
+          // clip arrived -- it then lands at index 0, which is where
+          // `selected` already points -- and when the favourites filter is
+          // hiding it, since then nothing in the shown list moved.
+          if (!wasEmpty && app.visible.some((c) => c.id === saved.id)) app.selected += 1;
           app.toast('info', `Saved ${saved.title}`);
         }
         break;

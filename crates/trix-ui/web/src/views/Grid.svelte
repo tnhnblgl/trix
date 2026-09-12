@@ -1,5 +1,6 @@
 <script lang="ts">
   import ClipCard from '../components/ClipCard.svelte';
+  import Icon from '../components/ui/Icon.svelte';
   import { app } from '../lib/state.svelte';
   import { shouldHandleKey, moveSelection, CARD_CONTROL_SELECTOR } from '../lib/keys';
   import { clipUrl, formatBytes } from '../lib/clips';
@@ -49,7 +50,7 @@
       // `ClipPage`'s `{#if clip}` renders nothing at all -- no back button,
       // no Escape target's worth of UI, nothing -- and switching to `clip`
       // would strand the user on a blank page with no way out.
-      if (app.clips.length === 0) return;
+      if (app.visible.length === 0) return;
       // Without this a focused card would also fire its own `click` — Chromium
       // activates a button on Enter's keydown — and re-select the clip we are
       // in the middle of leaving.
@@ -61,11 +62,11 @@
       // Spec §6.2: in the grid, Space previews in place. The "did it save?"
       // glance must not cost a page load.
       e.preventDefault();
-      const clip = app.clips[app.selected];
+      const clip = app.visible[app.selected];
       previewing = clip && previewing !== clip.id ? clip.id : null;
       return;
     }
-    const next = moveSelection(app.selected, e.key, app.clips.length, columns);
+    const next = moveSelection(app.selected, e.key, app.visible.length, columns);
     if (next !== app.selected) {
       e.preventDefault();
       app.selected = next;
@@ -93,8 +94,25 @@
 <header class="head">
   <h1>Clips</h1>
   <span class="cnt tnum">
-    {app.total} {app.total === 1 ? 'clip' : 'clips'}{#if librarySize} &middot; {librarySize}{/if}
+    {#if app.favoritesOnly}
+      <!-- "of N clips" rather than "N favourites": a clip un-starred while
+           filtering stays in the list until the filter is next switched on. -->
+      {app.visible.length} of {app.total} {app.total === 1 ? 'clip' : 'clips'}
+    {:else}
+      {app.total} {app.total === 1 ? 'clip' : 'clips'}{#if librarySize} &middot; {librarySize}{/if}
+    {/if}
   </span>
+  {#if app.clips.length > 0}
+    <button
+      type="button"
+      class="filter"
+      class:on={app.favoritesOnly}
+      aria-pressed={app.favoritesOnly}
+      onclick={() => app.setFavoritesOnly(!app.favoritesOnly)}>
+      <Icon name={app.favoritesOnly ? 'star-filled' : 'star'} size={13} />
+      Favourites
+    </button>
+  {/if}
 </header>
 
 {#if app.clips.length === 0}
@@ -117,9 +135,14 @@
       while you play.
     </p>
   </div>
+{:else if app.visible.length === 0}
+  <div class="empty">
+    <p class="big">No favourites yet.</p>
+    <p>Right-click a clip and choose Favourite, and it will show up here.</p>
+  </div>
 {:else}
   <div class="grid" bind:this={gridEl}>
-    {#each app.clips as clip, i (clip.id)}
+    {#each app.visible as clip, i (clip.id)}
       {#if previewing === clip.id}
         <!-- svelte-ignore a11y_media_has_caption -->
         <video class="preview" src={clipUrl(app.clipDir, clip.id)} autoplay loop muted></video>
@@ -143,6 +166,32 @@
   .head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px; }
   .head h1 { margin: 0; font-size: 15px; font-weight: 650; }
   .cnt { font-size: 11px; color: var(--faint); }
+  /* A pill, like the title bar's Arm button, and amber when on -- the colour
+     every favourite star in the app already is. */
+  .filter {
+    margin-left: auto;
+    align-self: center;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 11px;
+    border-radius: var(--r-full);
+    border: 1px solid var(--line-strong);
+    background: transparent;
+    color: var(--dim);
+    font: inherit;
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+  }
+  .filter:hover:not(.on) { background: var(--hover); border-color: var(--line-hi); color: var(--text); }
+  .filter.on {
+    color: var(--fav);
+    border-color: color-mix(in srgb, var(--fav) 45%, transparent);
+    background: color-mix(in srgb, var(--fav) 12%, transparent);
+  }
+  .filter.on:hover { background: color-mix(in srgb, var(--fav) 18%, transparent); }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; }
   .preview { width: 100%; aspect-ratio: 16 / 10; border-radius: var(--r-md); background: var(--video-bg); object-fit: cover; }
   .empty { display: grid; place-content: center; height: 60vh; text-align: center; gap: 6px; color: var(--dim); }

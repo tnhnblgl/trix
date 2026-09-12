@@ -111,6 +111,7 @@ beforeEach(() => {
   app.clips = [];
   app.total = 0;
   app.selected = 0;
+  app.favoriteIds = null;
   app.shots = [];
   app.shotTotal = 0;
   app.shotSelected = 0;
@@ -565,6 +566,113 @@ describe('AppState.current', () => {
     app.clips = [];
     app.selected = 0;
     expect(app.current).toBeNull();
+  });
+});
+
+describe('AppState favourites filter', () => {
+  const fav = (id: string): ClipMeta => ({ ...clip(id), favorite: true });
+
+  it('shows only the clips that were favourites when it was switched on', () => {
+    app.clips = [clip('a'), fav('b'), clip('c'), fav('d')];
+    app.setFavoritesOnly(true);
+    expect(app.favoritesOnly).toBe(true);
+    expect(app.visible.map((c) => c.id)).toEqual(['b', 'd']);
+
+    app.setFavoritesOnly(false);
+    expect(app.visible.map((c) => c.id)).toEqual(['a', 'b', 'c', 'd']);
+  });
+
+  it('keeps a clip unfavourited while filtering until the filter is switched on again', async () => {
+    app.clips = [fav('a'), fav('b')];
+    app.setFavoritesOnly(true);
+    app.selected = 1; // looking at 'b'
+    callMock.mockResolvedValue(clip('b'));
+
+    await app.setFavorite('b', false);
+
+    // Still on screen, still selected: the clip page does not jump.
+    expect(app.visible.map((c) => c.id)).toEqual(['a', 'b']);
+    expect(app.current?.id).toBe('b');
+    expect(app.current?.favorite).toBe(false);
+
+    app.setFavoritesOnly(false);
+    app.setFavoritesOnly(true);
+    expect(app.visible.map((c) => c.id)).toEqual(['a']);
+  });
+
+  it('keeps the selection on the same clip across a switch when the new list has it', () => {
+    app.clips = [clip('a'), fav('b'), fav('c')];
+    app.selected = 2; // 'c'
+    app.setFavoritesOnly(true);
+    expect(app.current?.id).toBe('c');
+    app.setFavoritesOnly(false);
+    expect(app.current?.id).toBe('c');
+  });
+
+  it('falls back to the first shown clip when the selected one is filtered out', () => {
+    app.clips = [clip('a'), fav('b'), clip('c')];
+    app.selected = 2; // 'c', not a favourite
+    app.setFavoritesOnly(true);
+    expect(app.selected).toBe(0);
+    expect(app.current?.id).toBe('b');
+  });
+
+  it('steps through favourites only', () => {
+    app.clips = [fav('a'), clip('b'), fav('c')];
+    app.setFavoritesOnly(true);
+    app.step(1);
+    expect(app.current?.id).toBe('c');
+    app.step(1); // already the last favourite
+    expect(app.current?.id).toBe('c');
+  });
+
+  it('lands a delete on the next shown clip, not the next clip in the library', async () => {
+    callMock.mockResolvedValue({});
+    app.clips = [fav('a'), clip('b'), fav('c'), fav('d')];
+    app.total = 4;
+    app.setFavoritesOnly(true);
+    app.selected = 1; // 'c'
+
+    await app.remove('c');
+
+    expect(app.current?.id).toBe('d');
+  });
+
+  it('returns to the grid once the last shown clip is deleted, even with others in the library', async () => {
+    callMock.mockResolvedValue({});
+    app.clips = [clip('a'), fav('b')];
+    app.total = 2;
+    app.setFavoritesOnly(true);
+    app.view = 'clip';
+
+    await app.remove('b');
+
+    expect(app.clips.map((c) => c.id)).toEqual(['a']);
+    expect(app.view).toBe('grid');
+  });
+
+  it('does not shift the selection for a new clip the filter is hiding', () => {
+    app.clips = [fav('a'), fav('b')];
+    app.total = 2;
+    app.setFavoritesOnly(true);
+    app.selected = 1; // 'b'
+    const handle = registerDaemonEventHandler();
+
+    handle({ event: 'clip_saved', data: clip('new') as unknown as Record<string, unknown> });
+
+    expect(app.clips.map((c) => c.id)).toEqual(['new', 'a', 'b']);
+    expect(app.current?.id).toBe('b');
+  });
+
+  it('re-takes its snapshot when the library is reloaded', async () => {
+    app.clips = [fav('a')];
+    app.setFavoritesOnly(true);
+    callMock.mockResolvedValue({ clips: [clip('x'), fav('y')], total: 2, offset: 0 });
+
+    await app.loadClips();
+
+    expect(app.favoritesOnly).toBe(true);
+    expect(app.visible.map((c) => c.id)).toEqual(['y']);
   });
 });
 
