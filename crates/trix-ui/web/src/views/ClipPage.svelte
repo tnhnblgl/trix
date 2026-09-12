@@ -190,6 +190,17 @@
         e.preventDefault();
         app.step(1);
         break;
+      // Volume, as in most players. Left and Right already step clips, and
+      // Up and Down had no job here. A focused slider -- the volume popup's own,
+      // or a trim handle -- stops its arrows before they reach this handler.
+      case 'ArrowUp':
+        e.preventDefault();
+        player?.stepVolume(1);
+        break;
+      case 'ArrowDown':
+        e.preventDefault();
+        player?.stepVolume(-1);
+        break;
       case ' ':
         e.preventDefault();
         playPause();

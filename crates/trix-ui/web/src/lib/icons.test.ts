@@ -8,7 +8,7 @@ import { ICONS, type IconName } from './icons';
  */
 const REQUIRED: IconName[] = [
   'play', 'pause', 'clips', 'settings', 'star', 'star-filled', 'pencil',
-  'trash', 'folder', 'scissors', 'volume', 'volume-mute', 'fullscreen',
+  'trash', 'folder', 'scissors', 'volume', 'volume-low', 'volume-mute', 'fullscreen',
   'fullscreen-exit', 'chevron-left', 'chevron-right', 'chevron-down', 'dots',
   'check', 'rearm', 'minimize', 'maximize', 'restore', 'close', 'alert',
   'camera', 'copy',

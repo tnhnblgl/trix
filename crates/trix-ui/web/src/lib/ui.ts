@@ -48,6 +48,22 @@ export function valueToRatio(value: number, min: number, max: number): number {
 }
 
 /**
+ * How far along a track a pointer sits, as a ratio `ratioToValue` takes.
+ *
+ * A vertical track counts from the bottom up -- louder is higher -- so its
+ * ratio is measured from the box's bottom edge, not its top.
+ */
+export function pointerRatio(
+  box: { left: number; bottom: number; width: number; height: number },
+  clientX: number,
+  clientY: number,
+  vertical: boolean,
+): number {
+  if (vertical) return box.height > 0 ? (box.bottom - clientY) / box.height : 0;
+  return box.width > 0 ? (clientX - box.left) / box.width : 0;
+}
+
+/**
  * `value` moved `delta` steps.
  *
  * Snapped after moving, not before, so a value the daemon handed back that is

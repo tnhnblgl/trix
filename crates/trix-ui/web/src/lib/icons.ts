@@ -20,7 +20,8 @@ export type IconDef = { d: string; filled?: true };
 
 export type IconName =
   | 'play' | 'pause' | 'clips' | 'settings' | 'star' | 'star-filled'
-  | 'pencil' | 'trash' | 'folder' | 'scissors' | 'volume' | 'volume-mute'
+  | 'pencil' | 'trash' | 'folder' | 'scissors' | 'volume' | 'volume-low'
+  | 'volume-mute'
   | 'fullscreen' | 'fullscreen-exit' | 'chevron-left' | 'chevron-right'
   | 'chevron-down' | 'dots' | 'check' | 'rearm' | 'minimize' | 'maximize'
   | 'restore' | 'close' | 'alert' | 'camera' | 'copy';
@@ -40,6 +41,7 @@ export const ICONS: Record<IconName, IconDef> = {
   folder: { d: 'M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z' },
   scissors: { d: 'M3 6a3 3 0 1 0 6 0a3 3 0 1 0 -6 0M8.12 8.12 12 12M20 4 8.12 15.88M3 18a3 3 0 1 0 6 0a3 3 0 1 0 -6 0M14.8 14.8 20 20' },
   volume: { d: 'M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298zM16 9a5 5 0 0 1 0 6M19.364 18.364a9 9 0 0 0 0-12.728' },
+  'volume-low': { d: 'M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298zM16 9a5 5 0 0 1 0 6' },
   'volume-mute': { d: 'M11 4.702a.7.7 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.7.7 0 0 0 11 19.298zM16.5 14.5l5-5M16.5 9.5l5 5' },
   fullscreen: { d: 'M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3' },
   'fullscreen-exit': { d: 'M8 3v3a2 2 0 0 1-2 2H3M21 8h-3a2 2 0 0 1-2-2V3M3 16h3a2 2 0 0 1 2 2v3M16 21v-3a2 2 0 0 1 2-2h3' },

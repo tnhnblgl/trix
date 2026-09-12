@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clamp, formatCombo, nextIndex, ratioToValue, resolveStepperInput, snapToStep, stepBy, valueToRatio } from './ui';
+import { clamp, formatCombo, nextIndex, pointerRatio, ratioToValue, resolveStepperInput, snapToStep, stepBy, valueToRatio } from './ui';
 
 describe('clamp', () => {
   it('passes a value already inside the range through', () => {
@@ -63,6 +63,25 @@ describe('valueToRatio', () => {
 
   it('returns 0 for a zero-width range rather than dividing by zero', () => {
     expect(valueToRatio(7, 7, 7)).toBe(0);
+  });
+});
+
+describe('pointerRatio', () => {
+  const box = { left: 100, bottom: 300, width: 200, height: 100 };
+
+  it('measures a horizontal track from its left edge', () => {
+    expect(pointerRatio(box, 150, 0, false)).toBe(0.25);
+  });
+
+  it('measures a vertical track from its bottom edge, so up is more', () => {
+    expect(pointerRatio(box, 0, 275, true)).toBe(0.25);
+    expect(pointerRatio(box, 0, 200, true)).toBe(1);
+  });
+
+  it('returns 0 for a track with no length rather than dividing by zero', () => {
+    const flat = { left: 0, bottom: 0, width: 0, height: 0 };
+    expect(pointerRatio(flat, 10, 10, false)).toBe(0);
+    expect(pointerRatio(flat, 10, 10, true)).toBe(0);
   });
 });
 

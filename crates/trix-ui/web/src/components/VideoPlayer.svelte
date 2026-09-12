@@ -1,8 +1,12 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import { formatClock } from '../lib/timeline';
+  import {
+    VOLUME_STEP, VOLUME_STORAGE_KEY, nudgeVolume, parseStoredVolume, unmutedLevel, volumeIcon,
+  } from '../lib/volume';
   import Icon from './ui/Icon.svelte';
   import IconButton from './ui/IconButton.svelte';
+  import Slider from './ui/Slider.svelte';
 
   let {
     src,
@@ -27,6 +31,119 @@
   let playing = $state(false);
   let muted = $state(false);
   let full = $state(false);
+
+  // Volume. The level is remembered across launches; muting is not, so a
+  // clip never opens silent because of something done in an earlier session.
+  const storedLevel = readStoredLevel();
+  let level = $state(storedLevel);
+  /** Where unmuting a level dragged to zero comes back to. */
+  let lastAudible = storedLevel > 0 ? storedLevel : 100;
+  let volEl = $state<HTMLDivElement | null>(null);
+
+  function readStoredLevel(): number {
+    try {
+      return parseStoredVolume(localStorage.getItem(VOLUME_STORAGE_KEY));
+    } catch {
+      return 100;
+    }
+  }
+
+  // `volume` and `muted` belong to the element and survive `ClipPage`
+  // repointing `src`, but they are set from state here all the same, so the
+  // speaker icon and what comes out of the speakers cannot disagree.
+  $effect(() => {
+    if (!video) return;
+    video.volume = level / 100;
+    video.muted = muted;
+  });
+
+  $effect(() => {
+    const value = String(level);
+    try {
+      localStorage.setItem(VOLUME_STORAGE_KEY, value);
+    } catch {
+      // Storage refused (a blocked profile): the level lasts this session only.
+    }
+  });
+
+  function setLevel(v: number) {
+    level = v;
+    if (v > 0) {
+      lastAudible = v;
+      muted = false;
+    }
+  }
+
+  function toggleMute() {
+    if (muted || level === 0) {
+      setLevel(unmutedLevel(level, lastAudible));
+      muted = false;
+    } else {
+      muted = true;
+    }
+  }
+
+  // The popup above the speaker. Open while the pointer is over the speaker or
+  // the popup, while keyboard focus is in either, and for a moment after a
+  // key or wheel step so the change can be seen. Not on mouse focus: WebView2
+  // focuses a button when it is clicked, and a popup that stayed up after
+  // clicking mute and moving away would read as stuck.
+  let hovering = $state(false);
+  let keyboardFocus = $state(false);
+  let flashing = $state(false);
+  const volumeOpen = $derived(hovering || keyboardFocus || flashing);
+  let leaveTimer: ReturnType<typeof setTimeout> | undefined;
+  let flashTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function onVolEnter() {
+    clearTimeout(leaveTimer);
+    hovering = true;
+  }
+
+  function onVolLeave() {
+    // A short grace period, so crossing from the speaker up to the popup --
+    // or overshooting its edge mid-adjustment -- does not close it.
+    clearTimeout(leaveTimer);
+    leaveTimer = setTimeout(() => (hovering = false), 250);
+  }
+
+  function onVolFocusIn(e: FocusEvent) {
+    const el = e.target as { matches?: (selector: string) => boolean } | null;
+    keyboardFocus = typeof el?.matches === 'function' && el.matches(':focus-visible');
+  }
+
+  function onVolFocusOut(e: FocusEvent) {
+    if (!(e.relatedTarget instanceof Node && volEl?.contains(e.relatedTarget))) keyboardFocus = false;
+  }
+
+  /** One volume step up (1) or down (-1), shown briefly in the popup. */
+  export function stepVolume(direction: 1 | -1) {
+    if (direction === 1) muted = false;
+    setLevel(nudgeVolume(level, direction));
+    flashing = true;
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => (flashing = false), 1000);
+  }
+
+  // The wheel over the speaker or its popup steps the volume. Registered by
+  // hand because it has to call `preventDefault` -- the clip page scrolls --
+  // and Svelte attaches `onwheel` as a passive listener, which cannot.
+  $effect(() => {
+    if (!volEl) return;
+    const el = volEl;
+    const onwheel = (e: WheelEvent) => {
+      if (e.deltaY === 0) return;
+      e.preventDefault();
+      stepVolume(e.deltaY < 0 ? 1 : -1);
+    };
+    el.addEventListener('wheel', onwheel, { passive: false });
+    return () => el.removeEventListener('wheel', onwheel);
+  });
+
+  $effect(() => () => {
+    clearTimeout(leaveTimer);
+    clearTimeout(flashTimer);
+  });
   let positionMs = $state(0);
   let durationMs = $state(0);
 
@@ -97,10 +214,38 @@
 
     <span class="clock tnum">{formatClock(positionMs)} / {formatClock(durationMs)}</span>
 
-    <IconButton
-      icon={muted ? 'volume-mute' : 'volume'}
-      label={muted ? 'Unmute' : 'Mute'}
-      onclick={() => { muted = !muted; if (video) video.muted = muted; }} />
+    <!-- The popup comes after the speaker in the markup so Tab reaches the
+         speaker first and then the slider, though it is drawn above. -->
+    <div
+      bind:this={volEl}
+      class="vol"
+      role="group"
+      aria-label="Volume"
+      onpointerenter={onVolEnter}
+      onpointerleave={onVolLeave}
+      onfocusin={onVolFocusIn}
+      onfocusout={onVolFocusOut}>
+      <IconButton
+        icon={volumeIcon(level, muted)}
+        label={muted || level === 0 ? 'Unmute' : 'Mute'}
+        onclick={toggleMute} />
+      {#if volumeOpen}
+        <div class="pop">
+          <div class="panel">
+            <span class="pct tnum">{muted ? 0 : level}</span>
+            <Slider
+              vertical
+              label="Volume"
+              min={0}
+              max={100}
+              step={VOLUME_STEP}
+              value={muted ? 0 : level}
+              oninput={setLevel}
+              onchange={setLevel} />
+          </div>
+        </div>
+      {/if}
+    </div>
     <IconButton
       icon={full ? 'fullscreen-exit' : 'fullscreen'}
       label={full ? 'Leave fullscreen' : 'Fullscreen'}
@@ -138,4 +283,32 @@
   .play:hover { background: var(--accent-hi); }
   .tl { flex: 1; min-width: 0; }
   .clock { font-size: 11px; color: var(--faint); flex: 0 0 auto; }
+
+  /* Above the speaker, over the bottom of the video, so opening it moves
+     nothing: the transport row shares its width with the timeline, and a
+     slider sliding out sideways would shift the trim handles under the
+     pointer. No ancestor up to `.content` sets a transform, filter or
+     `will-change`, so this z-index is ranked against the page rather than
+     trapped in a stacking context. The padding is the bridge the pointer
+     crosses from the speaker, so the gap does not count as leaving. */
+  .vol { position: relative; display: flex; }
+  .pop {
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    padding-bottom: 6px;
+    z-index: 10;
+  }
+  .panel {
+    display: grid;
+    justify-items: center;
+    gap: 8px;
+    padding: 9px 6px 12px;
+    background: var(--overlay);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-md);
+    box-shadow: var(--shadow);
+  }
+  .pct { font-size: 10.5px; color: var(--dim); }
 </style>
