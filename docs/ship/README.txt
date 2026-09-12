@@ -1,4 +1,4 @@
-Trix 1.2.2
+Trix 1.2.3
 ==========
 
 A clip recorder for Windows, for people whose PC cannot spare the frames.
@@ -6,6 +6,35 @@ Trix keeps the last few seconds of your screen in memory and writes them to
 a file when you press a key. Capture and encoding run on the GPU, so the
 cost to your game is close to nothing, and the app itself stays out of the
 way while you play.
+
+
+FIXED IN 1.2.3
+--------------
+
+Arming or disarming from the tray icon now reaches a Trix window you
+left open. Before this, the window went on showing the old state until
+you restarted it -- and if you disarmed from the tray, the window still
+said armed, and its own button could not put that right.
+
+The tray menu could also do the opposite of what you clicked. Arming
+takes a few seconds, so if something else was arming while your menu was
+open, a click on Arm could disarm instead. The menu now commits to what
+it offered you.
+
+"Start with Windows" no longer reports itself as on when it is not.
+The startup entry records a full path, and Trix only checked that an
+entry existed at all -- so after unzipping into a new folder, Settings
+showed the setting on while nothing actually started at login. Trix now
+checks where the entry points. A stale one shows as off, and switching
+it on writes the correct path, which is the whole repair.
+
+That last one replaces the manual step the 1.2.2 notes below describe.
+It still applies when updating *to* this version, because the old copy
+is what does the checking -- but from here on a new folder reports
+itself honestly.
+
+Also fixed: a capture error message that came out with a gap in the
+middle of a sentence.
 
 
 FIXED IN 1.2.2
