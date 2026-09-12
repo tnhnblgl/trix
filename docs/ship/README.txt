@@ -59,6 +59,8 @@ WHAT IS IN THIS FOLDER
                    starts it, so you do not normally run this yourself.
   trix.exe         A command-line interface, for scripting and diagnostics.
   LICENSE          MIT.
+  THIRD-PARTY-NOTICES.txt
+                   Licences for material Trix includes (its icons).
 
 
 REQUIREMENTS

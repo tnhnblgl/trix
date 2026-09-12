@@ -5,7 +5,8 @@
 
 .DESCRIPTION
     Produces trix-v<version>-win-x64.zip containing the three binaries, the
-    LICENSE, and the user-facing docs\ship\README.txt. There is no installer
+    LICENSE, THIRD-PARTY-NOTICES.txt (the icon set's licence, which has to
+    travel with every copy), and the user-facing docs\ship\README.txt. There is no installer
     yet, so this zip IS the product: whatever it contains is what a stranger
     downloads and runs.
 
@@ -244,6 +245,7 @@ New-Item -ItemType Directory -Force $stage | Out-Null
 try {
     foreach ($b in $binaries) { Copy-Item (Join-Path $relDir $b) (Join-Path $stage $b) -Force }
     Copy-Item (Join-Path $RepoRoot 'LICENSE') (Join-Path $stage 'LICENSE') -Force
+    Copy-Item (Join-Path $RepoRoot 'THIRD-PARTY-NOTICES.txt') (Join-Path $stage 'THIRD-PARTY-NOTICES.txt') -Force
 
     # CRLF and no BOM. This file is opened in Notepad by people who just
     # unzipped it, and it is the first thing they read.
