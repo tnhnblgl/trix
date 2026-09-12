@@ -22,7 +22,8 @@
   let previewing = $state<string | null>(null);
   let gridEl = $state<HTMLDivElement | null>(null);
   /**
-   * The clip a card's menu asked to delete, while the dialog asks whether to.
+   * The clip a card's menu or the Delete key asked to delete, while the dialog
+   * asks whether to.
    *
    * Hosted here rather than in `ClipCard`: `Modal`'s scrim is
    * `position: fixed`, and a card's hover lift is a `transform`, which would
@@ -84,6 +85,16 @@
       e.preventDefault();
       const clip = app.visible[app.selected];
       previewing = clip && previewing !== clip.id ? clip.id : null;
+      return;
+    }
+    if (e.key === 'Delete') {
+      // The same question the card menus and the clip page ask. The rename box
+      // never gets here -- `shouldHandleKey` leaves a typing target its own
+      // Delete -- so this is always the selected card's.
+      const clip = app.visible[app.selected];
+      if (!clip) return;
+      e.preventDefault();
+      deleting = clip;
       return;
     }
     const next = moveSelection(app.selected, e.key, app.visible.length, columns);

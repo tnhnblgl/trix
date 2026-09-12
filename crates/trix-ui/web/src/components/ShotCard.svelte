@@ -18,9 +18,8 @@
   /** Where the card was right-clicked, while its menu is open. */
   let menuAt = $state<{ x: number; y: number } | null>(null);
 
-  /** The buttons on the tile, plus Open. */
+  /** The same three actions as the buttons on the tile. */
   const items: MenuItem[] = [
-    { id: 'open', label: 'Open' },
     { id: 'copy', label: 'Copy', icon: 'copy' },
     { id: 'reveal', label: 'Show in folder', icon: 'folder' },
     { id: 'delete', label: 'Delete', icon: 'trash', danger: true, separatorBefore: true },
@@ -28,8 +27,7 @@
 
   function pick(id: string) {
     menuAt = null;
-    if (id === 'open') onopen();
-    else if (id === 'copy') app.copyShot(shot.id);
+    if (id === 'copy') app.copyShot(shot.id);
     else if (id === 'reveal') app.revealShot(shot.id);
     else if (id === 'delete') ondelete();
   }

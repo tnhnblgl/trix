@@ -27,7 +27,6 @@
 
   /** One list for the `⋯` menu and the right-click menu, so they cannot drift apart. */
   const items: MenuItem[] = $derived([
-    { id: 'open', label: 'Open' },
     { id: 'favorite', label: clip.favorite ? 'Unfavourite' : 'Favourite', icon: clip.favorite ? 'star-filled' : 'star' },
     { id: 'rename', label: 'Rename', icon: 'pencil' },
     { id: 'reveal', label: 'Show in folder', icon: 'folder' },
@@ -41,8 +40,7 @@
 
   function pick(id: string) {
     closeMenus();
-    if (id === 'open') onopen();
-    else if (id === 'favorite') onfavorite();
+    if (id === 'favorite') onfavorite();
     else if (id === 'rename') {
       draft = clip.title;
       renaming = true;
