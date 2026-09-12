@@ -66,8 +66,8 @@ const BOUNDS: Record<string, [number, number]> = {
   monitor_index: [0, 63],
   stats_seconds: [0, 86400],
   max_library_gb: [0, 10000],
-  system_volume: [0, 100],
-  mic_volume: [0, 100],
+  system_volume: [0, 200],
+  mic_volume: [0, 200],
 };
 
 /**
@@ -131,8 +131,8 @@ export const FIELDS: Field[] = [
       { value: 'dd', label: 'Desktop Duplication' },
     ], help: 'If Windows draws a yellow border around your screen while Trix is armed, choose Desktop Duplication -- it is not subject to that border. It cannot record the mouse cursor, in clips or in screenshots. Automatic is Windows Graphics Capture.' },
 
-  { key: 'system_volume', label: 'PC sound', kind: 'slider', section: 'Audio', ...span('system_volume'), help: 'How loud your PC\'s own sound is in the clip. Affects the recording only, never your Windows volume. 0 turns it off.' },
-  { key: 'mic_volume', label: 'Microphone', kind: 'slider', section: 'Audio', ...span('mic_volume'), help: 'How loud your voice is in the clip. 0 closes the microphone entirely, so Windows stops showing Trix as using it.' },
+  { key: 'system_volume', label: 'PC sound', kind: 'slider', section: 'Audio', ...span('system_volume'), help: 'How loud your PC\'s own sound is in the clip. Affects the recording only, never your Windows volume. 100 is the sound untouched; above that Trix amplifies it, which can distort. 0 turns it off.' },
+  { key: 'mic_volume', label: 'Microphone', kind: 'slider', section: 'Audio', ...span('mic_volume'), help: 'How loud your voice is in the clip. 100 is your microphone untouched; above that Trix amplifies it, which is the fix for a mic that stays too quiet even at full Windows level, and can distort. 0 closes the microphone entirely, so Windows stops showing Trix as using it.' },
 
   { key: 'bitrate_kbps', label: 'Target bitrate', kind: 'tier', section: 'Quality', ...span('bitrate_kbps'), tiers: BITRATE_TIERS, help: 'How much data a second of video gets. Higher tiers hold up better in fast motion and cost more disk per clip -- and more RAM, because the replay buffer holds this many seconds of it. Custom takes any number.' },
   { key: 'max_bitrate_kbps', label: 'Peak bitrate', kind: 'number', section: 'Quality', ...span('max_bitrate_kbps'), help: '0 means 1.5x the target. This cap is also the replay buffer\'s worst-case RAM.' },
@@ -154,6 +154,7 @@ export const FIELDS: Field[] = [
   { key: 'clip_sound', label: 'Clip sound', kind: 'bool', section: 'Trix', help: 'Plays a sound when a clip is saved, even when the Trix window is closed.' },
   { key: 'clip_sound_path', label: 'Sound file', kind: 'sound', section: 'Trix', help: 'Your own sound, or Trix\'s built-in one. mp3, wav, m4a and anything else Windows can play. Only the first 10 seconds are used.' },
   { key: 'autostart', label: 'Start with Windows', kind: 'bool', section: 'Trix', help: 'Off by default. Writes the registry Run entry, which is the source of truth.' },
+  { key: 'auto_arm', label: 'Arm when Trix starts', kind: 'bool', section: 'Trix', help: 'Starts filling the replay buffer as soon as Trix does, so there is nothing to remember to switch on. Worth pairing with "Start with Windows". Takes effect the next time Trix starts, and holds the encoder and the buffer\'s memory for as long as it stays armed.' },
   { key: 'discord_presence', label: 'Discord presence', kind: 'bool', section: 'Trix', help: 'Shows "Clipping with Trix" on your Discord profile, with a button your friends can use to get it, for as long as Trix is running. Talks only to the Discord app on this PC and sends nothing about you.' },
   { key: 'stats_seconds', label: 'Stats interval', kind: 'number', section: 'Trix', ...span('stats_seconds'), help: 'Seconds between performance reports. 0 turns them off.' },
 

@@ -111,14 +111,22 @@ describe('FIELDS', () => {
     }
   });
 
-  it('bounds both levels at 0 to 100, mirroring the daemon', () => {
-    // 100 is unity and the maximum. A page that let someone ask for 150
-    // would produce a round trip that fails for a reason the field cannot
-    // explain.
-    expect(validate('mic_volume', 101)).toMatch(/0 to 100/);
-    expect(validate('system_volume', 101)).toMatch(/0 to 100/);
+  it('bounds both levels at 0 to 200, mirroring the daemon', () => {
+    // 100 is unity; 200 is the ceiling the mixer's MAX_VOLUME_PERCENT sets.
+    // A page that let someone ask for 201 would produce a round trip that
+    // fails for a reason the field cannot explain.
+    expect(validate('mic_volume', 201)).toMatch(/0 to 200/);
+    expect(validate('system_volume', 201)).toMatch(/0 to 200/);
     expect(validate('mic_volume', 0)).toBeNull();
     expect(validate('system_volume', 100)).toBeNull();
+  });
+
+  it('accepts the boost range both sliders can now reach', () => {
+    // The half of the travel that did not exist before. If BOUNDS fell back
+    // to 100 the sliders would still render to 200 and every value above
+    // unity would be refused on save.
+    expect(validate('mic_volume', 150)).toBeNull();
+    expect(validate('system_volume', 200)).toBeNull();
   });
 });
 

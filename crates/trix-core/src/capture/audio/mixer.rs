@@ -13,16 +13,44 @@ use super::{
     source::{AudioCapture, AudioSourceKind},
 };
 
-/// Converts a 0–100 level into a linear multiplier: the percentage squared.
+/// The loudest either level may be set to. `100` is unity — the audio exactly
+/// as the system mixed it — so this is a 2x boost in amplitude, about +6 dB.
 ///
-/// Scaling amplitude directly by the percentage makes a slider feel dead —
-/// loudness is roughly logarithmic in amplitude, so every audible change
-/// crowds into the bottom third of the travel. Squaring is the standard fader
-/// taper. Values above 100 clamp: 100 is unity and the maximum, so Trix can
-/// never be the reason a clip clips.
+/// It exists because the opposite problem turned out to be the common one: a
+/// microphone that is simply too quiet in the finished clip, on a machine
+/// where Windows' own input level is already at maximum. Attenuating in Trix
+/// could not fix that, and asking people to re-record is not a fix either.
+pub const MAX_VOLUME_PERCENT: u32 = 200;
+
+/// Converts a level into a linear amplitude multiplier.
+///
+/// Below unity the curve is the percentage squared. Scaling amplitude directly
+/// by the percentage makes a fader feel dead — loudness is roughly logarithmic
+/// in amplitude, so every audible change crowds into the bottom third of the
+/// travel. Squaring is the standard fader taper.
+///
+/// Above unity it is linear instead, so `200` is 2.0 and not 4.0. The squared
+/// taper is a fix for *attenuation* feeling wrong, and that reasoning does not
+/// carry over: continuing it upward would put +12 dB at the top of the slider,
+/// where almost any real material clips into distortion, and would make the
+/// usable part of the boost range a few pixels wide. Linear puts +6 dB there
+/// and spends the travel on levels a person might actually want.
+///
+/// The slope therefore halves at unity. That is deliberate: finer control is
+/// worth more above 100 than below, because that is the half where a wrong
+/// setting damages the recording rather than just making it quiet.
+///
+/// Boost can clip, and the doc on [`MAX_VOLUME_PERCENT`] says why that trade
+/// was taken. `apply_gain` and `mix_into` both clamp to the `i16` range, so a
+/// clipped sample saturates — it never wraps into noise.
 fn percent_to_gain(percent: u32) -> f32 {
-    let fraction = percent.min(100) as f32 / 100.0;
-    fraction * fraction
+    let percent = percent.min(MAX_VOLUME_PERCENT);
+    if percent <= 100 {
+        let fraction = percent as f32 / 100.0;
+        fraction * fraction
+    } else {
+        1.0 + (percent - 100) as f32 / 100.0
+    }
 }
 
 /// Scales interleaved i16 PCM in place.
@@ -76,16 +104,16 @@ pub struct AudioGains {
 impl AudioGains {
     pub fn new(system_percent: u32, mic_percent: u32) -> Arc<Self> {
         Arc::new(Self {
-            system: AtomicU32::new(system_percent.min(100)),
-            mic: AtomicU32::new(mic_percent.min(100)),
+            system: AtomicU32::new(system_percent.min(MAX_VOLUME_PERCENT)),
+            mic: AtomicU32::new(mic_percent.min(MAX_VOLUME_PERCENT)),
         })
     }
 
     /// Applied to audio captured from here on. Audio already in the replay
     /// ring keeps the levels it was captured at.
     pub fn set(&self, system_percent: u32, mic_percent: u32) {
-        self.system.store(system_percent.min(100), Ordering::Relaxed);
-        self.mic.store(mic_percent.min(100), Ordering::Relaxed);
+        self.system.store(system_percent.min(MAX_VOLUME_PERCENT), Ordering::Relaxed);
+        self.mic.store(mic_percent.min(MAX_VOLUME_PERCENT), Ordering::Relaxed);
     }
 
     pub fn system_percent(&self) -> u32 {
@@ -399,11 +427,38 @@ mod tests {
     }
 
     #[test]
-    fn the_taper_never_amplifies() {
-        // 100 is the maximum and unity: Trix is never the reason a clip clips.
-        for percent in 0..=200u32 {
-            assert!(percent_to_gain(percent) <= 1.0, "gain exceeded unity at {percent}");
+    fn boost_is_linear_above_unity() {
+        // Not the squared taper continued upward, which would put 4.0 here and
+        // make the top of the slider unusable. See `percent_to_gain`.
+        assert!((percent_to_gain(150) - 1.5).abs() < 1e-6);
+        assert!((percent_to_gain(200) - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn raising_the_ceiling_did_not_move_any_setting_below_unity() {
+        // The half of the range every existing config sits in. If this drifted,
+        // everyone's clips would change loudness on update without them asking.
+        for percent in 0..=100u32 {
+            let fraction = percent as f32 / 100.0;
+            assert!(
+                (percent_to_gain(percent) - fraction * fraction).abs() < 1e-6,
+                "the attenuation curve moved at {percent}"
+            );
         }
+    }
+
+    #[test]
+    fn the_taper_rises_to_the_documented_maximum_and_stops() {
+        let mut previous = 0.0;
+        for percent in 0..=MAX_VOLUME_PERCENT {
+            let gain = percent_to_gain(percent);
+            assert!(gain >= previous, "gain fell at {percent}");
+            previous = gain;
+        }
+        assert!((percent_to_gain(MAX_VOLUME_PERCENT) - 2.0).abs() < 1e-6);
+        // Anything past the ceiling clamps rather than amplifying further --
+        // a hand-edited config must not be able to ask for 10x.
+        assert_eq!(percent_to_gain(10_000), percent_to_gain(MAX_VOLUME_PERCENT));
     }
 
     #[test]
@@ -485,10 +540,24 @@ mod tests {
     #[test]
     fn gains_clamp_a_value_above_the_bound() {
         // The daemon rejects these before they arrive, but AudioGains is
-        // public API and must not produce an amplifying gain for anyone.
+        // public API and must not amplify past the documented ceiling for
+        // anyone -- 400 is 4x, which turns any real material into distortion.
         let gains = AudioGains::new(400, 400);
-        assert_eq!(gains.system(), 1.0);
-        assert_eq!(gains.mic(), 1.0);
+        assert_eq!(gains.system_percent(), MAX_VOLUME_PERCENT);
+        assert_eq!(gains.mic_percent(), MAX_VOLUME_PERCENT);
+        assert_eq!(gains.system(), 2.0);
+        assert_eq!(gains.mic(), 2.0);
+    }
+
+    #[test]
+    fn gains_carry_a_boost_through_unchanged() {
+        // The point of the whole change: a level above unity has to survive
+        // the trip from config into the gain the mixer actually applies.
+        let gains = AudioGains::new(200, 150);
+        assert_eq!(gains.system_percent(), 200);
+        assert_eq!(gains.mic_percent(), 150);
+        assert!((gains.system() - 2.0).abs() < 1e-6);
+        assert!((gains.mic() - 1.5).abs() < 1e-6);
     }
 
     use crate::capture::audio::{AudioPacket, ENCODER_BLOCK_ALIGN, SAMPLE_RATE, frames_to_100ns};

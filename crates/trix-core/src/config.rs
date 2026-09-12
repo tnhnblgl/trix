@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::capture::audio::MAX_VOLUME_PERCENT;
+
 /// Encoder rate-control strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RateControl {
@@ -110,16 +112,17 @@ pub struct Config {
     /// one number in Settings arms it -- Trix just will not delete anything it
     /// was not asked to.
     pub max_library_gb: u32,
-    /// How loud the PC's own sound is in saved clips, 0–100.
+    /// How loud the PC's own sound is in saved clips, 0–200.
     ///
-    /// `100` (the default) is unity and the maximum: Trix never amplifies
-    /// above what the system already mixed, so it can never be the reason a
-    /// clip clips. The scale is a squared fader taper, so `50` is roughly half
-    /// the perceived loudness rather than half the amplitude.
+    /// `100` is unity and the default: the audio exactly as the system mixed
+    /// it. Below that the scale is a squared fader taper, so `50` is roughly
+    /// half the perceived loudness rather than half the amplitude. Above it the
+    /// scale is linear, so `200` is twice the amplitude — about +6 dB — and can
+    /// clip. See `MAX_VOLUME_PERCENT` for why boosting is offered at all.
     ///
     /// `0` does not mute the stream — it never opens it.
     pub system_volume: u32,
-    /// How loud the microphone is in saved clips, 0–100, on the same scale as
+    /// How loud the microphone is in saved clips, 0–200, on the same scale as
     /// [`Config::system_volume`].
     ///
     /// `0` leaves the microphone closed rather than captured and multiplied by
@@ -137,6 +140,20 @@ pub struct Config {
     /// writes it. The key exists here so it round-trips and so a third-party UI
     /// can offer the toggle.
     pub autostart: bool,
+    /// Arm capture as soon as the daemon starts, instead of waiting to be asked
+    /// (spec §7.3).
+    ///
+    /// Off by default. Arming holds a hardware encoder and a replay ring's
+    /// worth of RAM for as long as it lasts, which is not a cost to take on
+    /// somebody's behalf — but for anyone running Trix with
+    /// [`Config::autostart`] it is the difference between a recorder that is
+    /// ready and one that was never switched on. Forgetting to arm is the way
+    /// people lose the clip they wanted, and they only find out afterwards.
+    ///
+    /// Read once, at daemon startup. Changing it does not arm or disarm
+    /// anything now — it is not in `REQUIRES_REARM` either, because it has
+    /// nothing to say about how a session is built.
+    pub auto_arm: bool,
     /// Whether the desktop app asks GitHub for a newer release on launch.
     ///
     /// Stored here so the settings page reaches it through the same
@@ -234,6 +251,7 @@ impl Default for Config {
             system_volume: 100,
             mic_volume: 100,
             autostart: false,
+            auto_arm: false,
             check_for_updates: true,
             clip_sound: true,
             clip_sound_path: String::new(),
@@ -381,20 +399,24 @@ impl Config {
         config
     }
 
-    /// Clamps the two capture levels to their documented 0..=100 range.
+    /// Clamps the two capture levels to their documented 0..=200 range.
     ///
     /// `config.set` enforces this range itself (`state.rs`'s bounds table), but
     /// a hand-edited `config.toml` bypasses that check entirely — `toml`
     /// deserializes `mic_volume = 500` into a `u32` without complaint, since
     /// nothing at the type level says otherwise. Left unclamped, `config.get`
     /// would report 500 and the Settings page would render "500%" next to a
-    /// slider pinned at 100, while `AudioGains::new`'s own `.min(100)` quietly
-    /// capped what capture actually applied — display and reality would
+    /// slider pinned at its maximum, while `AudioGains::new`'s own clamp
+    /// quietly capped what capture actually applied — display and reality would
     /// disagree. This is the one place that has to catch a value nothing else
     /// validates.
+    ///
+    /// The ceiling is [`MAX_VOLUME_PERCENT`], imported rather than written out,
+    /// so this and the gain curve can never be raised independently of each
+    /// other.
     fn clamp_volumes(&mut self) {
-        self.system_volume = self.system_volume.min(100);
-        self.mic_volume = self.mic_volume.min(100);
+        self.system_volume = self.system_volume.min(MAX_VOLUME_PERCENT);
+        self.mic_volume = self.mic_volume.min(MAX_VOLUME_PERCENT);
     }
 
     /// Resolved clip directory (spec §5.1). A flat, timestamped folder —
@@ -568,15 +590,33 @@ mod tests {
     /// path from `%APPDATA%` and cannot be pointed at a fixture here) is the
     /// only place left to catch it, and it has to, or the Settings page
     /// renders "500%" next to a slider capture never actually reaches
-    /// (`AudioGains::new` clamps to 100 regardless).
+    /// (`AudioGains::new` clamps regardless).
     #[test]
     fn a_hand_edited_out_of_range_level_is_clamped() {
         let mut config: Config = toml::from_str("system_volume = 500\nmic_volume = 9001\n")
             .expect("an out-of-range level still parses");
         assert_eq!(config.system_volume, 500, "unclamped straight out of toml::from_str");
         config.clamp_volumes();
-        assert_eq!(config.system_volume, 100, "500% must clamp to the documented maximum");
-        assert_eq!(config.mic_volume, 100, "9001% must clamp to the documented maximum");
+        assert_eq!(
+            config.system_volume, MAX_VOLUME_PERCENT,
+            "500% must clamp to the documented maximum"
+        );
+        assert_eq!(
+            config.mic_volume, MAX_VOLUME_PERCENT,
+            "9001% must clamp to the documented maximum"
+        );
+    }
+
+    /// A level inside the new boost range survives the clamp untouched. The
+    /// test above only proves the ceiling holds; this one proves the ceiling
+    /// moved, which is the change nobody would notice breaking.
+    #[test]
+    fn a_boosted_level_is_left_alone() {
+        let mut config: Config = toml::from_str("system_volume = 200\nmic_volume = 140\n")
+            .expect("a boosted level parses");
+        config.clamp_volumes();
+        assert_eq!(config.system_volume, 200);
+        assert_eq!(config.mic_volume, 140);
     }
 
     /// `serde(default)` on a bool is `false`, so a config file written before

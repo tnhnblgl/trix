@@ -22,8 +22,13 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use serde_json::{Map, Value};
 use trix_core::{
-    capture::audio::AudioGains, config::Config, control, control::SingleInstance,
-    engine::EngineHandle, engine::EngineStatus, export, library, shot, stats,
+    capture::audio::{AudioGains, MAX_VOLUME_PERCENT},
+    config::Config,
+    control,
+    control::SingleInstance,
+    engine::EngineHandle,
+    engine::EngineStatus,
+    export, library, shot, stats,
 };
 use trix_proto::{ClipMeta, Event, ShotMeta};
 
@@ -328,10 +333,12 @@ fn crosses_zero(key: &str, before: Option<&Value>, after: Option<&Value>) -> boo
 ///   to run on, and the ceiling only ever *deletes*, so an absurdly large
 ///   value is inert while an absurdly small one is already handled (favorites
 ///   are never pruned).
-/// - `system_volume` 0..=100 — a percentage, where 100 is unity and the
-///   maximum: Trix attenuates but never amplifies, so there is no legal value
-///   above it. 0 stays legal and means the loopback stream is never opened.
-/// - `mic_volume` 0..=100 — the same taper, and 0 carries more weight here than
+/// - `system_volume` 0..=200 — a percentage, where 100 is unity: the audio as
+///   the system mixed it. Above unity Trix amplifies, which can clip, and the
+///   ceiling is [`trix_core::capture::audio::MAX_VOLUME_PERCENT`] rather than a
+///   number written here, so the bound and the gain curve cannot drift apart.
+///   0 stays legal and means the loopback stream is never opened.
+/// - `mic_volume` 0..=200 — the same taper, and 0 carries more weight here than
 ///   anywhere else in this table: it is the *only* way to turn the microphone
 ///   off, because there is no separate toggle. Windows shows a microphone
 ///   indicator whenever a process holds an input stream, so 0 must leave the
@@ -353,8 +360,8 @@ const NUMERIC_BOUNDS: [(&str, u64, u64); 9] = [
     ("monitor_index", 0, 63),
     ("stats_seconds", 0, 86_400),
     ("max_library_gb", 0, 10_000),
-    ("system_volume", 0, 100),
-    ("mic_volume", 0, 100),
+    ("system_volume", 0, MAX_VOLUME_PERCENT as u64),
+    ("mic_volume", 0, MAX_VOLUME_PERCENT as u64),
 ];
 
 /// Refuses the whole request if any bounded key is out of range.
@@ -1028,6 +1035,16 @@ impl Daemon {
     /// (`Config::hotkey_mode`) instead of at each call site.
     pub fn hotkey_mode(&self) -> trix_core::config::HotkeyMode {
         self.lock_config().hotkey_mode()
+    }
+
+    /// Whether the daemon should arm itself on startup without being asked.
+    ///
+    /// Read once, by `main`. Unlike `discord_presence` there is no loop to
+    /// re-read it: turning it on mid-session must not arm anything, because a
+    /// setting that armed on the spot would take the encoder from a user who
+    /// was only saying what they want *next* time.
+    pub fn auto_arm(&self) -> bool {
+        self.lock_config().auto_arm
     }
 
     /// Whether Discord presence should be up right now.
@@ -2774,8 +2791,49 @@ mod tests {
     #[test]
     fn a_level_above_the_range_is_refused() {
         let (daemon, dir) = writable("refused");
-        let error = daemon.set_config(&one("mic_volume", 101)).expect_err("101 is out of range");
-        assert!(format!("{error}").contains("0 to 100"), "unexpected message: {error}");
+        let over = u64::from(MAX_VOLUME_PERCENT) + 1;
+        let error = daemon
+            .set_config(&one("mic_volume", over))
+            .expect_err("one past the ceiling is out of range");
+        assert!(format!("{error}").contains("0 to 200"), "unexpected message: {error}");
+        cleanup(&dir);
+    }
+
+    /// The ceiling moved from 100 to 200, and a bounds table that did not move
+    /// with it would refuse every boosted level the Settings slider can now
+    /// reach — with the slider still happily offering them.
+    /// `auto_arm` is off unless it was asked for, and turning it on does not
+    /// arm anything now.
+    ///
+    /// The second half is the part worth pinning. `main` reads this key once,
+    /// at startup, so a `config.set` that flipped it must leave the daemon
+    /// exactly as idle as it found it — a settings toggle that seized the
+    /// encoder the moment it was clicked would be answering a question about
+    /// *next* launch by acting on this one.
+    #[test]
+    fn auto_arm_is_opt_in_and_does_not_arm_on_the_spot() {
+        let (daemon, dir) = writable("auto-arm");
+        assert!(!daemon.auto_arm(), "auto_arm must default to off");
+
+        let mut values = Map::new();
+        values.insert("auto_arm".into(), Value::Bool(true));
+        let update = daemon.set_config(&values).expect("auto_arm is a known key");
+
+        assert_eq!(update.accepted.get("auto_arm"), Some(&Value::Bool(true)));
+        assert!(daemon.auto_arm(), "the daemon must read back what was saved");
+        assert!(update.requires_rearm.is_empty(), "auto_arm has nothing to do with a session");
+        assert!(!daemon.status().armed, "setting auto_arm must not arm the daemon now");
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn a_boosted_level_is_accepted() {
+        let (daemon, dir) = writable("boost");
+        let update = daemon
+            .set_config(&one("mic_volume", u64::from(MAX_VOLUME_PERCENT)))
+            .expect("the documented maximum is in range");
+        assert_eq!(update.accepted.get("mic_volume"), Some(&Value::from(MAX_VOLUME_PERCENT)));
+        assert!(update.requires_rearm.is_empty(), "a boost asked for a re-arm");
         cleanup(&dir);
     }
 

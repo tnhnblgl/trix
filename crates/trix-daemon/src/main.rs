@@ -200,6 +200,40 @@ fn attach_parent_console() {
     }
 }
 
+/// Arms the daemon on startup when `auto_arm` is set, on a thread of its own.
+///
+/// Off the main thread deliberately. `arm` brings a hardware encoder up and
+/// takes seconds; doing it inline would hold the socket closed for that whole
+/// time, and the desktop app launched alongside the daemon would find nothing
+/// to connect to and report the daemon as down. Arming behind the pipe means
+/// the app connects immediately and watches the arm land through `armed`,
+/// exactly as if a person had clicked it.
+///
+/// A failure is logged and nothing more. The reasons this fails are the
+/// ordinary ones — no hardware encoder on the capture adapter, or a
+/// `trix replay` already holding the single-instance slot — and none of them
+/// is a reason for the daemon to refuse to serve. The tray icon and `status`
+/// both go on reporting idle, which is the truth, and the rail's arm control
+/// still works.
+fn spawn_auto_arm(daemon: Arc<Daemon>) -> anyhow::Result<()> {
+    if !daemon.auto_arm() {
+        return Ok(());
+    }
+    std::thread::Builder::new().name("trix-auto-arm".into()).spawn(move || {
+        tracing::info!("auto_arm is set — arming");
+        match daemon.arm() {
+            // `Daemon::arm` broadcasts `armed` itself, so a client that
+            // connects later sees this through its own `status` call and one
+            // that is already connected gets the event. Nothing to do here.
+            Ok(_) => tracing::info!("armed on startup"),
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "could not arm on startup");
+            }
+        }
+    })?;
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     attach_parent_console();
     init_tracing();
@@ -276,6 +310,8 @@ fn main() -> anyhow::Result<()> {
             window::handle_action(&worker_daemon, action);
         }
     })?;
+
+    spawn_auto_arm(Arc::clone(&daemon))?;
 
     // `pipe::serve` logs "listening on {PIPE_NAME}" itself, once the first
     // pipe instance is actually bound — see the comment in `pipe.rs`.
