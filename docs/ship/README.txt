@@ -1,4 +1,4 @@
-Trix 1.2.3
+Trix 1.3.0
 ==========
 
 A clip recorder for Windows, for people whose PC cannot spare the frames.
@@ -8,262 +8,31 @@ cost to your game is close to nothing, and the app itself stays out of the
 way while you play.
 
 
-FIXED IN 1.2.3
---------------
-
-Arming or disarming from the tray icon now reaches a Trix window you
-left open. Before this, the window went on showing the old state until
-you restarted it -- and if you disarmed from the tray, the window still
-said armed, and its own button could not put that right.
-
-The tray menu could also do the opposite of what you clicked. Arming
-takes a few seconds, so if something else was arming while your menu was
-open, a click on Arm could disarm instead. The menu now commits to what
-it offered you.
-
-"Start with Windows" no longer reports itself as on when it is not.
-The startup entry records a full path, and Trix only checked that an
-entry existed at all -- so after unzipping into a new folder, Settings
-showed the setting on while nothing actually started at login. Trix now
-checks where the entry points. A stale one shows as off, and switching
-it on writes the correct path, which is the whole repair.
-
-That last one replaces the manual step the 1.2.2 notes below describe.
-It still applies when updating *to* this version, because the old copy
-is what does the checking -- but from here on a new folder reports
-itself honestly.
-
-Also fixed: a capture error message that came out with a gap in the
-middle of a sentence.
-
-
-FIXED IN 1.2.2
---------------
-
-If Trix was set to start with Windows, a black window full of log lines
-opened at every login. That window was the Trix background process, which
-was built as a console program: anything that launches one of those directly
-gets a console with it, and the Windows startup list launches it directly.
-It is built as a windowed program now and starts out of sight.
-
-One thing to check if you unzipped this version into a new folder rather
-than over the old one: the startup list still points at the copy you had
-before, so that is the one Windows keeps opening. Turn "Start with Windows"
-off and on again in Settings and it will point here instead.
-
-
-FIXED IN 1.2.1
---------------
-
-Wizard hotkey press not detecting is fixed
-
-
-NEW IN 1.2.0
+NEW IN 1.3.0
 ------------
 
-If your clip key does nothing inside a game, there is now a setting for it:
-Settings -> Trix -> Hotkey detection.
+The two volume sliders now go up to 200. They still start at 100, which
+is the sound exactly as your PC mixed it -- nothing changes unless you
+move them.
 
-Normally Trix asks Windows to reserve your combination. That can fail two
-ways. Another program may already own the key -- Trix now says so, in red,
-under the hotkey itself, instead of leaving you with a key that quietly does
-nothing. Or the reservation works fine and the game takes the key first, which
-is harder to spot, because the Test button in Settings still lights up and only
-the game ignores you.
+Anything above 100 makes Trix amplify. This is for the case the old limit
+could not help with: a microphone that comes out too quiet in the clip
+even with Windows already at full input level. Turning Trix up is the
+only thing left that can fix that. Pushed far enough it will distort, the
+same way any recording does, so raise it until your voice sits right and
+no further.
 
-"Low level" watches the keyboard directly instead of reserving anything, so it
-catches the key either way. It also passes the key on, so whatever else uses
-that combination keeps working.
+There is also a new setting: "Arm when Trix starts". With it on, Trix
+begins filling the replay buffer the moment it opens, so there is nothing
+to remember to switch on. It is worth pairing with "Start with Windows" --
+together they mean Trix is recording from the time you log in.
 
-It is off by default and worth one moment's thought before you turn it on.
-Software that watches every keystroke is a shape some anti-cheat programs
-distrust. OBS, Discord and Steam all do it, so this is well-trodden ground,
-but Trix cannot promise how yours will read it, and that risk is yours rather
-than ours. Neither setting helps if the game runs as administrator and Trix
-does not.
+It is off by default, because arming holds your GPU encoder and the
+buffer's memory for as long as it lasts, and that is not something to
+switch on for you. It takes effect the next time Trix starts, not the
+moment you tick it.
 
-
-FIXED IN 1.1.1
---------------
-
-Desktop Duplication records at full speed now. In 1.1.0 it could record at
-around a third of the frame rate you asked for, and the note below told you to
-expect that. It was a bug in Trix, not a limit of the capture method, and it is
-gone: on the machines it has been tested on it now records within a few frames
-a second of the normal capture method.
-
-So if you turned Desktop Duplication off because your clips were choppy --
-especially during busy moments in a game -- it is worth turning back on.
-Settings -> Capture -> Capture method.
-
-It still cannot record the mouse cursor. That part has not changed.
-
-
-NEW IN 1.1.0
-------------
-
-DXGI Duplication solution for yellow borders. Settings -> Capture -> Capture Method 
-You can experience low fps on clip so not recommended if you specifically doesn't want yellow borders.
-
-
-NEW IN 1.0.0
-------------
-
-Trix takes screenshots. Alt+F8 saves a picture of the screen and puts it on
-your clipboard at the same moment, and a Screenshots tab in the app keeps
-every one you have taken. It works the way clipping does -- the picture comes
-off the recording that is already running -- so Trix has to be started first,
-and the key tells you so if it is not. There is a section on it further down.
-
-Trix also shows up on Discord while it is running. Your profile says you are
-"Clipping with Trix", with a button your friends can press to get it, and it
-clears when you close Trix. It talks only to the Discord app on this PC and
-sends nothing about you, your clips or what you are recording.
-
-To turn it off:  Settings -> Trix -> Discord presence.
-
-
-NEW IN 0.8.0
-------------
-
-Trix has been redrawn. Every control in the app -- the switches, the
-sliders, the dropdowns, the boxes you type numbers into -- used to be
-whatever the browser engine inside Trix decided to draw, and none of
-them answered the pointer. They are Trix's own now: they light up as
-the pointer crosses them, press down when you click, and show a ring
-when you reach them from the keyboard.
-
-The grey Windows title bar is gone. Trix draws its own, and the Start
-control sits in it, so whether Trix is recording is on screen no
-matter which page you are looking at.
-
-Settings is grouped into panels instead of sixteen rows in one long
-scroll, and the unit of a setting -- seconds, fps, kbps -- now sits on
-the box you type into rather than in a line of help text underneath.
-
-Clips look like clips. A card shows the picture, how long it runs,
-what it is called, and its size, resolution and frame rate; a star
-marks the ones you keep. Favourite, Rename and Delete have moved into
-a small menu on the card, so renaming a clip no longer means opening
-it first.
-
-The clip page has one timeline instead of two. The scrubber you drag
-to watch and the In and Out handles you drag to trim are now the same
-track, so the point you are looking at and the point you are cutting
-at are the same point. I and O still set the two trim points, and the
-arrow keys still move the playhead.
-
-One thing that is not a matter of looks: Trix no longer deletes old
-clips to keep your library under a size limit. The limit shipped at
-20 GB and now ships off, so a fresh install keeps every clip until you
-say otherwise. If you have run Trix before your setting is whatever it
-already was -- Settings -> Clips -> Library limit, where 0 means never
-delete.
-
-Nothing else changed. Same hotkey, same clips, same folders; the rest
-of this release is what Trix looks like, not what it does.
-
-
-NEW IN 0.7.0
-------------
-
-You can trim a clip. Open one, drag the In and Out handles on the bar under
-the player to pick the part you want, then press Ctrl+E or the Export
-button. That range is saved as a new clip in your library and the original
-is left exactly as it was. I and O set the two points to whatever the
-player is showing, so you can trim while you watch.
-
-Trimming copies the picture and the sound as they were recorded rather than
-making them again, so an export finishes in well under a second and loses
-no quality at all.
-
-The In handle moves about a second at a time, and the tick marks on the bar
-show you why: a clip can only begin at one of those points, so Trix puts
-your in point on the last one at or before where you dropped it. The Out
-handle can land anywhere. Starting on an exact frame would mean making the
-picture again, and that is not in yet.
-
-
-NEW IN 0.6.0
-------------
-
-You can change where clips are saved without leaving the app:
-Settings -> Trix -> Clips folder -> Choose... It opens the same picker the
-tray icon has always had, so moving your library no longer means hunting
-for the tray icon first. The box shows the folder your clips are really
-going to, and Reset puts it back to %USERPROFILE%\Videos\Trix.
-
-Clips you have already saved do not move. Changing the folder changes where
-the NEXT clip is written; the ones you have stay where they are, and drop
-out of the app's list until you point Trix back at them.
-
-Trix also has a proper icon now, in place of the plain circle.
-
-
-FIXED IN 0.5.3
---------------
-
-The updater could not download anything. GitHub moved where release files
-are served from, Trix did not recognise the new address, and updating
-stopped with "updates are not fetched from
-release-assets.githubusercontent.com". The "Download it by hand" link
-offered underneath it did nothing when clicked, so there was no way forward
-at all. Both are fixed, and links in the app now open in your browser.
-
-PLEASE NOTE: this is a version you have to install by hand, once. Every
-release up to and including 0.5.2 carries the broken updater inside it, so
-none of them can fetch this one -- that is the bug. Download 1.2.0 from the
-releases page and unzip it over your old folder. Your settings and your
-clips live elsewhere and are not touched. From 0.5.3 onward the in-app
-updater works normally again.
-
-
-FIXED IN 0.5.2
---------------
-
-"Show in Explorer" opened a brand new window every time you used it, so a
-few clips in you had a stack of identical windows on the same folder. If
-that folder is already open, Trix now brings that window forward -- from the
-taskbar too, if you had minimised it -- and selects the new clip in it. A
-window showing some other folder is left alone.
-
-
-FIXED IN 0.5.1
---------------
-
-0.4.0 and 0.5.0 closed themselves a few seconds after you pressed Start, and
-straight away on the next launch, with no error message. The cause was the
-update check: it asked github.com over an encrypted connection using a
-component that was never included in the build, and that ended the app on the
-spot. It is included now.
-
-If you are on 0.4.0 or 0.5.0, Trix cannot update itself out of this, because
-the update check is the thing that closed it. Download 1.2.0 by hand from the
-releases page and unzip it over your old folder. Your settings and your clips
-are somewhere else and are not touched.
-
-
-NEW IN 0.4.0 -- PLEASE READ
----------------------------
-
-Trix now records your MICROPHONE, and it is ON by default at full level.
-
-If you upgraded from 0.3.0, the next clip you save will contain your voice.
-Nothing warns you first, and Windows will show its microphone indicator
-whenever Trix is recording.
-
-To turn it off:  Settings -> Audio -> Microphone level -> drag to 0.
-
-Zero is a real off switch, not a mute. At 0 Trix never opens the microphone
-at all, so the Windows recording indicator stays dark and no other app sees
-Trix holding your input device.
-
-Also new:
-
-  * Settings -> Audio has two sliders, one for PC sound and one for the
-    microphone. 100 is full volume; Trix never amplifies past the original.
-  * Changing a level takes effect on the next clip. Turning a source from
-    off to on, or on to off, needs a re-arm -- the app tells you when.
+Both settings are in Settings -> Audio and Settings -> Trix.
 
 
 GETTING STARTED
@@ -313,9 +82,10 @@ DEFAULTS
   Clips folder      %USERPROFILE%\Videos\Trix
   Library cap       off -- Trix never deletes a clip to save space
   GPU priority      low -- your game gets the GPU first
-  PC sound          100
-  Microphone        100
+  PC sound          100  (0-200 -- above 100 amplifies)
+  Microphone        100  (0-200 -- above 100 amplifies)
   Start with Windows  off
+  Arm when Trix starts  off
   Discord presence  on
 
 All of these are in Settings.
@@ -343,6 +113,11 @@ To turn the check off:  Settings -> Updates -> Check for updates.
 
 Trix cannot update itself if you put it somewhere Windows protects, such as
 Program Files. It will say so and point you at the download page.
+
+If you ever update by unzipping into a *new* folder rather than letting Trix
+update itself, check "Start with Windows" afterwards. Windows remembers the
+old folder, so it would go on starting the copy you replaced. Trix notices
+this and shows the setting as off; switching it back on points Windows here.
 
 
 SCREENSHOTS

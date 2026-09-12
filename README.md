@@ -6,10 +6,10 @@
 
 **A GPU-resident modern game clip recorder for Windows, for people whose PC cannot spare the frames.**
 
-[![Version](https://img.shields.io/badge/version-1.2.3-2b7fff)](https://github.com/tnhnblgl/trix/releases)
+[![Version](https://img.shields.io/badge/version-1.3.0-2b7fff)](https://github.com/tnhnblgl/trix/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6)](#requirements)
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-CE422B)](https://www.rust-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-610%20passing-3fb950)](#verification)
+[![Tests](https://img.shields.io/badge/tests-617%20passing-3fb950)](#verification)
 [![License](https://img.shields.io/badge/license-MIT-3fb950)](LICENSE)
 
 </div>
@@ -242,7 +242,7 @@ runtime npm dependency (`@tauri-apps/api`). The frontend bundle is 120 KB of JS 
 
 ## Verification
 
-**610 tests pass, none fail** — 404 across the Rust workspace, 206 in the frontend.
+**617 tests pass, none fail** — 410 across the Rust workspace, 207 in the frontend.
 
 ```bash
 cargo test --workspace
