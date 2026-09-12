@@ -4,6 +4,7 @@
   import Button from '../components/ui/Button.svelte';
   import Modal from '../components/ui/Modal.svelte';
   import type { ClipMeta } from '../lib/types';
+  import { untrack } from 'svelte';
   import { app } from '../lib/state.svelte';
   import { shouldHandleKey, moveSelection, CARD_CONTROL_SELECTOR } from '../lib/keys';
   import { clipUrl, formatBytes } from '../lib/clips';
@@ -36,6 +37,27 @@
     deleting = null;
     if (clip) await app.remove(clip.id);
   }
+
+  /**
+   * Scrolls the selected tile fully into view, and no further: a tile already
+   * on screen does not move, one cut off at an edge scrolls just enough to show
+   * it whole. The grid's children are its tiles, one each, in order -- a
+   * previewing clip swaps its card for a video in the same slot.
+   *
+   * Called where a key moves the selection, not from an effect on `app.selected`:
+   * that index also shifts when a new clip is saved, and scrolling then would
+   * yank the page back to a tile the user had deliberately scrolled away from.
+   */
+  function revealSelected() {
+    const tile = gridEl?.children[app.selected];
+    if (tile instanceof HTMLElement) tile.scrollIntoView({ block: 'nearest' });
+  }
+
+  // Once on arrival too: coming back from a clip stepped through with the
+  // arrows, the selected tile can be far below the top the page opens at.
+  $effect(() => {
+    if (gridEl) untrack(revealSelected);
+  });
 
   $effect(() => {
     if (!gridEl) return;
@@ -102,6 +124,7 @@
       e.preventDefault();
       app.selected = next;
       previewing = null;
+      revealSelected();
     }
   }
 
@@ -237,6 +260,8 @@
   }
   .filter.on:hover { background: color-mix(in srgb, var(--fav) 18%, transparent); }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; }
+  /* Room between a revealed tile and the pane's edge, matching the grid gap. */
+  .grid > :global(*) { scroll-margin: 14px 0; }
   .preview { width: 100%; aspect-ratio: 16 / 10; border-radius: var(--r-md); background: var(--video-bg); object-fit: cover; }
   .empty { display: grid; place-content: center; height: 60vh; text-align: center; gap: 6px; color: var(--dim); }
   .empty .big { font-size: 15px; color: var(--text); margin: 0; }

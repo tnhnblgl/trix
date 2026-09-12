@@ -4,6 +4,7 @@
   import Button from '../components/ui/Button.svelte';
   import Modal from '../components/ui/Modal.svelte';
   import type { ShotMeta } from '../lib/types';
+  import { untrack } from 'svelte';
   import { app } from '../lib/state.svelte';
   import { shouldHandleKey, moveSelection, CARD_CONTROL_SELECTOR } from '../lib/keys';
   import { formatCombo } from '../lib/ui';
@@ -35,6 +36,27 @@
   }
 
   app.loadShots();
+
+  /**
+   * Scrolls the selected tile fully into view, and no further: a tile already
+   * on screen does not move, one cut off at an edge scrolls just enough to show
+   * it whole. The grid's children are its tiles, one each, in order.
+   *
+   * Called where a key moves the selection, not from an effect on
+   * `app.shotSelected`: that index also shifts when a new screenshot is saved,
+   * and scrolling then would yank the page back to a tile the user had
+   * deliberately scrolled away from.
+   */
+  function revealSelected() {
+    const tile = gridEl?.children[app.shotSelected];
+    if (tile instanceof HTMLElement) tile.scrollIntoView({ block: 'nearest' });
+  }
+
+  // Once on arrival too: the selection outlives a trip to another tab, and the
+  // selected tile can be far below the top this page opens at.
+  $effect(() => {
+    if (gridEl) untrack(revealSelected);
+  });
 
   $effect(() => {
     if (!gridEl) return;
@@ -73,6 +95,7 @@
     if (next !== app.shotSelected) {
       e.preventDefault();
       app.shotSelected = next;
+      revealSelected();
     }
   }
 </script>
@@ -135,6 +158,8 @@
     grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
     gap: 14px;
   }
+  /* Room between a revealed tile and the pane's edge, matching the grid gap. */
+  .grid > :global(*) { scroll-margin: 14px 0; }
   .empty {
     display: flex;
     flex-direction: column;
