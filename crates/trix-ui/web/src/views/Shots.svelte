@@ -1,6 +1,9 @@
 <script lang="ts">
   import ShotCard from '../components/ShotCard.svelte';
   import ShotViewer from '../components/ShotViewer.svelte';
+  import Button from '../components/ui/Button.svelte';
+  import Modal from '../components/ui/Modal.svelte';
+  import type { ShotMeta } from '../lib/types';
   import { app } from '../lib/state.svelte';
   import { shouldHandleKey, moveSelection, CARD_CONTROL_SELECTOR } from '../lib/keys';
   import { formatCombo } from '../lib/ui';
@@ -18,6 +21,18 @@
   let viewing = $state(false);
   let columns = $state(4);
   let gridEl = $state<HTMLDivElement | null>(null);
+  /**
+   * The screenshot waiting on the delete dialog. Every way of deleting one --
+   * the tile's button, its right-click menu, the Delete key -- lands here, so
+   * none of them removes a file without asking.
+   */
+  let deleting = $state<ShotMeta | null>(null);
+
+  function confirmDelete() {
+    const shot = deleting;
+    deleting = null;
+    if (shot) void app.deleteShot(shot.id);
+  }
 
   app.loadShots();
 
@@ -32,8 +47,9 @@
   });
 
   function onkeydown(e: KeyboardEvent) {
-    // The viewer owns every key while it is open, including the arrows.
-    if (viewing) return;
+    // The viewer owns every key while it is open, including the arrows, and
+    // the delete dialog owns them while it asks: nothing may act behind it.
+    if (viewing || deleting) return;
     const target = e.target instanceof Element ? e.target : null;
     const ownedByCardControl = !!target?.closest(CARD_CONTROL_SELECTOR);
     const insideGrid =
@@ -50,7 +66,7 @@
       const shot = app.shots[app.shotSelected];
       if (!shot) return;
       e.preventDefault();
-      app.deleteShot(shot.id);
+      deleting = shot;
       return;
     }
     const next = moveSelection(app.shotSelected, e.key, app.shots.length, columns);
@@ -89,6 +105,7 @@
           {shot}
           selected={i === app.shotSelected}
           onselect={() => (app.shotSelected = i)}
+          ondelete={() => (deleting = shot)}
           onopen={() => { app.shotSelected = i; viewing = true; }} />
       {/each}
     </div>
@@ -96,6 +113,18 @@
 
   {#if viewing}
     <ShotViewer onclose={() => (viewing = false)} />
+  {/if}
+
+  {#if deleting}
+    <Modal title="Delete this screenshot?" onclose={() => (deleting = null)}>
+      {#snippet children()}
+        <p>Deleting the screenshot from <strong>{deleting ? new Date(deleting.created).toLocaleString() : ''}</strong> removes the image and its thumbnail. This cannot be undone.</p>
+      {/snippet}
+      {#snippet actions()}
+        <Button variant="ghost" size="sm" onclick={() => (deleting = null)}>Keep</Button>
+        <Button variant="danger" size="sm" icon="trash" onclick={confirmDelete}>Delete</Button>
+      {/snippet}
+    </Modal>
   {/if}
 </div>
 

@@ -1,6 +1,9 @@
 <script lang="ts">
   import ClipCard from '../components/ClipCard.svelte';
   import Icon from '../components/ui/Icon.svelte';
+  import Button from '../components/ui/Button.svelte';
+  import Modal from '../components/ui/Modal.svelte';
+  import type { ClipMeta } from '../lib/types';
   import { app } from '../lib/state.svelte';
   import { shouldHandleKey, moveSelection, CARD_CONTROL_SELECTOR } from '../lib/keys';
   import { clipUrl, formatBytes } from '../lib/clips';
@@ -18,6 +21,20 @@
   let columns = $state(4);
   let previewing = $state<string | null>(null);
   let gridEl = $state<HTMLDivElement | null>(null);
+  /**
+   * The clip a card's menu asked to delete, while the dialog asks whether to.
+   *
+   * Hosted here rather than in `ClipCard`: `Modal`'s scrim is
+   * `position: fixed`, and a card's hover lift is a `transform`, which would
+   * make the card -- not the window -- the box the scrim covers.
+   */
+  let deleting = $state<ClipMeta | null>(null);
+
+  async function confirmDelete() {
+    const clip = deleting;
+    deleting = null;
+    if (clip) await app.remove(clip.id);
+  }
 
   $effect(() => {
     if (!gridEl) return;
@@ -30,6 +47,9 @@
   });
 
   function onkeydown(e: KeyboardEvent) {
+    // While the dialog is up, no grid shortcut may act behind it: an arrow
+    // would move the selection and Enter would open a clip under the question.
+    if (deleting) return;
     // `<svelte:window>` is global for as long as the grid is mounted, so a key
     // meant for a control anywhere in the app arrives here too. Which of them
     // are ours is `shouldHandleKey`'s decision — and it needs to know whether
@@ -156,10 +176,23 @@
           onfavorite={() => app.setFavorite(clip.id, !clip.favorite)}
           onrename={(title) => app.rename(clip.id, title)}
           onreveal={() => app.reveal(clip.id)}
-          ondelete={() => { app.selected = i; void app.remove(clip.id); }} />
+          ondelete={() => { app.selected = i; deleting = clip; }} />
       {/if}
     {/each}
   </div>
+{/if}
+
+{#if deleting}
+  <!-- The same question, in the same words, the clip page asks. -->
+  <Modal title="Delete this clip?" onclose={() => (deleting = null)}>
+    {#snippet children()}
+      <p>Deleting <strong>{deleting?.title}</strong> removes the mp4, its metadata and its thumbnail. This cannot be undone.</p>
+    {/snippet}
+    {#snippet actions()}
+      <Button variant="ghost" size="sm" onclick={() => (deleting = null)}>Keep</Button>
+      <Button variant="danger" size="sm" icon="trash" onclick={confirmDelete}>Delete</Button>
+    {/snippet}
+  </Modal>
 {/if}
 
 <style>

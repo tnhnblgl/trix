@@ -6,11 +6,13 @@
   import IconButton from './ui/IconButton.svelte';
   import Menu, { type MenuItem } from './ui/Menu.svelte';
 
-  let { shot, selected, onopen, onselect }: {
+  let { shot, selected, onopen, onselect, ondelete }: {
     shot: ShotMeta;
     selected: boolean;
     onopen: () => void;
     onselect: () => void;
+    /** Asks first: `Shots` hosts the confirmation dialog. */
+    ondelete: () => void;
   } = $props();
 
   /** Where the card was right-clicked, while its menu is open. */
@@ -29,7 +31,7 @@
     if (id === 'open') onopen();
     else if (id === 'copy') app.copyShot(shot.id);
     else if (id === 'reveal') app.revealShot(shot.id);
-    else if (id === 'delete') app.deleteShot(shot.id);
+    else if (id === 'delete') ondelete();
   }
 
   function oncontextmenu(e: MouseEvent) {
@@ -72,7 +74,7 @@
   <div class="actions" data-card-control>
     <IconButton icon="copy" label="Copy" onclick={() => app.copyShot(shot.id)} />
     <IconButton icon="folder" label="Show in folder" onclick={() => app.revealShot(shot.id)} />
-    <IconButton icon="trash" label="Delete" onclick={() => app.deleteShot(shot.id)} />
+    <IconButton icon="trash" label="Delete" onclick={ondelete} />
   </div>
 
   <!-- `fixed`, so the card's `overflow: hidden` does not clip it: only a
