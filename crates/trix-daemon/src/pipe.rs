@@ -620,12 +620,47 @@ mod tests {
     /// is *protected* (`D:P`, so it did not inherit anything), it names this
     /// user, and it contains exactly one allow ACE and no deny ACEs — so there
     /// is nobody else on it.
+    /// The DACL of `descriptor` as SDDL text.
+    ///
+    /// Note what this renderer does with well-known accounts: it substitutes
+    /// SDDL's two-letter aliases for their SIDs, so a pipe belonging to the
+    /// built-in Administrator reads `D:P(A;;FA;;;LA)` rather than naming
+    /// `S-1-5-21-…-500`. That is not a detail worth asserting either way, so
+    /// both sides of the comparison in the test below are put through here and
+    /// neither is compared against a SID in string form.
+    fn dacl_sddl(descriptor: &LocalSecurityDescriptor) -> String {
+        use windows::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW;
+        use windows::Win32::Security::DACL_SECURITY_INFORMATION;
+
+        let mut text = PWSTR::null();
+        unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor.0,
+                SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION,
+                &mut text,
+                None,
+            )
+            .expect("converting a descriptor to SDDL");
+        }
+        let sddl = unsafe { text.to_string() }.expect("the SDDL is valid UTF-16");
+        unsafe {
+            let _ = LocalFree(Some(windows::Win32::Foundation::HLOCAL(text.0.cast())));
+        }
+        sddl
+    }
+
+    /// The trustee of a one-ACE DACL: what follows the last `;`, without the
+    /// closing parenthesis. `D:P(A;;FA;;;LA)` gives `LA`. Only meaningful
+    /// where the ACE count is asserted, which is why its one caller does that.
+    fn trustee_of(sddl: &str) -> &str {
+        sddl.rsplit(';').next().unwrap_or_default().trim_end_matches(')')
+    }
+
     #[test]
     fn the_live_pipe_carries_the_user_only_dacl() {
         use windows::Win32::Foundation::ERROR_SUCCESS;
-        use windows::Win32::Security::Authorization::{
-            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SE_KERNEL_OBJECT,
-        };
+        use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
         use windows::Win32::Security::DACL_SECURITY_INFORMATION;
 
         let sid = current_user_sid_string().expect("current user must have a SID");
@@ -652,27 +687,22 @@ mod tests {
         assert_eq!(status, ERROR_SUCCESS, "GetSecurityInfo on the live pipe failed: {status:?}");
         let live = LocalSecurityDescriptor(live);
 
-        let mut text = PWSTR::null();
-        unsafe {
-            ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                live.0,
-                SDDL_REVISION_1,
-                DACL_SECURITY_INFORMATION,
-                &mut text,
-                None,
-            )
-            .expect("converting the live descriptor back to SDDL");
-        }
-        let sddl = unsafe { text.to_string() }.expect("the live SDDL is valid UTF-16");
-        unsafe {
-            let _ = LocalFree(Some(windows::Win32::Foundation::HLOCAL(text.0.cast())));
-        }
+        let sddl = dacl_sddl(&live);
 
         assert!(
             sddl.starts_with("D:P"),
             "the live DACL is not protected, so it inherited a default: {sddl}"
         );
-        assert!(sddl.contains(&sid), "the live DACL does not name this user ({sid}): {sddl}");
+        // Both sides through the same renderer, for the reason given on
+        // `dacl_sddl`: comparing the live text against the numeric SID passes
+        // on a developer machine and fails on a runner logged in as the
+        // built-in Administrator, where `LA` and the SID are the same account.
+        let expected = dacl_sddl(&security);
+        assert_eq!(
+            trustee_of(&sddl),
+            trustee_of(&expected),
+            "the live DACL does not name this user ({sid}): {sddl}"
+        );
         assert_eq!(
             sddl.matches("(A;").count(),
             1,
