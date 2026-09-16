@@ -1,13 +1,16 @@
 # Builds the release zip on a clean runner, from nothing but what is in this
-# repository. That is the point: a code-signing service will only put its
-# certificate on binaries it can watch being built from public source, so the
-# zip a release carries has to come from here rather than from a developer's
-# machine.
+# repository, and drafts the GitHub release it belongs to.
 #
-# Signing is not wired up yet -- this stops at an unsigned zip, uploaded as a
-# workflow artifact. When the certificate exists, the signing step goes in the
-# gap marked below, between staging and packaging: signing rewrites the three
-# .exe files, and the zip has to be built from the rewritten ones.
+# Where the tag comes from is unchanged: a draft release carries no tag, so
+# nothing exists publicly and nothing is tagged until the draft is published by
+# hand. This workflow never pushes a tag.
+#
+# The run comes apart in the middle for a reason that outlived its first cause.
+# A code-signing service will only certify binaries it can watch being built
+# from public source, which is why the build moved here; SignPath Foundation
+# turned the application down for now, wanting a more established project. The
+# seam is kept: signing rewrites the three .exe files, so it has to happen
+# between staging and packaging, and the gap is marked below.
 #
 # The gates are not reimplemented here. scripts\ship-zip.ps1 owns them, run in
 # its two halves, so CI and a hand-built zip are held to the same standard and
@@ -20,8 +23,10 @@ name: Release zip
 on:
   workflow_dispatch:
 
+# Write, because the last step creates a draft release. Nothing else in the
+# token's reach is needed.
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -31,9 +36,9 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -44,7 +49,7 @@ jobs:
       # build's target\ is enormous, and caching it risks handing a release
       # artifact stale object files.
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin
@@ -75,9 +80,41 @@ jobs:
       - name: Package
         run: powershell -ExecutionPolicy Bypass -File scripts\ship-zip.ps1 -FromStage -StageDir "${{ runner.temp }}\stage" -OutDir "${{ runner.temp }}\out"
 
+      # Kept alongside the release: an artifact survives a draft being deleted
+      # and is what a failed publish falls back on.
       - name: Upload the zip and its hash
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: trix-win-x64-unsigned
+          name: trix-win-x64
           path: ${{ runner.temp }}/out/*
           if-no-files-found: error
+
+      # A draft, never a published release: publishing is what creates the tag,
+      # and that stays a decision made by a person. The version is read from the
+      # staging folder's release.json rather than typed here, so the tag cannot
+      # disagree with the binaries.
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Explicit, because a native command's exit code is handled
+          # differently across PowerShell versions, and this script reads
+          # $LASTEXITCODE itself.
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          $manifest = Get-Content "${{ runner.temp }}\stage\release.json" -Raw | ConvertFrom-Json
+          $tag = "v$($manifest.version)"
+          $zip = "${{ runner.temp }}\out\$($manifest.name).zip"
+          $sums = "${{ runner.temp }}\out\SHA256SUMS.txt"
+
+          gh release view $tag 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "::error::a release or draft named $tag already exists. Bump the version, or delete that release first."
+            exit 1
+          }
+
+          gh release create $tag --draft --title $tag --generate-notes --target $env:GITHUB_SHA $zip $sums
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+          Write-Host "::notice::Drafted $tag with the zip and SHA256SUMS.txt. The generated notes are a commit list -- rewrite them, then publish, which is what creates the tag."
