@@ -73,6 +73,25 @@
       * It never commits, tags, or pushes. The user creates the GitHub release
         by hand, and creating it is what makes the tag.
 
+    SPLITTING THE RUN, FOR SIGNING IN CI:
+
+    A code-signing service signs the binaries after they are built and before
+    they are zipped, so the run has to come apart at that seam. -StageOnly
+    stops once the staging folder is filled and leaves it behind; -FromStage
+    picks that folder up and packages it. Neither weakens a gate: the staged
+    binaries are verified in both halves, because signing rewrites them, and
+    the zip is only ever built from what is in the staging folder at that
+    moment.
+
+      scripts\ship-zip.ps1 -StageOnly -StageDir C:\work
+      (sign C:\work\trix-v<version>-win-x64\*.exe)
+      scripts\ship-zip.ps1 -FromStage -StageDir C:\work -OutDir C:\out
+
+    The staging half writes release.json beside the staged folder, so the
+    packaging half knows the version, the folder name and whether the first
+    half skipped anything, rather than being told again on the command line
+    and believing it.
+
     Requires the tauri CLI (`cargo tauri`), and npm on PATH for the frontend
     build and tests.
 
@@ -80,6 +99,22 @@
     Where the zip is written. Defaults to the directory above the repo, so the
     artifact lands beside the project folder rather than inside it -- a zip
     inside the repo is one `git add .` away from being committed.
+
+.PARAMETER StageDir
+    The work folder the zip's contents are staged in, holding a folder named
+    after the release plus release.json. Defaults to a temporary folder that is
+    deleted when the zip is written; pass one to keep it. Required with
+    -FromStage, which is how the second half finds the first half's work.
+
+.PARAMETER StageOnly
+    Builds and stages, then stops without writing a zip, leaving the staging
+    folder for a signing step. Deleting that folder afterwards is the caller's
+    job.
+
+.PARAMETER FromStage
+    Skips straight to verifying and zipping what is already in -StageDir. For
+    the second half of a signed build; the binaries it packages are whatever
+    the signing step left there.
 
 .PARAMETER SkipTests
     Skips both test suites. For iterating on the packaging itself. The summary
@@ -98,6 +133,9 @@
 [CmdletBinding()]
 param(
     [string]$OutDir,
+    [string]$StageDir,
+    [switch]$StageOnly,
+    [switch]$FromStage,
     [switch]$SkipTests,
     [switch]$AllowDirty
 )
@@ -107,6 +145,13 @@ $ErrorActionPreference = 'Stop'
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 if (-not $OutDir) { $OutDir = Split-Path -Parent $RepoRoot }
+
+if ($StageOnly -and $FromStage) {
+    throw '-StageOnly and -FromStage are the two halves of one run. Pass one of them, or neither.'
+}
+if ($FromStage -and -not $StageDir) {
+    throw '-FromStage needs -StageDir: the folder the staging half was told to leave behind.'
+}
 
 $script:Checks = New-Object System.Collections.Generic.List[object]
 
@@ -129,6 +174,115 @@ function Require {
     param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][bool]$Condition, [string]$Detail = '')
     Check -Name $Name -Condition $Condition -Detail $Detail
     if (-not $Condition) { throw "$Name -- $Detail" }
+}
+
+# Both halves run this. The staging half, so a build that came out wrong is
+# caught before a signing service is asked to put its name on it; the packaging
+# half, because signing rewrites the very files the first half checked, and the
+# zip is built from the rewritten ones.
+function Test-StagedBinaries {
+    param([Parameter(Mandatory)][string]$Stage, [Parameter(Mandatory)][string]$Version)
+
+    # Run the CLI from the staged copy rather than from target\release, so what
+    # is checked is the file that actually goes in the zip.
+    $stagedCli = Join-Path $Stage 'trix.exe'
+    $reported = (& $stagedCli --version) -join ''
+    Require -Name "trix.exe reports $Version" -Condition ($reported.Trim() -eq "trix $Version") `
+        -Detail "reported '$reported'"
+
+    # trix-ui.exe is the only one with a version resource -- tauri-build writes
+    # it from tauri.conf.json. It is what Explorer's Properties tab shows.
+    $vi = (Get-Item -LiteralPath (Join-Path $Stage 'trix-ui.exe')).VersionInfo
+    Require -Name "trix-ui.exe version resource says $Version" -Condition ($vi.FileVersion -eq $Version) `
+        -Detail "FileVersion is '$($vi.FileVersion)'"
+}
+
+# The packaging half: everything from a filled staging folder to the two files
+# that get attached to a release. A function rather than the tail of the script
+# because -FromStage enters here having skipped every step above, on a folder a
+# signing step has been through.
+function Complete-Package {
+    param(
+        [Parameter(Mandatory)][string]$Stage,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Version,
+        [Parameter(Mandatory)][string]$OutDir,
+        [Parameter(Mandatory)][bool]$SkippedTests
+    )
+
+    Write-Host ''
+    Write-Host 'Verify the staged binaries and package' -ForegroundColor Cyan
+
+    Test-StagedBinaries -Stage $Stage -Version $Version
+
+    if (-not (Test-Path -LiteralPath $OutDir)) { New-Item -ItemType Directory -Force $OutDir | Out-Null }
+    $zipPath = Join-Path $OutDir "$Name.zip"
+    if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
+
+    # ZipFile.CreateFromDirectory rather than Compress-Archive: the .NET API
+    # writes forward slashes in entry names, as the zip format specifies, while
+    # Compress-Archive on PowerShell 5.1 writes backslashes. Both unpack on
+    # Windows; only one unpacks cleanly everywhere else. The $true is
+    # includeBaseDirectory, which puts everything under one folder so unzipping
+    # into Downloads does not scatter four files across it.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::CreateFromDirectory(
+        $Stage, $zipPath, [System.IO.Compression.CompressionLevel]::Optimal, $true)
+
+    $zip = Get-Item -LiteralPath $zipPath
+    $sha = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash
+
+    # The updater refuses a zip it cannot check, so this file is not optional --
+    # a release with the zip alone reads to every installed Trix as "no update
+    # available", silently. Written beside the zip, in the `<hash>  <name>`
+    # format sha256sum uses, because the updater parses it and people paste it.
+    $sumsPath = Join-Path $OutDir 'SHA256SUMS.txt'
+    $sumsLine = "$($sha.ToLower())  $($zip.Name)"
+    [System.IO.File]::WriteAllText($sumsPath, "$sumsLine`n", (New-Object System.Text.UTF8Encoding($false)))
+
+    # Every gate above is a Require, so reaching this line means all of them
+    # passed -- a failure threw and printed its red line on the way out. The
+    # count is here so a green run says how much was actually checked, rather
+    # than only that nothing blew up.
+    $passed = @($script:Checks | Where-Object { $_.Passed }).Count
+
+    Write-Host ''
+    Write-Host ("  " + $zip.FullName)
+    Write-Host ("  " + [math]::Round($zip.Length / 1MB, 2) + " MB")
+    Write-Host ("  SHA256  " + $sha)
+    Write-Host ''
+
+    if ($SkippedTests) {
+        Write-Host "SHIP ZIP BUILT WITHOUT TESTS  ($passed checks) -- NOT A RELEASE ARTIFACT" -ForegroundColor Yellow
+    } else {
+        Write-Host "SHIP ZIP BUILT  ($passed checks)" -ForegroundColor Green
+    }
+    Write-Host 'Nothing was committed, tagged or pushed. Creating the GitHub release is what makes the tag.'
+    Write-Host ''
+    Write-Host 'Attach BOTH files to the release:' -ForegroundColor Cyan
+    Write-Host "  $($zip.FullName)"
+    Write-Host "  $sumsPath"
+    Write-Host 'A release with only the zip is invisible to the in-app updater, which will not' -ForegroundColor Yellow
+    Write-Host 'offer an update it cannot verify.' -ForegroundColor Yellow
+}
+
+# -FromStage is the packaging half on its own. Everything it needs to know about
+# the build it is packaging comes out of release.json rather than off the
+# command line, so a mistyped version cannot rename somebody else's build.
+if ($FromStage) {
+    $manifestPath = Join-Path $StageDir 'release.json'
+    if (-not (Test-Path -LiteralPath $manifestPath)) {
+        throw "no release.json in $StageDir -- that is not a folder a -StageOnly run left behind."
+    }
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+
+    Write-Host ''
+    Write-Host "Packaging the staged build in $StageDir" -ForegroundColor Cyan
+    Write-Host "         version: $($manifest.version)"
+
+    Complete-Package -Stage (Join-Path $StageDir $manifest.name) -Name $manifest.name `
+        -Version $manifest.version -OutDir $OutDir -SkippedTests ([bool]$manifest.skippedTests)
+    exit 0
 }
 
 Write-Host ''
@@ -241,14 +395,21 @@ foreach ($b in $binaries) {
 # copies rather than target\release.
 
 Write-Host ''
-Write-Host 'Step 5: stage and package' -ForegroundColor Cyan
+Write-Host 'Step 5: stage' -ForegroundColor Cyan
 
 $suffix = ''
 if ($SkipTests) { $suffix += '-untested' }
 if ($AllowDirty -and -not $isClean) { $suffix += '-dirty' }
 $name = "trix-v$Version-win-x64$suffix"
 
-$work = Join-Path $env:TEMP ("trix-ship-" + [guid]::NewGuid().ToString('N'))
+$work = $StageDir
+if (-not $work) { $work = Join-Path $env:TEMP ("trix-ship-" + [guid]::NewGuid().ToString('N')) }
+
+# Only a work folder this script invented, on a run that packages what it
+# staged, is this script's to delete. A caller who named one keeps it, and so
+# does a -StageOnly run, whose whole purpose is to leave the folder behind.
+$ownsWork = (-not $StageDir) -and (-not $StageOnly)
+
 $stage = Join-Path $work $name
 New-Item -ItemType Directory -Force $stage | Out-Null
 try {
@@ -263,81 +424,47 @@ try {
     $crlf = ($shipped -replace "`r`n", "`n") -replace "`n", "`r`n"
     [System.IO.File]::WriteAllText((Join-Path $stage 'README.txt'), $crlf, (New-Object System.Text.UTF8Encoding($false)))
 
-    # Run the CLI from the staged copy rather than from target\release, so what
-    # is checked is the file that actually goes in the zip.
-    $stagedCli = Join-Path $stage 'trix.exe'
-    $reported = (& $stagedCli --version) -join ''
-    Require -Name "trix.exe reports $Version" -Condition ($reported.Trim() -eq "trix $Version") `
-        -Detail "reported '$reported'"
+    # What the packaging half reads instead of being told again. Beside the
+    # staged folder, not inside it: everything inside goes in the zip.
+    $manifest = [PSCustomObject]@{
+        version      = $Version
+        name         = $name
+        skippedTests = [bool]$SkipTests
+    }
+    [System.IO.File]::WriteAllText((Join-Path $work 'release.json'),
+        ($manifest | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
 
-    # trix-ui.exe is the only one with a version resource -- tauri-build writes
-    # it from tauri.conf.json. It is what Explorer's Properties tab shows.
-    $vi = (Get-Item -LiteralPath (Join-Path $stage 'trix-ui.exe')).VersionInfo
-    Require -Name "trix-ui.exe version resource says $Version" -Condition ($vi.FileVersion -eq $Version) `
-        -Detail "FileVersion is '$($vi.FileVersion)'"
+    # The tree was clean at Step 1 and the build dirtied it. Said out loud
+    # rather than quietly repaired: this script does not run `git checkout` on
+    # the user's files. The one file it happens to is crates\trix-ui\Cargo.toml,
+    # rewritten by cargo tauri build with different line endings and identical
+    # content.
+    Push-Location $RepoRoot
+    try { $dirtyAfter = @(git status --porcelain) } finally { Pop-Location }
+    if ($dirtyAfter.Count -gt 0 -and $isClean) {
+        Write-Host ''
+        Write-Host 'Note: the build left the working tree dirty. Expected -- cargo tauri build' -ForegroundColor Yellow
+        Write-Host '      rewrites crates\trix-ui\Cargo.toml with different line endings and the' -ForegroundColor Yellow
+        Write-Host '      same content. Restore it with: git checkout -- crates/trix-ui/Cargo.toml' -ForegroundColor Yellow
+    }
 
-    if (-not (Test-Path -LiteralPath $OutDir)) { New-Item -ItemType Directory -Force $OutDir | Out-Null }
-    $zipPath = Join-Path $OutDir "$name.zip"
-    if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
+    if ($StageOnly) {
+        Test-StagedBinaries -Stage $stage -Version $Version
+        $passed = @($script:Checks | Where-Object { $_.Passed }).Count
 
-    # ZipFile.CreateFromDirectory rather than Compress-Archive: the .NET API
-    # writes forward slashes in entry names, as the zip format specifies, while
-    # Compress-Archive on PowerShell 5.1 writes backslashes. Both unpack on
-    # Windows; only one unpacks cleanly everywhere else. The $true is
-    # includeBaseDirectory, which puts everything under one folder so unzipping
-    # into Downloads does not scatter four files across it.
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    [System.IO.Compression.ZipFile]::CreateFromDirectory(
-        $stage, $zipPath, [System.IO.Compression.CompressionLevel]::Optimal, $true)
+        Write-Host ''
+        Write-Host ("  " + $stage)
+        Write-Host ''
+        Write-Host "STAGED, NOT PACKAGED  ($passed checks)" -ForegroundColor Green
+        Write-Host 'Sign the three .exe files in that folder, then package them with:' -ForegroundColor Cyan
+        Write-Host "  scripts\ship-zip.ps1 -FromStage -StageDir $work -OutDir <dir>"
+        Write-Host 'Deleting that folder afterwards is the caller''s job; this run left it alone.'
+        exit 0
+    }
+
+    Complete-Package -Stage $stage -Name $name -Version $Version `
+        -OutDir $OutDir -SkippedTests ([bool]$SkipTests)
 } finally {
-    Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
+    if ($ownsWork) { Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue }
 }
 
-$zip = Get-Item -LiteralPath $zipPath
-$sha = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash
-
-# The updater refuses a zip it cannot check, so this file is not optional --
-# a release with the zip alone reads to every installed Trix as "no update
-# available", silently. Written beside the zip, in the `<hash>  <name>` format
-# sha256sum uses, because the updater parses it and people paste it.
-$sumsPath = Join-Path $OutDir 'SHA256SUMS.txt'
-$sumsLine = "$($sha.ToLower())  $($zip.Name)"
-[System.IO.File]::WriteAllText($sumsPath, "$sumsLine`n", (New-Object System.Text.UTF8Encoding($false)))
-
-# Every gate above is a Require, so reaching this line means all of them
-# passed -- a failure threw and printed its red line on the way out. The count
-# is here so a green run says how much was actually checked, rather than only
-# that nothing blew up.
-$passed = @($script:Checks | Where-Object { $_.Passed }).Count
-
-Write-Host ''
-Write-Host ("  " + $zip.FullName)
-Write-Host ("  " + [math]::Round($zip.Length / 1MB, 2) + " MB")
-Write-Host ("  SHA256  " + $sha)
-Write-Host ''
-
-# The tree was clean at Step 1 and the build dirtied it. Said out loud rather
-# than quietly repaired: this script does not run `git checkout` on the user's
-# files. The one file it happens to is crates\trix-ui\Cargo.toml, rewritten by
-# cargo tauri build with different line endings and identical content.
-Push-Location $RepoRoot
-try { $dirtyAfter = @(git status --porcelain) } finally { Pop-Location }
-if ($dirtyAfter.Count -gt 0 -and $isClean) {
-    Write-Host 'Note: the build left the working tree dirty. Expected -- cargo tauri build' -ForegroundColor Yellow
-    Write-Host '      rewrites crates\trix-ui\Cargo.toml with different line endings and the' -ForegroundColor Yellow
-    Write-Host '      same content. Restore it with: git checkout -- crates/trix-ui/Cargo.toml' -ForegroundColor Yellow
-    Write-Host ''
-}
-
-if ($SkipTests) {
-    Write-Host "SHIP ZIP BUILT WITHOUT TESTS  ($passed checks) -- NOT A RELEASE ARTIFACT" -ForegroundColor Yellow
-} else {
-    Write-Host "SHIP ZIP BUILT  ($passed checks)" -ForegroundColor Green
-}
-Write-Host 'Nothing was committed, tagged or pushed. Creating the GitHub release is what makes the tag.'
-Write-Host ''
-Write-Host 'Attach BOTH files to the release:' -ForegroundColor Cyan
-Write-Host "  $($zip.FullName)"
-Write-Host "  $sumsPath"
-Write-Host 'A release with only the zip is invisible to the in-app updater, which will not' -ForegroundColor Yellow
-Write-Host 'offer an update it cannot verify.' -ForegroundColor Yellow
