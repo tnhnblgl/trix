@@ -96,9 +96,11 @@ pub const LARGE_TEXT: &str = "Trix";
 /// The button's label. Discord caps these at 32 characters.
 pub const BUTTON_LABEL: &str = "Get Trix";
 
-/// Where the button goes. `releases/latest` rather than a pinned tag so the
-/// link in a shipped binary does not rot into pointing at an old release.
-pub const BUTTON_URL: &str = "https://github.com/tnhnblgl/trix/releases/latest";
+/// Where the button goes: the download page, which resolves the newest release
+/// itself. Nothing version-shaped here, so the link baked into a shipped binary
+/// cannot rot into pointing at an old release, and where a stranger lands can
+/// change without another release going out.
+pub const BUTTON_URL: &str = "https://trix.tnhnblgl.tr";
 
 /// Discord's IPC opcodes. Only these five exist.
 const OP_HANDSHAKE: u32 = 0;
@@ -751,7 +753,7 @@ mod tests {
         assert_eq!(card["timestamps"]["start"], 1_700_000_000u64);
         assert_eq!(card["assets"]["large_image"], "logo");
         assert_eq!(card["buttons"][0]["label"], "Get Trix");
-        assert_eq!(card["buttons"][0]["url"], "https://github.com/tnhnblgl/trix/releases/latest");
+        assert_eq!(card["buttons"][0]["url"], "https://trix.tnhnblgl.tr");
         assert!(
             BUTTON_LABEL.len() <= 32,
             "Discord caps a button label at 32 characters, and a longer one is refused whole"
