@@ -1,4 +1,4 @@
-Trix 1.4.0
+Trix 1.4.1
 ==========
 
 A clip recorder for Windows, for people whose PC cannot spare the frames.
@@ -8,37 +8,18 @@ cost to your game is close to nothing, and the app itself stays out of the
 way while you play.
 
 
-NEW IN 1.4.0
+NEW IN 1.4.1
 ------------
 
-This release is about the app window: finding your way around your clips
-and screenshots.
+A small release. Nothing in the app itself behaves differently.
 
-  * A volume slider for clip playback. Hover the speaker icon under the
-    video and it opens above it. On a clip's page the Up and Down arrow
-    keys change the volume too, and so does the mouse wheel over the
-    speaker. Trix remembers the level for next time; mute does not
-    carry over, so no clip ever opens silent by surprise.
+  * Trix has a page of its own now, at trix.tnhnblgl.tr, and it is
+    where the Get Trix button on the Discord card goes. It used to open
+    a list of files on GitHub, which told a stranger nothing about what
+    they were downloading.
 
-  * Right-click a clip for Favourite, Rename, Show in folder and Delete,
-    or a screenshot for Copy, Show in folder and Delete. Right-clicking
-    anywhere else does nothing.
-
-  * A Favourites button at the top of the Clips page shows only your
-    starred clips. A clip you un-star while it is on stays in view until
-    you switch the filter off and on again, so a misclick is easy to
-    undo. Trix always starts with every clip showing.
-
-  * Deleting a clip or a screenshot now asks first, whichever way you do
-    it -- a menu, a button or the Delete key.
-
-  * Moving through clips or screenshots with the arrow keys scrolls the
-    page to keep the selected one in view.
-
-  * New icons throughout, the Trix logo in the title bar, and the
-    buttons under a clip now say what they do. The buttons on a
-    screenshot sit on a dark background, so they show up on bright
-    images.
+  * This download was built and packaged by GitHub's servers, from the
+    source anybody can read, rather than on a developer's PC.
 
 
 GETTING STARTED
