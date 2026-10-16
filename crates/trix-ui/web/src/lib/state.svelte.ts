@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { call, daemonConnected, onConnected, onDaemonEvent, onDisconnected } from './ipc';
 import { mergeSaved } from './clips';
-import type { ClipMeta, ShotMeta, Status } from './types';
+import type { ClipMeta, LibraryPage, ShotMeta, Status } from './types';
 
 export type View = 'grid' | 'clip' | 'shots' | 'settings' | 'firstrun';
 export type Toast = { id: number; kind: 'error' | 'info'; text: string };
@@ -52,6 +52,15 @@ class AppState {
   view = $state<View>('grid');
   clips = $state<ClipMeta[]>([]);
   total = $state(0);
+  totalBytes = $state<number | null>(null);
+  clipsLoading = $state(false);
+  clipsLoadError = $state<string | null>(null);
+  deleteProgress = $state<{ done: number; total: number } | null>(null);
+  private clipLoadVersion = 0;
+  libraryContext = $state(0);
+  private reloadAfterDelete = false;
+  private clipReloadTimer: ReturnType<typeof setTimeout> | undefined;
+  clipMutation = 0;
   shots = $state<ShotMeta[]>([]);
   shotTotal = $state(0);
   /** Index into `shots` of the tile the grid has selected. */
@@ -196,21 +205,82 @@ class AppState {
     await this.refreshStatus();
   }
 
-  async loadClips() {
-    try {
-      const page = await call<{ clips: ClipMeta[]; total: number; offset: number }>('library.list', {
-        offset: 0,
-        limit: 200,
-      });
-      this.clips = page.clips;
-      this.total = page.total;
-      // A reload after a folder move brings different clips, whose ids the old
-      // snapshot cannot know: re-taken, or the filter would show nothing.
-      if (this.favoriteIds) this.favoriteIds = favoriteIdsOf(this.clips);
-      this.selected = 0;
-    } catch (e) {
-      this.toast('error', String(e));
+  async loadClips(preserveFilter = false) {
+    if (this.deleteProgress) {
+      this.reloadAfterDelete = true;
+      return;
     }
+    const version = ++this.clipLoadVersion;
+    this.clipsLoading = true;
+    this.clipsLoadError = null;
+    let offset = 0;
+    let first: LibraryPage | null = null;
+    let mutation = this.clipMutation;
+    let restarts = 0;
+    const loaded = new Map<string, ClipMeta>();
+    try {
+      for (;;) {
+        const page = await call<LibraryPage>('library.list', { offset, limit: 200 });
+        if (version !== this.clipLoadVersion) return;
+        if (mutation !== this.clipMutation || (first &&
+          (page.total !== first.total || page.snapshot !== first.snapshot))) {
+          if (++restarts > 3) throw new Error('The library is changing. Retry loading the clips.');
+          offset = 0;
+          first = null;
+          loaded.clear();
+          mutation = this.clipMutation;
+          continue;
+        }
+        first ??= page;
+        this.total = page.total;
+        this.totalBytes = page.total_bytes ?? null;
+        for (const clip of page.clips) loaded.set(clip.id, clip);
+        offset += page.clips.length;
+        const complete = offset >= page.total;
+        // Paint the first page immediately, then replace the metadata once
+        // the scan is complete. Thumbnails are mounted separately by the grid.
+        if (this.clips.length === 0 || complete) {
+          const keep = this.current?.id;
+          this.clips = [...loaded.values()];
+          if (this.favoriteIds && !preserveFilter) this.favoriteIds = favoriteIdsOf(this.clips);
+          this.selected = Math.max(0, this.visible.findIndex(c => c.id === keep));
+        }
+        if (complete) {
+          if (loaded.size !== page.total) throw new Error('The library changed while loading. Retry loading the clips.');
+          this.totalBytes ??= this.clips.reduce((sum, clip) => sum + clip.bytes, 0);
+          break;
+        }
+        if (page.clips.length === 0) throw new Error('The clip list ended early. Retry loading the clips.');
+      }
+    } catch (e) {
+      if (version === this.clipLoadVersion) {
+        this.clipsLoadError = String(e);
+        this.toast('error', `Could not load all clips: ${e}`);
+      }
+    } finally {
+      if (version === this.clipLoadVersion) this.clipsLoading = false;
+    }
+  }
+
+  /** Concurrent recordings/exports can announce their summaries out of order. */
+  scheduleClipReload() {
+    if (!this.connected) return;
+    clearTimeout(this.clipReloadTimer);
+    const context = this.libraryContext;
+    this.clipReloadTimer = setTimeout(() => {
+      this.clipReloadTimer = undefined;
+      if (this.connected && context === this.libraryContext) void this.loadClips(true);
+    }, 100);
+  }
+
+  /** Cancel replies and queued deletes belonging to a different connection/folder. */
+  invalidateClips() {
+    clearTimeout(this.clipReloadTimer);
+    this.clipReloadTimer = undefined;
+    this.clipLoadVersion++;
+    this.libraryContext++;
+    this.clipsLoading = false;
+    this.clipsLoadError = null;
   }
 
   async loadShots() {
@@ -263,6 +333,7 @@ class AppState {
   async rename(id: string, title: string) {
     try {
       const updated = await call<ClipMeta>('library.rename', { clip_id: id, title });
+      this.clipMutation++;
       this.clips = mergeSaved(this.clips, updated);
     } catch (e) {
       this.toast('error', String(e));
@@ -272,6 +343,7 @@ class AppState {
   async setFavorite(id: string, favorite: boolean) {
     try {
       const updated = await call<ClipMeta>('library.favorite', { clip_id: id, favorite });
+      this.clipMutation++;
       this.clips = mergeSaved(this.clips, updated);
     } catch (e) {
       this.toast('error', String(e));
@@ -372,27 +444,65 @@ class AppState {
   }
 
   async remove(id: string) {
+    await this.removeMany([id], false);
+  }
+
+  async removeMany(ids: string[], announce = true, expectedContext = this.libraryContext): Promise<string[]> {
+    const unique = [...new Set(ids)];
+    if (this.deleteProgress || unique.length === 0) return unique;
+    if (expectedContext !== this.libraryContext) {
+      this.toast('error', 'The clips folder or daemon connection changed. Select the clips again.');
+      return unique;
+    }
+    const context = this.libraryContext;
+    if (this.clipsLoading) {
+      this.clipLoadVersion++;
+      this.clipsLoading = false;
+      this.reloadAfterDelete = true;
+    }
+    const removed = new Set<string>();
+    const failed: string[] = [];
+    let firstError = '';
+    this.deleteProgress = { done: 0, total: unique.length };
     try {
-      await call('library.delete', { clip_id: id });
-      const index = this.visible.findIndex((c) => c.id === id);
-      this.clips = this.clips.filter((c) => c.id !== id);
-      this.total = Math.max(0, this.total - 1);
-      // Keep the selection on a real clip: the one that slid into this slot,
-      // or the new last one if the deleted clip was at the end.
-      //
-      // Recovering by index like this is only correct because `remove`'s one
-      // caller (the clip page's delete button) always deletes the clip that
-      // is currently selected -- `index` is therefore the selected clip's own
-      // old slot. A grid-level delete (deleting a clip the user has not
-      // selected) would need to recompute `selected` relative to the clip
-      // still being looked at, not to the one just removed; this line would
-      // silently move the selection to the wrong clip instead.
-      this.selected = Math.min(index < 0 ? 0 : index, Math.max(0, this.visible.length - 1));
-      // `visible`, not `clips`: deleting the last favourite while filtering
-      // leaves a clip page with nothing to show, library or no library.
-      if (this.visible.length === 0) this.view = 'grid';
-    } catch (e) {
-      this.toast('error', String(e));
+      // One request at a time keeps a large selection from flooding the pipe.
+      // Failures do not stop the rest; only acknowledged deletions leave the UI.
+      for (const [index, id] of unique.entries()) {
+        if (context !== this.libraryContext) {
+          failed.push(...unique.slice(index));
+          firstError ||= 'The clips folder or daemon connection changed. Remaining clips were kept.';
+          break;
+        }
+        try {
+          await call('library.delete', { clip_id: id });
+          removed.add(id);
+          this.clipMutation++;
+        } catch (e) {
+          failed.push(id);
+          firstError ||= String(e);
+        }
+        this.deleteProgress = { done: index + 1, total: unique.length };
+      }
+      if (context === this.libraryContext) {
+        const keep = this.current?.id;
+        const oldIndex = this.selected;
+        const removedBytes = this.clips.reduce((sum, c) => sum + (removed.has(c.id) ? c.bytes : 0), 0);
+        this.clips = this.clips.filter(c => !removed.has(c.id));
+        this.total = Math.max(0, this.total - removed.size);
+        if (this.totalBytes !== null) this.totalBytes = Math.max(0, this.totalBytes - removedBytes);
+        const index = this.visible.findIndex(c => c.id === keep);
+        this.selected = index >= 0 ? index : Math.min(oldIndex, Math.max(0, this.visible.length - 1));
+        if (this.visible.length === 0) this.view = 'grid';
+      }
+      if (failed.length) this.toast('error', `${removed.size} deleted; ${failed.length} not deleted. ${firstError}`);
+      else if (announce) this.toast('info', `Deleted ${removed.size} ${removed.size === 1 ? 'clip' : 'clips'}.`);
+      return failed;
+    } finally {
+      this.deleteProgress = null;
+      if (this.reloadAfterDelete) {
+        this.reloadAfterDelete = false;
+        await this.loadClips(context === this.libraryContext);
+      }
     }
   }
 }
@@ -459,6 +569,7 @@ export function wireDaemon() {
   onConnected(() => void onDaemonUp());
 
   onDisconnected(() => {
+    app.invalidateClips();
     app.connected = false;
     app.status = null;
   });
@@ -524,6 +635,10 @@ export function wireDaemon() {
         const moved = String(data['clip_dir_resolved'] ?? '') !== app.clipDir;
         void app.refreshStatus();
         if (moved) {
+          app.invalidateClips();
+          app.clips = [];
+          app.total = 0;
+          app.totalBytes = null;
           void app.loadClips();
           void app.loadShots();
         }
@@ -534,24 +649,29 @@ export function wireDaemon() {
         break;
       case 'clip_saved': {
         const saved = event.data as unknown as ClipMeta;
-        const wasEmpty = app.visible.length === 0;
+        app.clipMutation++;
+        const keep = app.current?.id;
+        const oldIndex = app.selected;
+        const previous = app.clips.find(c => c.id === saved.id);
+        const removed = new Set(Array.isArray(data['removed_ids']) ? data['removed_ids'] as string[] : []);
+        const removedBytes = app.clips.reduce((sum, c) => sum + (removed.has(c.id) ? c.bytes : 0), 0);
+        if (typeof data['library_bytes'] === 'number') app.totalBytes = data['library_bytes'];
+        else if (app.totalBytes !== null) app.totalBytes = Math.max(0, app.totalBytes + saved.bytes - (previous?.bytes ?? 0) - removedBytes);
         // Decide "is this genuinely new" before merging: `mergeSaved` replaces
         // in place when the id is already present (a reconnect's `library.list`
         // racing this same event), and that path must not move the count or
         // the selection -- there is nothing new for either to react to.
         const isNew = !app.clips.some((c) => c.id === saved.id);
-        app.clips = mergeSaved(app.clips, saved);
+        app.clips = mergeSaved(app.clips, saved).filter(c => !removed.has(c.id));
+        if (typeof data['library_total'] === 'number') app.total = data['library_total'];
+        else app.total = Math.max(0, app.total + (isNew ? 1 : 0) - removed.size);
+        const index = app.visible.findIndex(c => c.id === keep);
+        app.selected = index >= 0 ? index : Math.min(oldIndex, Math.max(0, app.visible.length - 1));
+        // A save during a delete can report totals that already include some
+        // of the in-flight deletions. Reconcile once the batch has settled.
+        if (app.deleteProgress) void app.loadClips();
+        app.scheduleClipReload();
         if (isNew) {
-          app.total += 1;
-          // `selected` is an index into `app.visible`, and a genuine prepend
-          // shifts every existing clip down one slot in every view: Grid's
-          // Space previews `app.visible[app.selected]` and Enter opens it, so
-          // an unshifted index means the user previews or opens a clip they
-          // never picked. Skip the shift when the list was empty before this
-          // clip arrived -- it then lands at index 0, which is where
-          // `selected` already points -- and when the favourites filter is
-          // hiding it, since then nothing in the shown list moved.
-          if (!wasEmpty && app.visible.some((c) => c.id === saved.id)) app.selected += 1;
           app.toast('info', `Saved ${saved.title}`);
         }
         break;

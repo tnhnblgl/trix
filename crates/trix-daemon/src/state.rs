@@ -15,6 +15,8 @@
 //! reason every other event does, which is what keeps the lock ordering below
 //! trivially true regardless of which module is doing the broadcasting.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -153,6 +155,9 @@ pub struct LibraryPage {
     pub clips: Vec<ClipMeta>,
     pub total: usize,
     pub offset: usize,
+    pub total_bytes: u64,
+    /// Opaque identity of the cached metadata, shared by all pages of one scan.
+    pub snapshot: String,
 }
 
 /// A sealed home for [`ClipPaths`], so the guarantee below is enforced by the
@@ -875,11 +880,22 @@ impl Daemon {
         // the incremental update that keeps `library.list` off the disk
         // after startup (spec §5.2).
         self.lock_library().insert(0, meta.clone());
-        self.enforce_library_ceiling();
+        let removed = self.enforce_library_ceiling();
         // After the insert, so a client that answers the event by calling
         // `library.list` cannot race ahead of the clip it was told about.
         match serde_json::to_value(meta) {
-            Ok(data) => self.clients.broadcast(&Event::new("clip_saved", data)),
+            Ok(mut data) => {
+                if let Some(fields) = data.as_object_mut() {
+                    let summary = self.list(0, 0);
+                    fields.insert("library_total".into(), Value::from(summary.total));
+                    fields.insert("library_bytes".into(), Value::from(summary.total_bytes));
+                    fields.insert(
+                        "removed_ids".into(),
+                        Value::Array(removed.into_iter().map(Value::String).collect()),
+                    );
+                }
+                self.clients.broadcast(&Event::new("clip_saved", data));
+            }
             // `ClipMeta` is strings, integers and bools, so this cannot
             // actually happen -- but `panic = "abort"` leaves no room for
             // an `unwrap` on a path the hotkey reaches, and a clip that
@@ -1522,19 +1538,21 @@ impl Daemon {
     /// whose file cannot be opened, that `total` still counts, and that
     /// `rename` would happily write an orphan sidecar for — the same ghost-row
     /// failure [`Daemon::delete`] evicts to prevent.
-    fn enforce_library_ceiling(&self) {
+    fn enforce_library_ceiling(&self) -> Vec<String> {
         let (dir, max_gb) = {
             let config = self.lock_config();
             (config.clip_dir_path(), config.max_library_gb)
         };
         match library::prune_to_ceiling(&dir, max_gb) {
-            Ok(removed) if removed.is_empty() => {}
+            Ok(removed) if removed.is_empty() => removed,
             Ok(removed) => {
                 self.lock_library().retain(|clip| !removed.contains(&clip.id));
                 tracing::info!(count = removed.len(), "the clip library ceiling pruned old clips");
+                removed
             }
             Err(e) => {
-                tracing::warn!(error = %format!("{e:#}"), "the clip library ceiling failed")
+                tracing::warn!(error = %format!("{e:#}"), "the clip library ceiling failed");
+                Vec::new()
             }
         }
     }
@@ -1568,10 +1586,25 @@ impl Daemon {
     /// the list, not a failure.
     pub fn list(&self, offset: usize, limit: usize) -> LibraryPage {
         let library = self.lock_library();
+        // Compute the summary under the same lock as the page. A client can
+        // display the full size immediately and restart paging if a save,
+        // prune, delete, or metadata edit moved the rows between requests.
+        // Hashing cached metadata does not open any video or thumbnail files.
+        let mut snapshot = DefaultHasher::new();
+        let mut total_bytes = 0_u64;
+        for clip in library.iter() {
+            clip.id.hash(&mut snapshot);
+            clip.bytes.hash(&mut snapshot);
+            clip.title.hash(&mut snapshot);
+            clip.favorite.hash(&mut snapshot);
+            total_bytes = total_bytes.saturating_add(clip.bytes);
+        }
         LibraryPage {
             total: library.len(),
             clips: library.iter().skip(offset).take(limit).cloned().collect(),
             offset,
+            total_bytes,
+            snapshot: format!("{:016x}", snapshot.finish()),
         }
     }
 
@@ -2193,6 +2226,33 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn large_library_pages_share_the_full_size_and_detect_changes() {
+        let daemon = idle("large-library", Config::default());
+        *daemon.lock_library() = (0..1205)
+            .map(|index| ClipMeta { bytes: 5_000_000, ..meta(&format!("clip-{index}")) })
+            .collect();
+
+        let first = daemon.list(0, 200);
+        let last = daemon.list(1200, 200);
+        assert_eq!(first.total, 1205);
+        assert_eq!(first.clips.len(), 200);
+        assert_eq!(last.clips.len(), 5);
+        assert_eq!(first.total_bytes, 6_025_000_000);
+        assert_eq!(last.total_bytes, first.total_bytes);
+        assert_eq!(last.snapshot, first.snapshot);
+
+        daemon.lock_library()[0].favorite = true;
+        let edited = daemon.list(0, 200);
+        assert_ne!(edited.snapshot, first.snapshot);
+        assert_eq!(edited.total_bytes, first.total_bytes);
+        daemon.lock_library().pop();
+        let shortened = daemon.list(0, 200);
+        assert_ne!(shortened.snapshot, edited.snapshot);
+        assert_eq!(shortened.total, 1204);
+        assert_eq!(shortened.total_bytes, 6_020_000_000);
+    }
+
     /// The security boundary. Every id-taking command runs through the same
     /// check; if one forgets, this catches it.
     ///
@@ -2641,11 +2701,44 @@ mod tests {
         let event: Event = serde_json::from_str(line.trim_end())
             .unwrap_or_else(|e| panic!("event line did not decode: {e}\nline: {line}"));
         assert_eq!(event.event, "clip_saved");
+        assert_eq!(event.data.get("library_total").and_then(Value::as_u64), Some(1));
+        assert_eq!(
+            event.data.get("library_bytes").and_then(Value::as_u64),
+            Some(meta("20260803_120000").bytes)
+        );
+        assert_eq!(event.data.get("removed_ids"), Some(&serde_json::json!([])));
         assert_eq!(
             event.data.get("id").and_then(Value::as_str),
             Some("20260803_120000"),
             "the event carries the ClipMeta the grid prepends"
         );
+    }
+
+    #[test]
+    fn saved_clip_event_reports_automatic_pruning_and_remaining_bytes() {
+        let (daemon, dir) = fixture("clip-prune-broadcast");
+        daemon.lock_config().max_library_gb = 1;
+        for clip in daemon.lock_library().iter_mut() {
+            clip.bytes = 700_000_000;
+            library::write_sidecar(&dir, clip).unwrap();
+        }
+        let saved = meta("20260726_130000");
+        std::fs::write(library::mp4_path(&dir, &saved.id), b"video").unwrap();
+        library::write_sidecar(&dir, &saved).unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel(crate::clients::OUTBOUND_QUEUE_DEPTH);
+        daemon.clients.register(tx);
+
+        daemon.record_saved_clip(&saved, PlaySound::No);
+
+        let event: Event = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert_eq!(
+            event.data["removed_ids"],
+            serde_json::json!(["20260726_100000", "20260726_110000"])
+        );
+        assert_eq!(event.data["library_total"], 2);
+        assert_eq!(event.data["library_bytes"], 700_000_005_u64);
+        assert_eq!(daemon.list(0, 200).total_bytes, 700_000_005);
+        cleanup(&dir);
     }
 
     /// The sound must not be able to break the announcement. This drives the same

@@ -17,6 +17,15 @@ export type ClipMeta = {
   favorite: boolean;
 };
 
+export type LibraryPage = {
+  clips: ClipMeta[];
+  total: number;
+  offset: number;
+  /** Optional for compatibility with an older, still-running daemon. */
+  total_bytes?: number;
+  snapshot?: string;
+};
+
 /**
  * Mirrors `trix_proto::ShotMeta`. No sidecar exists, so every field is
  * recovered from the file itself, and `created` carries no UTC offset —

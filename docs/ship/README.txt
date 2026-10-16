@@ -1,4 +1,4 @@
-Trix 1.4.1
+Trix 1.5.0
 ==========
 
 A clip recorder for Windows, for people whose PC cannot spare the frames.
@@ -8,18 +8,20 @@ cost to your game is close to nothing, and the app itself stays out of the
 way while you play.
 
 
-NEW IN 1.4.1
+NEW IN 1.5.0
 ------------
 
-A small release. Nothing in the app itself behaves differently.
+  * Browse your whole clip library, including more than 1,000 clips.
+    Only nearby thumbnails stay on screen, keeping large libraries light.
 
-  * Trix has a page of its own now, at trix.tnhnblgl.tr, and it is
-    where the Get Trix button on the Discord card goes. It used to open
-    a list of files on GitHub, which told a stranger nothing about what
-    they were downloading.
+  * The Clips header shows the complete library size, even while clips
+    are still loading. Totals update after saves, deletions and automatic
+    storage cleanup.
 
-  * This download was built and packaged by GitHub's servers, from the
-    source anybody can read, rather than on a developer's PC.
+  * Delete several clips together: click Select, choose your clips, then
+    Delete selected and confirm once. Select all and Shift-click ranges
+    work across the whole list. Progress is shown during deletion, and
+    any files that could not be deleted stay selected for another try.
 
 
 GETTING STARTED

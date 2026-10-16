@@ -335,7 +335,7 @@ fn clip(daemon: &Daemon, id: u64) -> Response {
     }
 }
 
-/// `{"clips":[…],"total":N,"offset":O}` (spec §4.3).
+/// A page plus whole-library count, bytes, and an opaque paging snapshot.
 ///
 /// `total` and `offset` are built with `Value::from`, and the clips with the
 /// same matched `to_value` the `clip` arm above uses — `serde_json::json!`
@@ -360,6 +360,8 @@ fn library_list(daemon: &Daemon, id: u64, offset: usize, limit: usize) -> Respon
     fields.insert("clips".to_string(), Value::Array(clips));
     fields.insert("total".to_string(), Value::from(page.total));
     fields.insert("offset".to_string(), Value::from(page.offset));
+    fields.insert("total_bytes".to_string(), Value::from(page.total_bytes));
+    fields.insert("snapshot".to_string(), Value::String(page.snapshot));
     Response::ok(id, Value::Object(fields))
 }
 
@@ -583,6 +585,8 @@ mod tests {
         let data = response.data.expect("library.list carries data");
 
         assert_eq!(data.get("total").and_then(Value::as_u64), Some(2));
+        assert_eq!(data.get("total_bytes").and_then(Value::as_u64), Some(10));
+        assert!(data.get("snapshot").and_then(Value::as_str).is_some());
         assert_eq!(data.get("offset").and_then(Value::as_u64), Some(0));
         let clips = data.get("clips").and_then(Value::as_array).expect("clips is an array");
         assert_eq!(clips.len(), 1, "the page honours limit while total does not");

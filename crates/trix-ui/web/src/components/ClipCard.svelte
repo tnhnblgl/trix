@@ -6,13 +6,17 @@
   import Menu, { type MenuItem } from './ui/Menu.svelte';
 
   let {
-    clip, clipDir, selected = false, onopen, onselect, onfavorite, onrename, onreveal, ondelete,
+    clip, clipDir, selected = false, selectable = false, checked = false, ontoggle,
+    onopen, onselect, onfavorite, onrename, onreveal, ondelete,
   }: {
     clip: ClipMeta;
     clipDir: string;
     selected?: boolean;
+    selectable?: boolean;
+    checked?: boolean;
+    ontoggle?: (range: boolean) => void;
     onopen: () => void;
-    onselect: () => void;
+    onselect: (event?: MouseEvent) => void;
     onfavorite: () => void;
     onrename: (title: string) => void;
     onreveal: () => void;
@@ -68,14 +72,19 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <!-- The right-click is a pointer shortcut to the `⋯` menu's own items, not
      the only way to reach them, so the card needs no role for it. -->
-<div class="card" class:selected class:menuOpen={menuOpen || menuAt !== null} class:rightClicked={menuAt !== null}
+<div class="card" class:selected class:checked class:menuOpen={menuOpen || menuAt !== null} class:rightClicked={menuAt !== null}
   {oncontextmenu}>
+  {#if selectable}
+    <input class="select-clip" type="checkbox" data-card-control
+      aria-label="Select {clip.title}" {checked}
+      onclick={(event) => { event.stopPropagation(); ontoggle?.(event.shiftKey); }} />
+  {/if}
   <!-- `aria-label`, because nothing inside this button can name it: the
        thumbnail is `alt=""` (it is the clip, not a description of it) and the
        only other child is the duration badge, so without this the card
        announced itself as "0:12, button". -->
   <button type="button" class="thumb" aria-label={clip.title} onclick={onselect} ondblclick={onopen}>
-    <img src={thumbUrl(clipDir, clip.id)} alt="" loading="lazy" />
+    <img src={thumbUrl(clipDir, clip.id)} alt="" loading="lazy" decoding="async" />
     <span class="len tnum">{formatDuration(clip.duration_ms)}</span>
   </button>
 
@@ -134,7 +143,7 @@
 </div>
 
 <style>
-  .card { display: grid; gap: 8px; transition: transform var(--t-fast) var(--ease); }
+  .card { position: relative; display: grid; gap: 8px; min-width: 0; transition: transform var(--t-fast) var(--ease); }
   .card:hover { transform: translateY(-2px); }
 
   /* The open menu is what needs this, not the card.
@@ -173,6 +182,8 @@
   .card.selected .thumb {
     box-shadow: inset 0 0 0 2px var(--accent), 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
+  .card.checked .thumb { box-shadow: inset 0 0 0 3px var(--accent), 0 0 0 2px var(--accent); }
+  .select-clip { position: absolute; top: 8px; left: 8px; z-index: 2; width: 18px; height: 18px; margin: 0; accent-color: var(--accent); cursor: pointer; }
   .len {
     position: absolute;
     right: 6px;

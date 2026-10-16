@@ -248,11 +248,11 @@ describe('moveSelection', () => {
 describe('the card/grid control marker', () => {
   it('is carried by both of the card controls the grid must not claim', () => {
     const marks = clipCardSource.split(CARD_CONTROL_ATTR).length - 1;
-    // The overflow button and the rename box. If a third control is ever added
+    // The overflow button, rename box, and multi-selection checkbox. If another control is added
     // to a card, this number is a decision to make deliberately -- does the
     // grid have to withhold Space and Enter from it too? -- not a nuisance to
     // bump past.
-    expect(marks).toBe(2);
+    expect(marks).toBe(3);
   });
 
   it('is what the grid actually searches for', () => {

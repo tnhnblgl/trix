@@ -163,7 +163,7 @@ left to be reverse-engineered out of `dispatch.rs`.
 | `clip` | — | the `ClipMeta` (§5.2) of the clip just saved, bare. An empty ring is an *error* response, not an `ok` with no clip |
 | `config.get` | — | every `Config` key, plus `clip_dir_resolved` — the absolute directory an empty `clip_dir` actually resolves to — and `config_file_exists` — whether this daemon's config file is present on disk (§7.4: no file means first run). Like `clip_dir_resolved`, `config_file_exists` is not a config key and is not settable. **`autostart` is read live from the registry, not from the config file** (§7.3): a user who deleted the `Run` entry by hand has disabled autostart whatever the file says, so the file's value is advisory and this is the answer to trust |
 | `config.set` | `{<key>: <value>, …}` | `{accepted:{<key>:<value>,…}, requires_rearm:[<key>,…]}`. `accepted` is read back out of the saved config, not echoed from the request. All-or-nothing: one bad key refuses the whole request and writes nothing. **`autostart` writes the registry**, and does so *before* the config file, so a failure there refuses the whole request rather than leaving the other keys persisted |
-| `library.list` | `{offset, limit}` | `{clips:[ClipMeta,…], total, offset}`, newest first. `total` is the *unpaged* count, so "3 of 47" is renderable; `offset` is echoed back |
+| `library.list` | `{offset, limit}` | `{clips:[ClipMeta,…], total, total_bytes, snapshot, offset}`, newest first. `total` and `total_bytes` cover the entire library; `snapshot` is an opaque token that changes when cached library metadata changes, allowing a client to restart inconsistent pagination; `offset` is echoed back |
 | `library.delete` | `{clip_id}` | `{clip_id}` — removes mp4, json, and jpg |
 | `library.rename` | `{clip_id, title}` | the updated `ClipMeta`, bare — edits metadata only, the filename never moves, so the id is unchanged |
 | `library.favorite` | `{clip_id, favorite}` | the updated `ClipMeta`, bare |
@@ -182,6 +182,11 @@ reaching the filesystem.
 
 `armed`, `disarmed`, `clip_saved`, `hotkey_pressed`, `hotkey_rebound`, `config_changed`,
 `export_progress`, `export_done`, `error`, and `stats`.
+
+`clip_saved` carries the saved `ClipMeta` plus `removed_ids` for clips pruned by the storage
+ceiling, and `library_total` / `library_bytes` for the resulting cached library. Clients reconcile
+with `library.list` after save bursts because concurrent recordings and exports can publish out
+of order. The UI pages through all metadata while mounting only nearby thumbnail rows.
 
 `stats` is emitted only while a client has subscribed. This makes the existing `stats_seconds = 0`
 default coherent: with no UI attached, nothing measures anything.

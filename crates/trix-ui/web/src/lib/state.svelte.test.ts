@@ -104,12 +104,15 @@ const shot = (id: string): ShotMeta => ({
 });
 
 beforeEach(() => {
+  app.invalidateClips();
   callMock.mockReset();
   invokeMock.mockReset();
   vi.mocked(onDaemonEvent).mockClear();
   vi.mocked(onConnected).mockClear();
   app.clips = [];
   app.total = 0;
+  app.totalBytes = null;
+  app.clipsLoadError = null;
   app.selected = 0;
   app.favoriteIds = null;
   app.shots = [];
@@ -161,10 +164,8 @@ describe('AppState.remove', () => {
     await app.remove('a');
 
     expect(app.clips.map((c) => c.id)).toEqual(['b', 'c']);
-    // 'c' is now at index 1, but selection tracked the deleted clip's slot
-    // (index 0), not the clip the user was actually looking at -- that is
-    // the documented, if surprising, contract of `remove`.
-    expect(app.selected).toBe(0);
+    expect(app.current?.id).toBe('c');
+    expect(app.selected).toBe(1);
   });
 
   it('returns to the grid once the last clip in the library is gone', async () => {
@@ -193,6 +194,147 @@ describe('AppState.remove', () => {
     expect(app.clips.map((c) => c.id)).toEqual(['a', 'b']);
     expect(app.total).toBe(2);
     expect(app.toasts.at(-1)?.text).toContain('pipe closed');
+  });
+});
+
+describe('large clip libraries', () => {
+  it('loads every page beyond 1000 clips, including older favourites', async () => {
+    const library = Array.from({ length: 1205 }, (_, i) => ({ ...clip(String(i)), favorite: i === 1204 }));
+    callMock.mockImplementation(async (_cmd, { offset, limit }) => ({
+      clips: library.slice(offset, offset + limit), total: 1205, offset,
+      total_bytes: 23_874_884_160, snapshot: 'stable',
+    }));
+    await app.loadClips();
+    expect(app.clips).toHaveLength(1205);
+    expect(app.clips.at(-1)?.id).toBe('1204');
+    expect(app.totalBytes).toBe(23_874_884_160);
+    app.setFavoritesOnly(true);
+    expect(app.visible.map(c => c.id)).toEqual(['1204']);
+  });
+
+  it('shows the complete size while the remaining pages are still loading', async () => {
+    let finish!: (value: unknown) => void;
+    callMock.mockResolvedValueOnce({ clips: [clip('a')], total: 2, offset: 0, total_bytes: 99 });
+    callMock.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const loading = app.loadClips();
+    await vi.waitFor(() => expect(app.clipsLoading).toBe(true));
+    await vi.waitFor(() => expect(app.totalBytes).toBe(99));
+    finish({ clips: [clip('b')], total: 2, offset: 1, total_bytes: 99 });
+    await loading;
+    expect(app.clips.map(c => c.id)).toEqual(['a', 'b']);
+    expect(app.clipsLoading).toBe(false);
+  });
+
+  it('restarts paging when a deletion shifts the next page', async () => {
+    callMock.mockResolvedValueOnce({ clips: [clip('a')], total: 3, offset: 0, snapshot: 'old' });
+    callMock.mockResolvedValueOnce({ clips: [clip('c')], total: 2, offset: 1, snapshot: 'new' });
+    callMock.mockResolvedValueOnce({ clips: [clip('b'), clip('c')], total: 2, offset: 0, snapshot: 'new' });
+    await app.loadClips();
+    expect(app.clips.map(c => c.id)).toEqual(['b', 'c']);
+    expect(app.total).toBe(2);
+  });
+
+  it('ignores a late response from a superseded folder load', async () => {
+    let finish!: (value: unknown) => void;
+    callMock.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const oldLoad = app.loadClips();
+    callMock.mockResolvedValueOnce({ clips: [clip('new-folder')], total: 1, offset: 0, total_bytes: 42 });
+    await app.loadClips();
+    finish({ clips: [clip('old-folder')], total: 1, offset: 0, total_bytes: 100 });
+    await oldLoad;
+    expect(app.clips.map(c => c.id)).toEqual(['new-folder']);
+    expect(app.totalBytes).toBe(42);
+  });
+
+  it('reports an incomplete load and can retry without losing or duplicating clips', async () => {
+    callMock.mockResolvedValueOnce({ clips: [clip('a')], total: 2, offset: 0, total_bytes: 123 });
+    callMock.mockRejectedValueOnce(new Error('pipe closed'));
+    await app.loadClips();
+    expect(app.clipsLoadError).toContain('pipe closed');
+    expect(app.totalBytes).toBe(123);
+    callMock.mockResolvedValueOnce({ clips: [clip('a'), clip('b')], total: 2, offset: 0 });
+    await app.loadClips();
+    expect(app.clips.map(c => c.id)).toEqual(['a', 'b']);
+    expect(app.clipsLoadError).toBeNull();
+    expect(app.totalBytes).toBe(39_624_704);
+  });
+});
+
+describe('bulk clip deletion', () => {
+  it('reconciles a save that reports totals including an in-flight deletion', async () => {
+    app.clips = [clip('a'), clip('b')];
+    app.total = 2;
+    app.totalBytes = 39_624_704;
+    const handle = registerDaemonEventHandler();
+    callMock.mockImplementation(async (command) => {
+      if (command === 'library.delete') {
+        handle({ event: 'clip_saved', data: { ...clip('new'), library_total: 2, library_bytes: 39_624_704 } });
+        return {};
+      }
+      return { clips: [clip('new'), clip('b')], total: 2, offset: 0, total_bytes: 39_624_704 };
+    });
+    await app.removeMany(['a']);
+    expect(app.clips.map(c => c.id)).toEqual(['new', 'b']);
+    expect(app.total).toBe(2);
+    expect(app.totalBytes).toBe(39_624_704);
+  });
+  it('refuses an old-folder confirmation even before the folder status refresh completes', async () => {
+    const confirmedContext = app.libraryContext;
+    app.invalidateClips();
+    app.clips = [clip('same-id-in-new-folder')];
+    let deleted = false;
+    callMock.mockImplementation(async () => { deleted = true; return {}; });
+    const failed = await app.removeMany(['same-id-in-new-folder'], true, confirmedContext);
+    expect(deleted).toBe(false);
+    expect(failed).toEqual(['same-id-in-new-folder']);
+    expect(app.clips).toHaveLength(1);
+  });
+
+  it('stops a queued batch when the folder changes during the first deletion', async () => {
+    app.clips = [clip('a'), clip('b')];
+    const deleted: string[] = [];
+    callMock.mockImplementation(async (_cmd, { clip_id }) => {
+      deleted.push(clip_id);
+      app.invalidateClips();
+      app.clips = [clip('b')];
+      app.total = 1;
+      app.totalBytes = 19_812_352;
+      return {};
+    });
+    await app.removeMany(['a', 'b']);
+    expect(deleted).toEqual(['a']);
+    expect(app.clips.map(c => c.id)).toEqual(['b']);
+    expect(app.totalBytes).toBe(19_812_352);
+  });
+  it('deletes unique selected clips and keeps failed clips available for retry', async () => {
+    app.clips = [clip('a'), clip('b'), clip('c')];
+    app.total = 3;
+    app.totalBytes = 59_437_056;
+    app.selected = 1;
+    callMock.mockImplementation(async (_cmd, { clip_id }) => {
+      if (clip_id === 'b') throw new Error('file in use');
+      return {};
+    });
+    const failed = await app.removeMany(['a', 'a', 'b']);
+    expect(failed).toEqual(['b']);
+    expect(app.clips.map(c => c.id)).toEqual(['b', 'c']);
+    expect(app.current?.id).toBe('b');
+    expect(app.total).toBe(2);
+    expect(app.totalBytes).toBe(39_624_704);
+    expect(app.toasts.at(-1)?.text).toContain('file in use');
+    expect(app.deleteProgress).toBeNull();
+  });
+
+  it('returns to an empty grid after deleting the entire library', async () => {
+    app.clips = [clip('a'), clip('b')];
+    app.total = 2;
+    app.totalBytes = 39_624_704;
+    callMock.mockResolvedValue({});
+    await app.removeMany(['a', 'b']);
+    expect(app.clips).toEqual([]);
+    expect(app.total).toBe(0);
+    expect(app.totalBytes).toBe(0);
+    expect(app.view).toBe('grid');
   });
 });
 
@@ -677,6 +819,40 @@ describe('AppState favourites filter', () => {
 });
 
 describe('wireDaemon: clip_saved', () => {
+  it('reconciles out-of-order save summaries without waiting for a reconnect', async () => {
+    vi.useFakeTimers();
+    try {
+      app.connected = true;
+      app.clips = [{ ...clip('a'), favorite: true }];
+      app.setFavoritesOnly(true);
+      const handle = registerDaemonEventHandler();
+      callMock.mockResolvedValue({ clips: [clip('b'), clip('a')], total: 2, offset: 0, total_bytes: 39_624_704 });
+      handle({ event: 'clip_saved', data: { ...clip('b'), library_total: 2, library_bytes: 39_624_704 } });
+      handle({ event: 'clip_saved', data: { ...clip('a'), library_total: 1, library_bytes: 19_812_352 } });
+      await vi.advanceTimersByTimeAsync(150);
+      expect(app.total).toBe(2);
+      expect(app.totalBytes).toBe(39_624_704);
+      expect(app.clips.map(c => c.id)).toEqual(['b', 'a']);
+      // A background refresh must not remove an unstarred clip from the
+      // current favourites view; that snapshot changes on the next toggle.
+      expect(app.visible.map(c => c.id)).toEqual(['a']);
+    } finally {
+      app.invalidateClips();
+      vi.useRealTimers();
+    }
+  });
+  it('removes automatically pruned clips and uses the complete post-save totals', () => {
+    app.clips = [clip('a'), clip('old')];
+    app.total = 2;
+    app.totalBytes = 39_624_704;
+    app.selected = 0;
+    const handle = registerDaemonEventHandler();
+    handle({ event: 'clip_saved', data: { ...clip('new'), removed_ids: ['old'], library_total: 2, library_bytes: 39_624_704 } });
+    expect(app.clips.map(c => c.id)).toEqual(['new', 'a']);
+    expect(app.current?.id).toBe('a');
+    expect(app.total).toBe(2);
+    expect(app.totalBytes).toBe(39_624_704);
+  });
   it('prepends a genuinely new clip, bumps the total, and toasts', () => {
     app.clips = [clip('a'), clip('b')];
     app.total = 2;
