@@ -10,6 +10,7 @@ use anyhow::Result;
 
 use super::{
     AudioPacket, AudioTimeline, ENCODER_BLOCK_ALIGN,
+    level::{InputLevel, InputLevelMeter},
     source::{AudioCapture, AudioSourceKind},
 };
 
@@ -99,6 +100,7 @@ fn mix_into(dst: &mut [u8], src: &[u8], gain: f32) {
 pub struct AudioGains {
     system: AtomicU32,
     mic: AtomicU32,
+    pub(super) input_meter: InputLevelMeter,
 }
 
 impl AudioGains {
@@ -106,6 +108,7 @@ impl AudioGains {
         Arc::new(Self {
             system: AtomicU32::new(system_percent.min(MAX_VOLUME_PERCENT)),
             mic: AtomicU32::new(mic_percent.min(MAX_VOLUME_PERCENT)),
+            input_meter: InputLevelMeter::default(),
         })
     }
 
@@ -130,6 +133,11 @@ impl AudioGains {
 
     pub fn mic(&self) -> f32 {
         percent_to_gain(self.mic_percent())
+    }
+
+    /// Reading renews a short measurement lease; it never opens a device.
+    pub fn input_level(&self) -> InputLevel {
+        self.input_meter.sample()
     }
 }
 
@@ -177,11 +185,22 @@ impl AudioMixer {
     /// device held exclusively, driver refusal — is logged and omitted, so
     /// audio can never be the reason an arm fails.
     pub fn start_sources(gains: Arc<AudioGains>) -> Self {
+        Self::start_sources_with_device(gains, "")
+    }
+
+    pub fn start_sources_with_device(gains: Arc<AudioGains>, mic_device: &str) -> Self {
+        gains.input_meter.set_active(false);
         let system = Self::should_open(gains.system_percent())
-            .then(|| Self::open(AudioSourceKind::SystemAudio))
+            .then(|| Self::open(AudioSourceKind::SystemAudio, None, None))
             .flatten();
         let mic = Self::should_open(gains.mic_percent())
-            .then(|| Self::open(AudioSourceKind::Microphone))
+            .then(|| {
+                Self::open(
+                    AudioSourceKind::Microphone,
+                    (!mic_device.is_empty()).then(|| mic_device.to_owned()),
+                    Some(Arc::clone(&gains)),
+                )
+            })
             .flatten();
         Self { system, mic, gains, frames_emitted: 0, mixed: Vec::new() }
     }
@@ -198,8 +217,12 @@ impl AudioMixer {
         percent > 0
     }
 
-    fn open(kind: AudioSourceKind) -> Option<Source> {
-        match AudioCapture::start(kind) {
+    fn open(
+        kind: AudioSourceKind,
+        device_id: Option<String>,
+        gains: Option<Arc<AudioGains>>,
+    ) -> Option<Source> {
+        match AudioCapture::start_selected(kind, device_id, gains) {
             Ok((capture, rx)) => Some(Source {
                 kind,
                 rx,

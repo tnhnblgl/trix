@@ -1,4 +1,4 @@
-export type FieldKind = 'number' | 'text' | 'select' | 'bool' | 'folder' | 'hotkey' | 'slider' | 'sound' | 'tier';
+export type FieldKind = 'number' | 'text' | 'select' | 'bool' | 'folder' | 'hotkey' | 'slider' | 'sound' | 'tier' | 'input';
 
 export type Field = {
   key: string;
@@ -132,6 +132,7 @@ export const FIELDS: Field[] = [
     ], help: 'If Windows draws a yellow border around your screen while Trix is armed, choose Desktop Duplication -- it is not subject to that border. It cannot record the mouse cursor, in clips or in screenshots. Automatic is Windows Graphics Capture.' },
 
   { key: 'system_volume', label: 'PC sound', kind: 'slider', section: 'Audio', ...span('system_volume'), help: 'How loud your PC\'s own sound is in the clip. Affects the recording only, never your Windows volume. 100 is the sound untouched; above that Trix amplifies it, which can distort. 0 turns it off.' },
+  { key: 'mic_device', label: 'Input device', kind: 'input', section: 'Audio', help: 'Microphone used in your clips. Changes apply after re-arming.' },
   { key: 'mic_volume', label: 'Microphone', kind: 'slider', section: 'Audio', ...span('mic_volume'), help: 'How loud your voice is in the clip. 100 is your microphone untouched; above that Trix amplifies it, which is the fix for a mic that stays too quiet even at full Windows level, and can distort. 0 closes the microphone entirely, so Windows stops showing Trix as using it.' },
 
   { key: 'bitrate_kbps', label: 'Target bitrate', kind: 'tier', section: 'Quality', ...span('bitrate_kbps'), tiers: BITRATE_TIERS, help: 'How much data a second of video gets. Higher tiers hold up better in fast motion and cost more disk per clip -- and more RAM, because the replay buffer holds this many seconds of it. Custom takes any number.' },
@@ -148,8 +149,8 @@ export const FIELDS: Field[] = [
   { key: 'screenshot_hotkey', label: 'Screenshot hotkey', kind: 'hotkey', section: 'Trix', boundKey: 'screenshot_hotkey_bound', help: 'Saves a picture of the screen and copies it to your clipboard. Only works while Trix is armed, because the picture comes from the recording that is already running.' },
   { key: 'hotkey_mode', label: 'Hotkey detection', kind: 'select', section: 'Trix', options: [
       { value: 'standard', label: 'Standard' },
-      { value: 'low_level', label: 'Low Level - Detection Guarantee' },
-    ], help: 'Applies to both hotkeys above. If your hotkey does nothing in a game, this is the setting to try. Standard asks Windows to reserve the combination: that is refused outright when another program already owns it, and even when it succeeds some games and overlays take the key before Windows hands it over -- confirmed in Euro Truck Simulator 2, where Trix held the key and never saw a press. Low level watches the keyboard directly, so it sees the key either way, and passes the key on so whatever else uses it keeps working. Some anti-cheat software is wary of programs that watch the keyboard; OBS, Discord and Steam all do it, but Trix cannot promise how yours reads it. Neither mode helps if the game runs as administrator and Trix does not.' },
+      { value: 'low_level', label: 'Low level' },
+    ], help: 'Use Low level if a hotkey does nothing in a game. Anti-cheat software may block it; games running as administrator need Trix running as administrator too.' },
   { key: 'screenshot_sound', label: 'Screenshot sound', kind: 'bool', section: 'Trix', help: 'A short blip when a screenshot is saved, different from the clip sound so you can tell them apart without looking.' },
   { key: 'clip_sound', label: 'Clip sound', kind: 'bool', section: 'Trix', help: 'Plays a sound when a clip is saved, even when the Trix window is closed.' },
   { key: 'clip_sound_path', label: 'Sound file', kind: 'sound', section: 'Trix', help: 'Your own sound, or Trix\'s built-in one. mp3, wav, m4a and anything else Windows can play. Only the first 10 seconds are used.' },

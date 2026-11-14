@@ -899,7 +899,7 @@ fn start_session(
     let (width, height) = (monitor.width, monitor.height);
     let clip_dir = config.clip_dir_path();
 
-    let mixer = AudioMixer::start_sources(Arc::clone(gains));
+    let mixer = AudioMixer::start_sources_with_device(Arc::clone(gains), &config.mic_device);
 
     let flags = ReplayFlags {
         settings: RecorderSettings {

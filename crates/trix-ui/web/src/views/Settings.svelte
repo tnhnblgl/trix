@@ -4,7 +4,9 @@
   import { call, onDaemonEvent } from '../lib/ipc';
   import { app, updates } from '../lib/state.svelte';
   import { FIELDS, SECTIONS, hotkeyProblem, unknownKeys, validate } from '../lib/settings';
+  import { reconcileInputRearm } from '../lib/audio-input';
   import Field from '../components/Field.svelte';
+  import InputDevice from '../components/InputDevice.svelte';
   import Button from '../components/ui/Button.svelte';
   import Icon from '../components/ui/Icon.svelte';
   import type { Monitor } from '../lib/types';
@@ -176,13 +178,24 @@
     <h2>{section}</h2>
     <div class="panel">
       {#each FIELDS.filter((f) => f.section === section) as field (field.key)}
-        <Field
+        {#if field.kind === 'input'}
+          <InputDevice
+            value={String(config[field.key] ?? '')}
+            volume={Number(config['mic_volume'] ?? 0)}
+            armed={app.armed}
+            connected={app.connected}
+            pending={app.rearmNeeded.some(key => key === 'mic_device' || key === 'mic_volume')}
+            onrearmneeded={(keys) => { app.rearmNeeded = reconcileInputRearm(app.rearmNeeded, keys); }}
+            onchange={(value) => set(field.key, value)} />
+        {:else}
+          <Field
           {field} {config} {monitors}
           problem={hotkeyProblem(field, field.boundKey ? app.status?.[field.boundKey] : null, config)}
           onset={set}
           onpickfolder={pickFolder}
           onpicksound={pickSound}
           ontestsound={testSound} />
+        {/if}
       {/each}
       {#if section === 'Updates'}
         <div class="row">

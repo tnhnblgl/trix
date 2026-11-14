@@ -130,6 +130,9 @@ pub struct Config {
     /// holding the microphone open while its own level reads 0 is
     /// indistinguishable, from outside, from one that is lying about it.
     pub mic_volume: u32,
+    /// Capture endpoint ID selected in Trix. Empty uses the Windows default.
+    /// A missing named endpoint stays unavailable; it never opens another mic.
+    pub mic_device: String,
     /// Start the daemon at login (spec §7.3). Opt-in and off by default —
     /// adding yourself to startup uninvited is the behaviour people resent most
     /// in this category.
@@ -250,6 +253,7 @@ impl Default for Config {
             max_library_gb: 0,
             system_volume: 100,
             mic_volume: 100,
+            mic_device: String::new(),
             autostart: false,
             auto_arm: false,
             check_for_updates: true,
@@ -457,6 +461,15 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn microphone_selection_defaults_and_round_trips() {
+        let old: Config = toml::from_str("fps = 60\n").unwrap();
+        assert_eq!(old.mic_device, "");
+        let chosen = Config { mic_device: "{capture-endpoint-id}".into(), ..old };
+        let restored: Config = toml::from_str(&toml::to_string(&chosen).unwrap()).unwrap();
+        assert_eq!(restored.mic_device, "{capture-endpoint-id}");
+    }
 
     /// The default must be `Auto`, and `Auto` must be WGC. Desktop Duplication
     /// has no mouse cursor, so a release that made it anybody's default without

@@ -6,7 +6,7 @@ describe('FIELDS', () => {
     const shipped = [
       'fps', 'bitrate_kbps', 'max_bitrate_kbps', 'rate_control', 'replay_seconds',
       'monitor_index', 'clip_hotkey', 'gpu_priority', 'capture_method', 'stats_seconds', 'clip_dir',
-      'max_library_gb', 'autostart', 'system_volume', 'mic_volume', 'check_for_updates',
+      'max_library_gb', 'autostart', 'system_volume', 'mic_volume', 'mic_device', 'check_for_updates',
       'clip_sound', 'clip_sound_path', 'discord_presence',
       'screenshot_hotkey', 'screenshot_sound',
       'hotkey_mode',

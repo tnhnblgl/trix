@@ -22,7 +22,10 @@ use wasapi::{
     WaveFormat,
 };
 
-use super::{AudioPacket, CHANNELS, SAMPLE_RATE};
+use super::{
+    AudioGains, AudioPacket, CHANNELS, SAMPLE_RATE,
+    devices::{AudioApartment, capture_device_by_id},
+};
 
 /// Which device a capture session reads.
 ///
@@ -66,11 +69,14 @@ struct WasapiSession {
 }
 
 impl WasapiSession {
-    fn open(kind: AudioSourceKind, format: &WaveFormat) -> Result<Self> {
+    fn open(kind: AudioSourceKind, format: &WaveFormat, device_id: Option<&str>) -> Result<Self> {
         let enumerator = DeviceEnumerator::new().map_err(|e| anyhow!("device enumerator: {e}"))?;
-        let device = enumerator
-            .get_default_device(&kind.direction())
-            .map_err(|e| anyhow!("no default {} device: {e}", kind.label()))?;
+        let device = match device_id {
+            Some(id) => capture_device_by_id(&enumerator, id)?,
+            None => enumerator
+                .get_default_device(&kind.direction())
+                .map_err(|e| anyhow!("no default {} device: {e}", kind.label()))?,
+        };
         let mut client = device.get_iaudioclient().map_err(|e| anyhow!("audio client: {e}"))?;
         client
             .initialize_client(
@@ -98,6 +104,14 @@ pub struct AudioCapture {
 
 impl AudioCapture {
     pub fn start(kind: AudioSourceKind) -> Result<(Self, Receiver<AudioPacket>)> {
+        Self::start_selected(kind, None, None)
+    }
+
+    pub(super) fn start_selected(
+        kind: AudioSourceKind,
+        device_id: Option<String>,
+        gains: Option<Arc<AudioGains>>,
+    ) -> Result<(Self, Receiver<AudioPacket>)> {
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = std::sync::mpsc::channel();
         let stop_flag = stop.clone();
@@ -106,7 +120,9 @@ impl AudioCapture {
                 AudioSourceKind::SystemAudio => "trix-audio".into(),
                 AudioSourceKind::Microphone => "trix-mic".into(),
             })
-            .spawn(move || capture_loop(kind, &stop_flag, &tx))
+            .spawn(move || {
+                capture_loop(kind, device_id.as_deref(), gains.as_deref(), &stop_flag, &tx)
+            })
             .context("failed to spawn audio thread")?;
         Ok((Self { stop, thread }, rx))
     }
@@ -120,19 +136,42 @@ impl AudioCapture {
     }
 }
 
-fn capture_loop(kind: AudioSourceKind, stop: &AtomicBool, tx: &Sender<AudioPacket>) -> Result<()> {
-    wasapi::initialize_mta().ok().context("COM MTA init failed")?;
+fn capture_loop(
+    kind: AudioSourceKind,
+    device_id: Option<&str>,
+    gains: Option<&AudioGains>,
+    stop: &AtomicBool,
+    tx: &Sender<AudioPacket>,
+) -> Result<()> {
+    // Clear availability on every exit, including initialization/read errors.
+    struct MeterGuard<'a>(Option<&'a AudioGains>);
+    impl Drop for MeterGuard<'_> {
+        fn drop(&mut self) {
+            if let Some(gains) = self.0 {
+                gains.input_meter.set_active(false);
+            }
+        }
+    }
+    let _meter = MeterGuard(gains);
+    let _apartment = AudioApartment::enter()?;
     // i16 directly: the audio engine autoconverts its float mix (and a mono
     // or 44.1 kHz microphone), so packets are already in the encoder's format.
     let format = WaveFormat::new(16, 16, &SampleType::Int, SAMPLE_RATE, CHANNELS, None);
-    let mut session = WasapiSession::open(kind, &format)?;
+    let mut session = WasapiSession::open(kind, &format, device_id)?;
     session.client.start_stream().map_err(|e| anyhow!("start stream: {e}"))?;
+    if let Some(gains) = gains {
+        gains.input_meter.set_active(true);
+    }
 
     while !stop.load(Ordering::Relaxed) {
         if session.event.wait_for_event(100).is_err() {
             continue; // system-wide silence: nothing rendering, keep waiting
         }
-        while let Ok(Some(frames)) = session.capture.get_next_packet_size() {
+        while let Some(frames) = session
+            .capture
+            .get_next_packet_size()
+            .map_err(|e| anyhow!("audio device unavailable: {e}"))?
+        {
             if frames == 0 {
                 break;
             }
@@ -143,10 +182,14 @@ fn capture_loop(kind: AudioSourceKind, stop: &AtomicBool, tx: &Sender<AudioPacke
             if read_frames == 0 {
                 break;
             }
-            let packet = AudioPacket {
-                qpc_100ns: info.timestamp as i64,
-                data: session.scratch[..read_frames as usize * session.block_align].to_vec(),
-            };
+            let pcm = &mut session.scratch[..read_frames as usize * session.block_align];
+            if info.flags.silent {
+                pcm.fill(0);
+            }
+            if let Some(gains) = gains {
+                gains.input_meter.observe(pcm, gains.mic());
+            }
+            let packet = AudioPacket { qpc_100ns: info.timestamp as i64, data: pcm.to_vec() };
             if tx.send(packet).is_err() {
                 return Ok(()); // consumer gone — recording ended
             }
@@ -165,7 +208,7 @@ pub fn record_wav(seconds: u64, path: &Path) -> Result<()> {
     // f32 stereo 48 kHz with autoconvert: the engine resamples whatever the
     // device mix format is, so downstream code sees exactly one format.
     let format = WaveFormat::new(32, 32, &SampleType::Float, SAMPLE_RATE, CHANNELS, None);
-    let mut session = WasapiSession::open(AudioSourceKind::SystemAudio, &format)?;
+    let mut session = WasapiSession::open(AudioSourceKind::SystemAudio, &format, None)?;
     let block_align = session.block_align;
     let mut pcm: Vec<u8> = Vec::with_capacity(SAMPLE_RATE * block_align * seconds as usize);
 
@@ -294,5 +337,29 @@ mod tests {
         // third-party enum and is not guaranteed to implement `PartialEq`.
         assert!(matches!(AudioSourceKind::SystemAudio.direction(), Direction::Render));
         assert!(matches!(AudioSourceKind::Microphone.direction(), Direction::Capture));
+    }
+
+    #[test]
+    #[ignore = "opens a real microphone briefly; requires an available capture device"]
+    fn selected_microphone_stream_updates_meter_and_closes() {
+        let inputs = super::super::input_devices().expect("enumerate capture devices");
+        let device = inputs.first().expect("no microphone is available for this hardware check");
+        let gains = AudioGains::new(0, 100);
+        gains.input_level();
+        let (capture, rx) = AudioCapture::start_selected(
+            AudioSourceKind::Microphone,
+            Some(device.id.clone()),
+            Some(Arc::clone(&gains)),
+        )
+        .expect("start selected microphone");
+        let packet = rx.recv_timeout(Duration::from_secs(2));
+        let level = gains.input_level();
+        // Join even when the receive failed, so the check cannot leave a mic open.
+        let stopped = capture.stop();
+        stopped.expect("stop selected microphone");
+        assert!(!packet.expect("selected microphone supplies PCM").data.is_empty());
+        assert!(level.active);
+        assert!(level.peak.is_finite() && (0.0..=1.0).contains(&level.peak));
+        assert!(!gains.input_level().active, "stopping capture clears availability");
     }
 }

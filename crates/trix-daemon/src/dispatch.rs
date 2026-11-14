@@ -157,6 +157,11 @@ impl ClientHandler for Daemon {
                 Ok(found) => named_array(request.id, "encoders", serde_json::to_value(&found)),
                 Err(e) => Response::err(request.id, format!("{e:#}")),
             },
+            Ok(Command::AudioInputs) => match trix_core::capture::audio::input_devices() {
+                Ok(found) => named_array(request.id, "inputs", serde_json::to_value(&found)),
+                Err(e) => Response::err(request.id, format!("{e:#}")),
+            },
+            Ok(Command::AudioInputLevel) => Response::ok(request.id, self.input_level()),
             Ok(Command::StatsSubscribe { enabled }) => {
                 self.clients.set_stats(client, enabled);
                 let mut fields = Map::new();

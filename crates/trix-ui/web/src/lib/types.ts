@@ -73,4 +73,7 @@ export type Monitor = {
 
 export type Encoder = { name: string; codec: string; hardware: boolean };
 
+export type InputDevice = { id: string; name: string; is_default: boolean };
+export type InputLevel = { active: boolean; peak: number; requires_rearm?: string[] };
+
 export type DaemonEvent = { event: string; data: Record<string, unknown> };

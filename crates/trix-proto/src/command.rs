@@ -80,6 +80,10 @@ pub enum Command {
         shot_id: String,
     },
     MonitorsList,
+    /// Available capture endpoints; does not open any microphone stream.
+    AudioInputs,
+    /// Read captured microphone peak and renew the short metering lease.
+    AudioInputLevel,
     EncodersList,
     StatsSubscribe {
         enabled: bool,
@@ -156,6 +160,8 @@ impl Command {
             "shots.reveal" => Self::ShotsReveal { shot_id: str_arg(req, "shot_id")? },
             "shots.copy" => Self::ShotsCopy { shot_id: str_arg(req, "shot_id")? },
             "monitors.list" => Self::MonitorsList,
+            "audio.inputs" => Self::AudioInputs,
+            "audio.input_level" => Self::AudioInputLevel,
             "encoders.list" => Self::EncodersList,
             "stats.subscribe" => Self::StatsSubscribe { enabled: bool_arg(req, "enabled")? },
             "folder.pick" => Self::FolderPick,
@@ -282,6 +288,12 @@ mod tests {
         assert_eq!(parse(r#"{"id":0,"cmd":"folder.pick"}"#).1, Ok(Command::FolderPick));
         assert_eq!(parse(r#"{"id":1,"cmd":"sound.pick"}"#).1, Ok(Command::SoundPick));
         assert_eq!(parse(r#"{"id":2,"cmd":"sound.test"}"#).1, Ok(Command::SoundTest));
+    }
+
+    #[test]
+    fn microphone_commands_parse_without_arguments() {
+        assert_eq!(parse(r#"{"id":1,"cmd":"audio.inputs"}"#).1, Ok(Command::AudioInputs));
+        assert_eq!(parse(r#"{"id":2,"cmd":"audio.input_level"}"#).1, Ok(Command::AudioInputLevel));
     }
 
     #[test]

@@ -42,6 +42,30 @@ use crate::clients::Clients;
 struct Armed {
     engine: EngineHandle,
     _slot: SingleInstance,
+    input: InputSelection,
+}
+
+/// What this recording opened, independent of subsequently saved settings.
+struct InputSelection {
+    device: String,
+    enabled: bool,
+}
+
+impl InputSelection {
+    fn from_config(config: &Config) -> Self {
+        Self { device: config.mic_device.clone(), enabled: config.mic_volume > 0 }
+    }
+
+    fn pending(&self, config: &Config) -> Vec<&'static str> {
+        let mut keys = Vec::new();
+        if self.device != config.mic_device {
+            keys.push("mic_device");
+        }
+        if self.enabled != (config.mic_volume > 0) {
+            keys.push("mic_volume");
+        }
+        keys
+    }
 }
 
 /// What `status` answers with, and the payload of the `armed` event.
@@ -264,7 +288,7 @@ pub struct ArmOutcome {
 /// rather than requiring a re-arm. `screenshot_sound` is read fresh by
 /// `record_saved_shot` on every screenshot, the same way `clip_sound` already
 /// is for clips.
-pub(crate) const REQUIRES_REARM: [&str; 8] = [
+pub(crate) const REQUIRES_REARM: [&str; 9] = [
     "fps",
     "bitrate_kbps",
     "max_bitrate_kbps",
@@ -275,6 +299,7 @@ pub(crate) const REQUIRES_REARM: [&str; 8] = [
     // How frames come off the screen is decided when the session opens: the
     // sink's converter and encoder are built on the backend's own device.
     "capture_method",
+    "mic_device",
 ];
 
 /// The two capture levels, which follow a different re-arm rule from every
@@ -620,8 +645,9 @@ impl Daemon {
         // have. On the `?`, `slot` drops and the single-instance mutex is
         // released before the error goes back — a failed arm must not leave the
         // CLI locked out.
+        let input = InputSelection::from_config(&config);
         let engine = EngineHandle::spawn(config, Arc::clone(&self.gains))?;
-        *armed = Some(Armed { engine, _slot: slot });
+        *armed = Some(Armed { engine, _slot: slot, input });
         // Here rather than in the tray's own handler: `arm` is reached from the
         // tray menu, the control socket, and the desktop UI in stage 4, and an
         // icon that only tracked its own menu would show "idle" through a
@@ -664,7 +690,7 @@ impl Daemon {
         // idea the registry exists.
         let mut armed = self.lock_armed();
         let Some(state) = armed.take() else { return Ok(false) };
-        let Armed { engine, _slot } = state;
+        let Armed { engine, _slot, .. } = state;
         // Whatever the rebuild loop finally returned is logged, not propagated.
         // By the time it is known, capture *is* stopped and the daemon *is*
         // idle; reporting that as a failed disarm would leave a UI's toggle
@@ -951,6 +977,23 @@ impl Daemon {
     pub fn status(&self) -> DaemonStatus {
         let armed = self.lock_armed();
         self.status_of(armed.as_ref())
+    }
+
+    pub(crate) fn input_level(&self) -> Value {
+        let armed = self.lock_armed();
+        let pending = armed
+            .as_ref()
+            .map(|state| state.input.pending(&self.lock_config()))
+            .unwrap_or_default();
+        let level = self.gains.input_level();
+        let mut fields = Map::new();
+        fields.insert("active".into(), Value::Bool(armed.is_some() && level.active));
+        fields.insert("peak".into(), Value::from(level.peak));
+        fields.insert(
+            "requires_rearm".into(),
+            Value::Array(pending.into_iter().map(Value::from).collect()),
+        );
+        Value::Object(fields)
     }
 
     /// Takes the `armed` slot as an argument rather than locking it, so `arm`
@@ -2871,6 +2914,38 @@ mod tests {
         let mut values = Map::new();
         values.insert(key.into(), Value::from(value));
         values
+    }
+
+    #[test]
+    fn microphone_device_is_persisted_and_requires_rearm() {
+        let (daemon, dir) = writable("mic-device");
+        for device in ["{capture-endpoint-id}", ""] {
+            let mut values = Map::new();
+            values.insert("mic_device".into(), Value::from(device));
+            let update = daemon.set_config(&values).expect("save input choice");
+            assert_eq!(update.accepted["mic_device"], device);
+            assert_eq!(update.requires_rearm, ["mic_device"]);
+            let saved = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+            assert!(saved.contains(&format!("mic_device = {device:?}")));
+        }
+        assert!(daemon.set_config(&one("mic_device", 3)).is_err());
+        assert_eq!(daemon.config_json().unwrap()["mic_device"], "");
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn microphone_pending_changes_survive_a_ui_reconnect() {
+        let config = Config { mic_device: "first".into(), mic_volume: 100, ..Config::default() };
+        let selection = InputSelection::from_config(&config);
+        assert!(selection.pending(&config).is_empty());
+        let mut changed = config.clone();
+        changed.mic_device = "second".into();
+        assert_eq!(selection.pending(&changed), ["mic_device"]);
+        changed.mic_volume = 0;
+        assert_eq!(selection.pending(&changed), ["mic_device", "mic_volume"]);
+        changed.mic_device = "first".into();
+        changed.mic_volume = 50;
+        assert!(selection.pending(&changed).is_empty(), "nonzero gain changes apply live");
     }
 
     #[test]

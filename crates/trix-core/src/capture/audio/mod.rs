@@ -1,9 +1,13 @@
 //! System-audio and microphone capture.
 
+mod devices;
+mod level;
 mod mixer;
 mod source;
 mod timeline;
 
+pub use devices::{InputDevice, input_devices};
+pub use level::InputLevel;
 pub use mixer::{AudioGains, AudioMixer, MAX_VOLUME_PERCENT};
 pub use source::{AudioCapture, AudioSourceKind, record_wav};
 pub use timeline::AudioTimeline;
