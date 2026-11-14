@@ -1,4 +1,4 @@
-Trix 1.6.0
+Trix 1.6.1
 ==========
 
 A clip recorder for Windows, for people whose PC cannot spare the frames.
@@ -8,18 +8,15 @@ cost to your game is close to nothing, and the app itself stays out of the
 way while you play.
 
 
-NEW IN 1.6.0
+NEW IN 1.6.1
 ------------
 
-  * Choose the microphone Trix records in Settings -> Audio, below the
-    Microphone volume slider. Your choice is saved without changing the
-    Windows default. Re-arm to apply a different device.
+  * Microphones recover automatically after being unplugged and reconnected
+    while recording. You do not need to re-arm, and the replay buffer is
+    preserved. The input meter resumes when capture returns.
 
-  * A live input meter shows the microphone sound Trix is capturing, so
-    you can check that it works and see when it is too loud. The meter
-    works while armed and stops measuring when Settings is hidden.
-
-  * Shorter Hotkey detection help makes the setting easier to understand.
+  * Windows default uses the current default microphone when recovering.
+    A specifically selected microphone reconnects only to that device.
 
 
 GETTING STARTED

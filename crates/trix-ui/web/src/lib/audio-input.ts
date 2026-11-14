@@ -2,7 +2,7 @@ import type { InputDevice, InputLevel } from './types';
 
 export function inputOptions(devices: InputDevice[], selected: string) {
   const options = [
-    // The default resolves when capture starts, not when this list refreshes.
+    // The default resolves when capture starts or recovers, not on list refresh.
     { value: '', label: 'Windows default' },
     ...devices.map(d => ({ value: d.id, label: d.name })),
   ];

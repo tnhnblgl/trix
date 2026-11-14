@@ -6,10 +6,10 @@
 
 **A GPU-resident modern game clip recorder for Windows, for people whose PC cannot spare the frames.**
 
-[![Version](https://img.shields.io/badge/version-1.6.0-2b7fff)](https://github.com/tnhnblgl/trix/releases)
+[![Version](https://img.shields.io/badge/version-1.6.1-2b7fff)](https://github.com/tnhnblgl/trix/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6)](#requirements)
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-CE422B)](https://www.rust-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-689%20passing-3fb950)](#verification)
+[![Tests](https://img.shields.io/badge/tests-693%20passing-3fb950)](#verification)
 [![License](https://img.shields.io/badge/license-MIT-3fb950)](LICENSE)
 
 </div>
@@ -167,7 +167,8 @@ invisible but a stalled capture thread back-pressures the compositor and stutter
 - **Hardware encode** on any Intel, AMD or NVIDIA GPU from roughly the last decade.
 - **Audio** — system sound and microphone on independent levels; 0 is a real off switch, not a
   mute, and Trix never opens the device at 0. Choose a microphone in Settings and check its
-  captured level while armed. The meter only measures while Settings is visible.
+  captured level while armed. Disconnected audio devices reconnect automatically without
+  clearing the replay buffer. The meter only measures while Settings is visible.
 - **GPU priority** defaults to below-normal, so contention costs a capture frame, not your fps.
 - **Two ways to hear a hotkey** — the system hotkey table, or a low-level keyboard hook for the
   keys a game or an overlay takes first. Trix says which combinations actually bound.
@@ -243,7 +244,7 @@ runtime npm dependency (`@tauri-apps/api`). The frontend bundle is 120 KB of JS 
 
 ## Verification
 
-**689 tests pass, none fail** — 421 across the Rust workspace, 268 in the frontend.
+**693 tests pass, none fail** — 425 across the Rust workspace, 268 in the frontend.
 
 ```bash
 cargo test --workspace

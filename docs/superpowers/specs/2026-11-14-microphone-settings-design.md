@@ -23,6 +23,14 @@ Settings, hiding the window, disconnecting, or crashing the UI stops the
 extra sample scan automatically. No new runtime dependencies, permanent
 timer/thread, audio buffer allocation, or UI dependency on trix-core.
 
+Disconnected capture streams release their WASAPI clients and retry once per
+second on the same audio thread. Windows-default selection resolves again;
+an explicit microphone ID never falls back to a different device. The mixer
+keeps its channel and timeline, so the missing audio is silence and recovery
+does not clear the replay buffer. Disarming interrupts the retry wait. Normal
+silence does not reopen a healthy stream; timeout reads still detect a removed
+device even if its event stops firing. Healthy streams do not enumerate devices.
+
 ## Product details
 
 - List available microphones by friendly name and retain an unavailable
@@ -38,7 +46,8 @@ contracts. The user authorized implementation on one new branch.
 ## Protocol additions
 
 - `config.get` / `config.set`: `mic_device` is a string endpoint ID; `""`
-  selects the Windows default at arm time. Changing it requires re-arming.
+  selects the Windows default at arm time and when recovering a lost stream.
+  Changing the saved choice requires re-arming.
 - `audio.inputs`: returns `{ "inputs": [{ "id": "...", "name": "...", "is_default": true }] }`.
   Only active capture endpoints are listed. Enumeration opens no capture stream.
 - `audio.input_level`: returns `{ "active": true, "peak": 0.5, "requires_rearm": [] }`.

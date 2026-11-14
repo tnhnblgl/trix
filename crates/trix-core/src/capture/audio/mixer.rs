@@ -181,9 +181,9 @@ impl AudioMixer {
     /// open while its own slider reads 0 is indistinguishable from one that is
     /// lying about it.
     ///
-    /// Never fails. A source that cannot be opened — no microphone plugged in,
-    /// device held exclusively, driver refusal — is logged and omitted, so
-    /// audio can never be the reason an arm fails.
+    /// Never fails. A missing or disconnected device is retried by its own
+    /// capture thread while its timeline fills with silence, so audio can
+    /// never be the reason an arm fails or the replay buffer is reset.
     pub fn start_sources(gains: Arc<AudioGains>) -> Self {
         Self::start_sources_with_device(gains, "")
     }
