@@ -1,4 +1,4 @@
-Trix 1.5.0
+Trix 1.6.0
 ==========
 
 A clip recorder for Windows, for people whose PC cannot spare the frames.
@@ -8,20 +8,18 @@ cost to your game is close to nothing, and the app itself stays out of the
 way while you play.
 
 
-NEW IN 1.5.0
+NEW IN 1.6.0
 ------------
 
-  * Browse your whole clip library, including more than 1,000 clips.
-    Only nearby thumbnails stay on screen, keeping large libraries light.
+  * Choose the microphone Trix records in Settings -> Audio, below the
+    Microphone volume slider. Your choice is saved without changing the
+    Windows default. Re-arm to apply a different device.
 
-  * The Clips header shows the complete library size, even while clips
-    are still loading. Totals update after saves, deletions and automatic
-    storage cleanup.
+  * A live input meter shows the microphone sound Trix is capturing, so
+    you can check that it works and see when it is too loud. The meter
+    works while armed and stops measuring when Settings is hidden.
 
-  * Delete several clips together: click Select, choose your clips, then
-    Delete selected and confirm once. Select all and Shift-click ranges
-    work across the whole list. Progress is shown during deletion, and
-    any files that could not be deleted stay selected for another try.
+  * Shorter Hotkey detection help makes the setting easier to understand.
 
 
 GETTING STARTED
@@ -73,6 +71,7 @@ DEFAULTS
   GPU priority      low -- your game gets the GPU first
   PC sound          100  (0-200 -- above 100 amplifies)
   Microphone        100  (0-200 -- above 100 amplifies)
+  Input device      Windows default
   Start with Windows  off
   Arm when Trix starts  off
   Discord presence  on
